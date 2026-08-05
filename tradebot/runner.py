@@ -31,7 +31,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import exchange_calendars as ecals
 import requests
 
-from tradebot.alerts import AlertBudget, Cluster, ConsoleAlerter, Decision, TelegramAlerter, format_alert
+from tradebot.alerts import (
+    TREND_EMOJI,
+    AlertBudget,
+    Cluster,
+    ConsoleAlerter,
+    Decision,
+    TelegramAlerter,
+    format_alert,
+)
 from tradebot.costs import breakeven_move
 from tradebot.detectors import (
     DETECTORS,
@@ -116,14 +124,15 @@ class HeartbeatStats:
     def summary_text(self, end_time: datetime) -> str:
         uptime = end_time - self.start_time
         lines = [
-            f"=== heartbeat: {self.session_date} ===",
-            f"uptime: {uptime}",
-            f"detections by tier: {dict(self.tier_counts)}",
-            f"suppressions: {dict(self.suppression_counts)}",
-            f"data gaps: {len(self.data_gaps)}",
+            f"💓 Heartbeat — {self.session_date}",
+            "",
+            f"⏱️ Uptime: {uptime}",
+            f"📊 Detections by tier: {dict(self.tier_counts)}",
+            f"🚫 Suppressions: {dict(self.suppression_counts)}",
+            f"🕳️ Data gaps: {len(self.data_gaps)}",
         ]
         lines.extend(f"  - {g}" for g in self.data_gaps)
-        lines.append(f"errors: {len(self.errors)}")
+        lines.append(f"❗ Errors: {len(self.errors)}")
         return "\n".join(lines)
 
 
@@ -239,8 +248,8 @@ def process_new_bar(
         conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
         if decision == Decision.CAP_REACHED_NOTICE:
             alerter.send(
-                f"[SYSTEM] daily high-tier alert cap ({budget.max_high_per_day}) reached — "
-                "suppressing further HIGH alerts today."
+                f"⚠️ System — daily high-tier alert cap ({budget.max_high_per_day}) reached. "
+                "Suppressing further HIGH alerts today."
             )
             conn.execute(
                 "UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id)
@@ -254,8 +263,11 @@ def send_medium_digest_if_due(budget: AlertBudget, alerter) -> None:
     digest = budget.pop_medium_digest_if_due()
     if not digest:
         return
-    lines = [f"[MEDIUM DIGEST] {len(digest)} cluster(s)"]
-    lines += [f"  {c.symbol} {c.kinds} score={c.score:.2f} — {c.headlines}" for c in digest]
+    lines = [f"🟡 Medium Digest — {len(digest)} cluster(s)", ""]
+    for c in digest:
+        emoji = TREND_EMOJI.get(c.trend, "•")
+        lines.append(f"{emoji} {c.symbol} · {c.kinds} · score {c.score:.2f}")
+        lines.append(f"   {c.headlines}")
     alerter.send("\n".join(lines))
 
 
@@ -263,9 +275,9 @@ def send_log_summary(budget: AlertBudget, alerter) -> None:
     summary = budget.pop_log_summary()
     if not summary:
         return
-    lines = [f"[LOG SUMMARY] {len(summary)} sub-threshold detection(s) today"]
+    lines = [f"⚪ Log Summary — {len(summary)} sub-threshold detection(s) today", ""]
     by_symbol = Counter(c.symbol for c in summary)
-    lines += [f"  {symbol}: {count}" for symbol, count in by_symbol.most_common()]
+    lines += [f"{symbol}: {count}" for symbol, count in by_symbol.most_common()]
     alerter.send("\n".join(lines))
 
 
@@ -335,11 +347,11 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                 send_medium_digest_if_due(budget, alerter)
             except Exception:
                 stats.errors.append(traceback.format_exc())
-                alerter.send(f"[ERROR] {symbol}: exception during evaluation — see logs. Continuing.")
+                alerter.send(f"❌ Error — {symbol}: exception during evaluation. See logs. Continuing.")
                 continue
 
         if HALT_FILE.exists():
-            alerter.send("[SYSTEM] HALT file present — stopping replay.")
+            alerter.send("🛑 System — HALT file present. Stopping replay.")
             halted = True
         if not any_advanced:
             break
@@ -388,7 +400,7 @@ def run_live(alerter) -> HeartbeatStats:
         if loop_start >= close_ts:
             break
         if HALT_FILE.exists() or (halt_checker is not None and halt_checker.check()):
-            alerter.send("[SYSTEM] halt requested — stopping.")
+            alerter.send("🛑 System — halt requested. Stopping.")
             break
 
         for symbol in WATCHLIST:
@@ -399,8 +411,8 @@ def run_live(alerter) -> HeartbeatStats:
                 if is_stale(bar_close_ts(rth_bars[-1]), loop_start):
                     if not stale_notified:
                         alerter.send(
-                            f"[SYSTEM] {symbol} data is stale (>{STALENESS_SECONDS}s) — "
-                            "suppressing alerts until fresh."
+                            f"⏳ System — {symbol} data is stale (>{STALENESS_SECONDS}s). "
+                            "Suppressing alerts until fresh."
                         )
                         stale_notified = True
                     continue
@@ -431,7 +443,7 @@ def run_live(alerter) -> HeartbeatStats:
             except Exception:
                 stats.errors.append(traceback.format_exc())
                 try:
-                    alerter.send(f"[ERROR] {symbol}: exception during evaluation — see logs. Continuing.")
+                    alerter.send(f"❌ Error — {symbol}: exception during evaluation. See logs. Continuing.")
                 except Exception:
                     pass
                 continue

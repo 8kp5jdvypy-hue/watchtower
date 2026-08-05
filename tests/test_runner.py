@@ -64,5 +64,5 @@ def test_heartbeat_stats_summary_includes_tier_and_suppression_counts():
     assert "'high': 2" in text
     assert "'log': 1" in text
     assert "cooldown_active" in text
-    assert "data gaps: 1" in text
+    assert "Data gaps: 1" in text
     assert "BE: no prior daily bar cached" in text

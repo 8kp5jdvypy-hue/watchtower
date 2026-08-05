@@ -68,14 +68,19 @@ def test_format_alert_matches_the_scanner_plan_layout():
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=431.1, ask=431.3, last=431.22)
     text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven())
     lines = text.split("\n")
-    assert lines[0] == "[HIGH] TSLA — gap, rvol_spike"
-    assert lines[1] == "fake headline"
-    assert lines[2] == "score 5.00 ATR | close 431.20 | ATR14 3.85"
-    assert lines[3] == "breakeven 0.85% (1.23 ATR) for 60m hold"
-    assert lines[4] == "range 428.00-430.00 | prior close 425.50"
-    assert lines[5] == "quote 431.10/431.30 (last 431.22)"
-    assert lines[6] == "2026-07-23 09:35 ET"
-    assert lines[7] == "id abc123 | vf665fba"
+    assert lines[0] == "🔴 HIGH — TSLA 📈"
+    assert lines[1] == "gap, rvol_spike"
+    assert lines[2] == ""
+    assert lines[3] == "fake headline"
+    assert lines[4] == ""
+    assert lines[5] == "📊 Score: 5.00 ATR"
+    assert lines[6] == "💵 Close: $431.20  (ATR14: 3.85)"
+    assert lines[7] == "⚖️ Breakeven (60m): 0.85% (1.23 ATR)"
+    assert lines[8] == "📐 Range: $428.00-$430.00  |  Prior close: $425.50"
+    assert lines[9] == "💹 Quote: $431.10 / $431.30  (last $431.22)"
+    assert lines[10] == ""
+    assert lines[11] == "🕐 2026-07-23 09:35 ET"
+    assert lines[12] == "🆔 abc123 · vf665fba"
 
 
 def test_format_alert_handles_missing_atr():
@@ -83,14 +88,14 @@ def test_format_alert_handles_missing_atr():
     cluster = Cluster(**{**cluster.__dict__, "atr14": None})
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
     text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven())
-    assert "ATR14 n/a" in text
+    assert "(ATR14: n/a)" in text
 
 
 def test_format_alert_shows_no_tradable_contract_when_breakeven_is_none():
     cluster = _cluster()
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
     text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=None)
-    assert "breakeven no tradable contract for 60m hold" in text
+    assert "⚖️ Breakeven (60m): no tradable contract" in text
 
 
 def test_high_tier_sends_up_to_the_daily_cap_then_notices_once_then_suppresses():

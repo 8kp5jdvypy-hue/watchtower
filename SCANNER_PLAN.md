@@ -46,22 +46,30 @@ bucketed by `tier_for_score()`:
 
 ## Alert format
 
-Plain text, Telegram-safe (no markdown parse mode required). One cluster
-per message for high tier; medium tier is batched into an hourly digest
-of the same block repeated per cluster; log tier only appears in the
-end-of-day summary, not as individual messages.
+Plain text with emojis, not HTML/Markdown — renders cleanly in both
+Telegram and ConsoleAlerter's stdout with no parse_mode or escaping
+needed. One cluster per message for high tier; medium tier is batched
+into an hourly digest; log tier only appears in the end-of-day summary,
+not as individual messages.
 
 ```
-[{TIER}] {symbol} — {kinds}
+{tier_emoji} {TIER} — {symbol} {trend_emoji}
+{kinds}
+
 {headlines}
-score {score:.2f} ATR | close {close:.2f} | ATR14 {atr14}
-breakeven {breakeven} for 60m hold
-range {opening_range_low:.2f}-{opening_range_high:.2f} | prior close {prior_close:.2f}
-quote {bid:.2f}/{ask:.2f} (last {last:.2f})
-{ts_et} ET
-id {id} | v{code_version}
+
+📊 Score: {score:.2f} ATR
+💵 Close: ${close:.2f}  (ATR14: {atr14})
+⚖️ Breakeven (60m): {breakeven}
+📐 Range: ${opening_range_low:.2f}-${opening_range_high:.2f}  |  Prior close: ${prior_close:.2f}
+💹 Quote: ${bid:.2f} / ${ask:.2f}  (last ${last:.2f})
+
+🕐 {ts_et} ET
+🆔 {id} · v{code_version}
 ```
 
+- `{tier_emoji}` — 🔴 HIGH, 🟡 MEDIUM, ⚪ LOG.
+- `{trend_emoji}` — 📈 up, 📉 down (close vs. `prior_close`).
 - `{TIER}` — uppercase: `HIGH`, `MEDIUM`, or `LOG`.
 - `{kinds}` — the cluster's detector kinds, comma-and-space joined (e.g.
   `gap, rvol_spike`).
@@ -76,6 +84,10 @@ id {id} | v{code_version}
 - `{ts_et}` — `YYYY-MM-DD HH:MM` in US/Eastern.
 - `{id}` — the journal's detection id.
 - `{code_version}` — the short git hash the cluster was journaled under.
+
+Digests, log summaries, system notices (halt, staleness, cap reached,
+errors), and the heartbeat all follow the same emoji-plus-plain-text
+convention — see `tradebot/runner.py`'s message builders.
 
 ## Non-goals
 

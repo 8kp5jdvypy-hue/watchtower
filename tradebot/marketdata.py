@@ -167,7 +167,11 @@ class ReplayMarketData:
         raise NotImplementedError("ReplayMarketData has no live quotes; use session_bars()")
 
     def chain(self, symbol: str, expiry: date) -> OptionChain:
-        raise NotImplementedError("ReplayMarketData has no options chain")
+        raise NotImplementedError(
+            "ReplayMarketData has no historical options chain cache — breakeven_move() "
+            "will report 'no tradable contract' rather than mix live greeks into a "
+            "historical replay"
+        )
 
     def advance(self) -> bool:
         """Reveal the next bar. Returns False once nothing is left to
@@ -227,7 +231,7 @@ class LiveMarketData:
         return fetch_latest_quote(symbol)
 
     def chain(self, symbol: str, expiry: date) -> OptionChain:
-        raise NotImplementedError(
-            "options chain data isn't wired up yet — breakeven_move() will report "
-            "'no tradable contract' rather than guess greeks"
-        )
+        from tradebot.vendors.alpaca import fetch_option_chain
+
+        self._check(symbol)
+        return fetch_option_chain(symbol, expiry)

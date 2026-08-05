@@ -41,23 +41,38 @@ class Cluster:
     code_version: str
 
 
+TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
+TREND_EMOJI = {"up": "📈", "down": "📉"}
+
+
 def format_alert(cluster: Cluster, anchors: DailyAnchors, quote: Quote, breakeven: Breakeven | None) -> str:
     """Render a cluster as the exact layout in SCANNER_PLAN.md. `breakeven`
     is costs.breakeven_move()'s result for a 60-minute hold — pass None
-    when there's no tradable ATM contract; never fabricate one."""
+    when there's no tradable ATM contract; never fabricate one.
+
+    Plain text with emojis, not HTML/Markdown — renders cleanly in both
+    Telegram and ConsoleAlerter's plain stdout without needing parse_mode
+    or escaping."""
     ts_et = datetime.fromisoformat(cluster.ts_utc).astimezone(ET).strftime("%Y-%m-%d %H:%M")
     atr_text = f"{cluster.atr14:.2f}" if cluster.atr14 is not None else "n/a"
     kinds_text = ", ".join(cluster.kinds.split(","))
+    tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
+    trend_emoji = TREND_EMOJI.get(cluster.trend, "")
     return (
-        f"[{cluster.tier.upper()}] {cluster.symbol} — {kinds_text}\n"
+        f"{tier_emoji} {cluster.tier.upper()} — {cluster.symbol} {trend_emoji}\n"
+        f"{kinds_text}\n"
+        f"\n"
         f"{cluster.headlines}\n"
-        f"score {cluster.score:.2f} ATR | close {cluster.close:.2f} | ATR14 {atr_text}\n"
-        f"breakeven {format_breakeven(breakeven)} for 60m hold\n"
-        f"range {anchors.opening_range_low:.2f}-{anchors.opening_range_high:.2f} "
-        f"| prior close {anchors.prior_close:.2f}\n"
-        f"quote {quote.bid:.2f}/{quote.ask:.2f} (last {quote.last:.2f})\n"
-        f"{ts_et} ET\n"
-        f"id {cluster.id} | v{cluster.code_version}"
+        f"\n"
+        f"📊 Score: {cluster.score:.2f} ATR\n"
+        f"💵 Close: ${cluster.close:.2f}  (ATR14: {atr_text})\n"
+        f"⚖️ Breakeven (60m): {format_breakeven(breakeven)}\n"
+        f"📐 Range: ${anchors.opening_range_low:.2f}-${anchors.opening_range_high:.2f}"
+        f"  |  Prior close: ${anchors.prior_close:.2f}\n"
+        f"💹 Quote: ${quote.bid:.2f} / ${quote.ask:.2f}  (last ${quote.last:.2f})\n"
+        f"\n"
+        f"🕐 {ts_et} ET\n"
+        f"🆔 {cluster.id} · v{cluster.code_version}"
     )
 
 
