@@ -1,0 +1,6 @@
+.env
+data/cache/
+data/journal.db
+out/
+__pycache__/
+.venv/
