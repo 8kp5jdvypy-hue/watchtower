@@ -13,11 +13,14 @@ import sqlite3
 import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dataclasses import dataclass
 
 from tradebot.detectors import Detection, bar_close_ts, tier_for_score
 from tradebot.marketdata import ReplayMarketData
+
+ET = ZoneInfo("America/New_York")
 
 MIN_HISTORY_SAMPLE = 5
 
@@ -261,6 +264,78 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
             continue
         result[tier] = TierPerformance(
             tier=tier,
+            sample_size=len(returns),
+            continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
+            avg_return_pct=sum(returns) / len(returns) * 100,
+            offset_min=offset_min,
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class HourPerformance:
+    hour_et: int
+    sample_size: int
+    continuation_rate: float
+    avg_return_pct: float
+    offset_min: int
+
+
+def hour_performance(
+    conn: sqlite3.Connection, tier: str | None = "high", offset_min: int = 30
+) -> dict[int, HourPerformance]:
+    """Real continuation rate and average directional return grouped by
+    the ET hour the cluster fired in, across the whole journal — a pure
+    reporting tool, never used to gate or suppress alerts.
+
+    IMPORTANT: a train/test split on this project's data (see
+    SCANNER_PLAN.md) showed hour-of-day patterns that looked real on one
+    half of the data completely inverted on the other half — a signature
+    of noise, not a stable effect, at the sample sizes available when
+    that check was run. Do not treat any single hour's numbers here as
+    a real edge without re-validating on a proper held-out split first;
+    this function exists so that check gets easier to redo as more
+    sessions accumulate, not as a ready-to-trust signal today.
+
+    tier=None includes every non-log tier; pass a specific tier (e.g.
+    "high") to scope to just that one. Hours with fewer than
+    MIN_HISTORY_SAMPLE data points are omitted rather than reported on
+    too little data.
+    """
+    if tier is None:
+        rows = conn.execute(
+            """
+            SELECT d.ts_utc, d.close, d.trend, m.price
+            FROM detections d
+            JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+            WHERE d.tier != 'log'
+            """,
+            (offset_min,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT d.ts_utc, d.close, d.trend, m.price
+            FROM detections d
+            JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+            WHERE d.tier = ?
+            """,
+            (offset_min, tier),
+        ).fetchall()
+
+    by_hour: dict[int, list[float]] = {}
+    for ts_utc, close, trend, price in rows:
+        hour = datetime.fromisoformat(ts_utc).astimezone(ET).hour
+        r = (price - close) / close
+        signed = r if trend == "up" else -r
+        by_hour.setdefault(hour, []).append(signed)
+
+    result: dict[int, HourPerformance] = {}
+    for hour, returns in by_hour.items():
+        if len(returns) < MIN_HISTORY_SAMPLE:
+            continue
+        result[hour] = HourPerformance(
+            hour_et=hour,
             sample_size=len(returns),
             continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
             avg_return_pct=sum(returns) / len(returns) * 100,

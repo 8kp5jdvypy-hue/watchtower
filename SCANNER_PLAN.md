@@ -30,7 +30,11 @@ replay, runner) rather than duplicated.
    `out/replay_detections.csv` and journals every cluster.
 6. `tradebot/journal.py` — SQLite (`data/journal.db`): `detections` (every
    cluster, including sub-threshold) and `marks` (forward prices at
-   +15/+30/+60min).
+   +15/+30/+60min). Also `historical_performance()` (per detector kind +
+   direction), `tier_performance()` (per tier, surfaced in the medium
+   digest and heartbeat), and `hour_performance()` (per ET hour,
+   informational only via `scripts/hour_report.py` — see "Best hours"
+   below for why this doesn't gate anything).
 7. `tradebot/alerts.py` — `format_alert()`, `TelegramAlerter` /
    `ConsoleAlerter`, `AlertBudget` (daily cap, per-detector cooldown,
    hourly medium digest, EOD log summary).
@@ -43,11 +47,33 @@ replay, runner) rather than duplicated.
 Detections are scored in ATR units (or a ratio, for `rvol_spike`) and
 bucketed by `tier_for_score()`:
 
-- `TIER_HIGH = 3.4`, `TIER_MEDIUM = 1.7` (calibrated 2026-08-05 from a
-  20-session replay across the full 11-symbol watchlist — see
+- `TIER_HIGH = 3.4`, `TIER_MEDIUM = 1.7` (calibrated 2026-08-05, re-verified
+  the same day against 143 cached sessions spanning Jan-Aug 2026 — see
   `out/replay_detections.csv` and `detectors.py`'s comment for the
   derivation history). Targets ~2-5 high-tier clusters/day across the
-  watchlist; medium tier runs ~23/day, delivered as one hourly digest.
+  watchlist; medium tier runs ~22/day, delivered as one hourly digest.
+- HIGH tier is the one part of this system with a measured (not assumed)
+  edge, and even that is fragile: a Jan-May vs. Jun-Aug split showed
+  58.7%/+0.40% avg on the later half alone vs. 50.4%/+0.09% combined
+  with the earlier half. Treat every stat here as provisional until the
+  sample is much larger — `tier_performance()` keeps this honest by
+  recomputing live rather than freezing a number in this doc.
+
+## Best hours (why there's no time-of-day rule)
+
+Tested whether certain hours of the trading day predict better outcomes,
+using a proper train/test split (fit candidate "best hours" on one
+period, validate on the other, then reversed). Both directions
+contradicted each other — whichever hour looked best in the training
+half looked average or worst in the test half. That's the signature of
+noise, not a real effect, at ~550 HIGH-tier alerts total split across 7
+hourly buckets (some buckets as thin as n=5).
+
+Conclusion: no suppression rule was built on this. `journal.hour_performance()`
+and `scripts/hour_report.py` exist to keep tracking it as an
+**informational-only** report — never used to gate or suppress an
+alert — so the question can be revisited once there's enough data for a
+train/test split to actually agree with itself.
 
 ## Alert format
 

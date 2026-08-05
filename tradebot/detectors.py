@@ -19,6 +19,9 @@ from typing import Mapping, Sequence
 # ~23/day (vs. the original "about 15" target) — expected since it scales
 # with watchlist size and is delivered as a single hourly digest, not
 # individual pings; tighten TIER_MEDIUM if that digest gets too long.
+# Re-verified 2026-08-05 after expanding history from 20 to 143 cached
+# sessions (Jan-Aug 2026, 14626 clusters): still mean 3.79 HIGH/day, no
+# symbol over 16% of HIGH — no change needed at the larger sample.
 # Re-derive from out/replay_detections.csv if the watchlist or detectors
 # change materially.
 TIER_HIGH = 3.4

@@ -14,6 +14,7 @@ from tradebot.journal import (
     cluster_id,
     connect,
     historical_performance,
+    hour_performance,
     tier_performance,
     write_cluster,
 )
@@ -211,3 +212,50 @@ def test_tier_performance_omits_tiers_below_min_sample(tmp_path):
         )
     result = tier_performance(conn)
     assert "high" not in result
+
+
+def test_hour_performance_groups_by_et_hour(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    # 14:00 ET == 18:00 UTC in EDT (summer)
+    base_14et = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base_14et + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    result = hour_performance(conn, tier="high")
+    assert 14 in result
+    assert result[14].sample_size == 5
+    assert result[14].continuation_rate == pytest.approx(1.0)
+    assert result[14].hour_et == 14
+
+
+def test_hour_performance_omits_hours_below_min_sample(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base_14et = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
+    for i in range(MIN_HISTORY_SAMPLE - 1):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=105,
+            ts_utc=(base_14et + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    result = hour_performance(conn, tier="high")
+    assert 14 not in result
+
+
+def test_hour_performance_tier_none_includes_all_non_log_tiers(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base_14et = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base_14et + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    for i, mark in enumerate([101, 102, 99]):
+        _write_cluster_with_mark(
+            conn, kind="level_break", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base_14et + timedelta(minutes=25 + 5 * i)).isoformat(), score=2.0,
+        )
+    scoped = hour_performance(conn, tier="high")
+    combined = hour_performance(conn, tier=None)
+    assert scoped[14].sample_size == 5
+    assert combined[14].sample_size == 8
