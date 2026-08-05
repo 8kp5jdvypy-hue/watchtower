@@ -52,7 +52,7 @@ from tradebot.detectors import (
     score_cluster,
     tier_for_score,
 )
-from tradebot.journal import backfill_marks, code_version, connect, historical_performance
+from tradebot.journal import backfill_marks, code_version, connect, historical_performance, tier_performance
 from tradebot.journal import write_cluster as journal_write_cluster
 from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData
 
@@ -121,7 +121,7 @@ class HeartbeatStats:
         if decision != Decision.SEND:
             self.suppression_counts[decision.value] += 1
 
-    def summary_text(self, end_time: datetime) -> str:
+    def summary_text(self, end_time: datetime, tier_perf: dict | None = None) -> str:
         uptime = end_time - self.start_time
         lines = [
             f"💓 Heartbeat — {self.session_date}",
@@ -133,7 +133,26 @@ class HeartbeatStats:
         ]
         lines.extend(f"  - {g}" for g in self.data_gaps)
         lines.append(f"❗ Errors: {len(self.errors)}")
+        if tier_perf:
+            lines.append("")
+            lines.append(f"📈 Tier track record (+{next(iter(tier_perf.values())).offset_min}m, all-time):")
+            lines.extend(f"  {line}" for line in format_tier_performance_lines(tier_perf))
         return "\n".join(lines)
+
+
+def format_tier_performance_lines(tier_perf: dict) -> list[str]:
+    """One line per tier: real continuation rate + avg return from
+    journal.tier_performance() — never fabricated, omitted entirely by
+    tier_performance() itself when there isn't enough sample yet."""
+    order = {"high": 0, "medium": 1, "log": 2}
+    lines = []
+    for tier in sorted(tier_perf, key=lambda t: order.get(t, 99)):
+        tp = tier_perf[tier]
+        lines.append(
+            f"{tier.upper()}: {tp.continuation_rate * 100:.1f}% continued "
+            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}%"
+        )
+    return lines
 
 
 def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | None:
@@ -263,11 +282,19 @@ def process_new_bar(
     conn.commit()
 
 
-def send_medium_digest_if_due(budget: AlertBudget, alerter) -> None:
+def send_medium_digest_if_due(budget: AlertBudget, alerter, conn) -> None:
     digest = budget.pop_medium_digest_if_due()
     if not digest:
         return
-    lines = [f"🟡 Medium Digest — {len(digest)} cluster(s)", ""]
+    lines = [f"🟡 Medium Digest — {len(digest)} cluster(s)"]
+    tier_perf = tier_performance(conn)
+    if "medium" in tier_perf:
+        tp = tier_perf["medium"]
+        lines.append(
+            f"📈 Track record: {tp.continuation_rate * 100:.1f}% continued "
+            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}% at {tp.offset_min}m"
+        )
+    lines.append("")
     for c in digest:
         emoji = TREND_EMOJI.get(c.trend, "•")
         lines.append(f"{emoji} {c.symbol} · {c.kinds} · score {c.score:.2f}")
@@ -348,7 +375,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], quote_fn, chain_fn, stats,
                 )
-                send_medium_digest_if_due(budget, alerter)
+                send_medium_digest_if_due(budget, alerter, conn)
             except Exception:
                 stats.errors.append(traceback.format_exc())
                 alerter.send(f"❌ Error — {symbol}: exception during evaluation. See logs. Continuing.")
@@ -363,7 +390,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
     send_log_summary(budget, alerter)
     marks_written = backfill_marks(conn, session_date)
     print(f"backfilled {marks_written} forward-price marks")
-    heartbeat = stats.summary_text(clock["t"])
+    heartbeat = stats.summary_text(clock["t"], tier_perf=tier_performance(conn))
     alerter.send(heartbeat)
     conn.close()
     return stats
@@ -443,7 +470,7 @@ def run_live(alerter) -> HeartbeatStats:
                     lambda s, _sym=symbol: md[_sym].chain(s, expiry=session_date),
                     stats,
                 )
-                send_medium_digest_if_due(budget, alerter)
+                send_medium_digest_if_due(budget, alerter, conn)
             except Exception:
                 stats.errors.append(traceback.format_exc())
                 try:
@@ -457,7 +484,7 @@ def run_live(alerter) -> HeartbeatStats:
 
     send_log_summary(budget, alerter)
     backfill_marks(conn, session_date)
-    alerter.send(stats.summary_text(datetime.now(timezone.utc)))
+    alerter.send(stats.summary_text(datetime.now(timezone.utc), tier_perf=tier_performance(conn)))
     conn.close()
     return stats
 

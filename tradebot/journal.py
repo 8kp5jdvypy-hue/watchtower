@@ -222,3 +222,48 @@ def historical_performance(
         avg_return_pct=sum(returns) / len(returns) * 100,
         offset_min=offset_min,
     )
+
+
+@dataclass(frozen=True)
+class TierPerformance:
+    tier: str
+    sample_size: int
+    continuation_rate: float
+    avg_return_pct: float
+    offset_min: int
+
+
+def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str, TierPerformance]:
+    """Real continuation rate and average directional return per tier,
+    across the whole journal, using backfilled forward prices — the same
+    'is this tier actually predictive' check as historical_performance(),
+    aggregated by tier instead of by kind. Tiers with fewer than
+    MIN_HISTORY_SAMPLE data points are omitted rather than reported on
+    too little data."""
+    rows = conn.execute(
+        """
+        SELECT d.tier, d.close, d.trend, m.price
+        FROM detections d
+        JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        """,
+        (offset_min,),
+    ).fetchall()
+
+    by_tier: dict[str, list[float]] = {}
+    for tier, close, trend, price in rows:
+        r = (price - close) / close
+        signed = r if trend == "up" else -r
+        by_tier.setdefault(tier, []).append(signed)
+
+    result: dict[str, TierPerformance] = {}
+    for tier, returns in by_tier.items():
+        if len(returns) < MIN_HISTORY_SAMPLE:
+            continue
+        result[tier] = TierPerformance(
+            tier=tier,
+            sample_size=len(returns),
+            continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
+            avg_return_pct=sum(returns) / len(returns) * 100,
+            offset_min=offset_min,
+        )
+    return result

@@ -14,6 +14,7 @@ from tradebot.journal import (
     cluster_id,
     connect,
     historical_performance,
+    tier_performance,
     write_cluster,
 )
 
@@ -113,10 +114,10 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
     assert written == 2
 
 
-def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc):
+def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0):
     detection_id = write_cluster(
         conn, session="2026-06-15", symbol=SYMBOL, ts_utc=ts_utc,
-        kinds=kind, headlines="h", score=4.0, close=close, atr14=1.0,
+        kinds=kind, headlines="h", score=score, close=close, atr14=1.0,
         trend=trend, detections=[_detection(kind=kind)], code_version_str="abc",
     )
     conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, price_at_30))
@@ -173,3 +174,40 @@ def test_historical_performance_filters_by_kind_and_trend_and_excludes_self(tmp_
 
     result = historical_performance(conn, kind="gap", trend="up", exclude_id=matching_ids[0], lookback=20)
     assert result.sample_size == 5  # 6 matching, minus the excluded one
+
+
+def test_tier_performance_groups_by_tier_and_computes_real_stats(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+
+    # 5 HIGH-tier (score=5.0), all up-trend, all continue (mark > close)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    # 5 MEDIUM-tier (score=2.0), mixed outcomes: 2 continue, 3 reverse
+    for i, mark in enumerate([101, 102, 99, 98, 97]):
+        _write_cluster_with_mark(
+            conn, kind="level_break", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=100 + 5 * i)).isoformat(), score=2.0,
+        )
+
+    result = tier_performance(conn)
+    assert result["high"].sample_size == 5
+    assert result["high"].continuation_rate == pytest.approx(1.0)
+    assert result["medium"].sample_size == 5
+    assert result["medium"].continuation_rate == pytest.approx(0.4)  # 2/5 continued
+
+
+def test_tier_performance_omits_tiers_below_min_sample(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    assert MIN_HISTORY_SAMPLE == 5
+    for i in range(MIN_HISTORY_SAMPLE - 1):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=105,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    result = tier_performance(conn)
+    assert "high" not in result

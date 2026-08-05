@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from tradebot.alerts import Decision
+from tradebot.journal import TierPerformance
 from tradebot.marketdata import Bar
 from tradebot.runner import HeartbeatStats, is_halted_bar, is_stale, session_bounds
 
@@ -66,3 +67,23 @@ def test_heartbeat_stats_summary_includes_tier_and_suppression_counts():
     assert "cooldown_active" in text
     assert "Data gaps: 1" in text
     assert "BE: no prior daily bar cached" in text
+
+
+def test_heartbeat_stats_summary_includes_tier_performance_when_provided():
+    start = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    stats = HeartbeatStats(start_time=start, session_date=date(2026, 7, 23))
+    tier_perf = {
+        "high": TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30),
+        "medium": TierPerformance(tier="medium", sample_size=315, continuation_rate=0.492, avg_return_pct=-0.014, offset_min=30),
+    }
+    text = stats.summary_text(start + timedelta(hours=1), tier_perf=tier_perf)
+    assert "Tier track record (+30m" in text
+    assert "HIGH: 59.5% continued (n=42), avg +0.36%" in text
+    assert "MEDIUM: 49.2% continued (n=315), avg -0.01%" in text
+
+
+def test_heartbeat_stats_summary_omits_tier_performance_when_empty():
+    start = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    stats = HeartbeatStats(start_time=start, session_date=date(2026, 7, 23))
+    text = stats.summary_text(start + timedelta(hours=1), tier_perf={})
+    assert "Tier track record" not in text
