@@ -17,6 +17,7 @@ import requests
 
 from tradebot.costs import Breakeven, format_breakeven
 from tradebot.detectors import DailyAnchors
+from tradebot.journal import HistoricalPerformance
 from tradebot.marketdata import Quote
 
 ET = ZoneInfo("America/New_York")
@@ -43,12 +44,38 @@ class Cluster:
 
 TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
 TREND_EMOJI = {"up": "📈", "down": "📉"}
+# direction -> (label, favored option side). Mechanical translation of the
+# break direction, not a prediction — pair with the history line below to
+# see how reliable that direction actually is.
+BIAS_TEXT = {"up": ("BULLISH", "calls"), "down": ("BEARISH", "puts")}
 
 
-def format_alert(cluster: Cluster, anchors: DailyAnchors, quote: Quote, breakeven: Breakeven | None) -> str:
-    """Render a cluster as the exact layout in SCANNER_PLAN.md. `breakeven`
-    is costs.breakeven_move()'s result for a 60-minute hold — pass None
-    when there's no tradable ATM contract; never fabricate one.
+def format_history(history: HistoricalPerformance | None) -> str:
+    if history is None:
+        return "not enough history yet"
+    pct = history.continuation_rate * 100
+    return (
+        f"{pct:.0f}% continued (n={history.sample_size}), "
+        f"avg {history.avg_return_pct:+.2f}% at {history.offset_min}m"
+    )
+
+
+def format_alert(
+    cluster: Cluster,
+    anchors: DailyAnchors,
+    quote: Quote,
+    breakeven: Breakeven | None,
+    history: HistoricalPerformance | None,
+) -> str:
+    """Render a cluster as the exact layout in SCANNER_PLAN.md.
+
+    `breakeven` is costs.breakeven_move()'s result for a 60-minute hold —
+    pass None when there's no tradable ATM contract; never fabricate one.
+
+    `history` is journal.historical_performance()'s result for this
+    cluster's primary kind + trend — a real base rate from past alerts'
+    backfilled outcomes, not a forecast. Pass None when there isn't
+    enough sample history yet; never fabricate a stat.
 
     Plain text with emojis, not HTML/Markdown — renders cleanly in both
     Telegram and ConsoleAlerter's plain stdout without needing parse_mode
@@ -58,15 +85,19 @@ def format_alert(cluster: Cluster, anchors: DailyAnchors, quote: Quote, breakeve
     kinds_text = ", ".join(cluster.kinds.split(","))
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
     trend_emoji = TREND_EMOJI.get(cluster.trend, "")
+    bias_label, option_side = BIAS_TEXT.get(cluster.trend, ("NEUTRAL", "either side"))
     return (
         f"{tier_emoji} {cluster.tier.upper()} — {cluster.symbol} {trend_emoji}\n"
         f"{kinds_text}\n"
+        f"\n"
+        f"🎯 {bias_label} — favors {option_side}\n"
         f"\n"
         f"{cluster.headlines}\n"
         f"\n"
         f"📊 Score: {cluster.score:.2f} ATR\n"
         f"💵 Close: ${cluster.close:.2f}  (ATR14: {atr_text})\n"
         f"⚖️ Breakeven (60m): {format_breakeven(breakeven)}\n"
+        f"📚 Similar setups: {format_history(history)}\n"
         f"📐 Range: ${anchors.opening_range_low:.2f}-${anchors.opening_range_high:.2f}"
         f"  |  Prior close: ${anchors.prior_close:.2f}\n"
         f"💹 Quote: ${quote.bid:.2f} / ${quote.ask:.2f}  (last ${quote.last:.2f})\n"

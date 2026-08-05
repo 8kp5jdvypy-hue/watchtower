@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from tradebot.detectors import Detection
-from tradebot.journal import backfill_marks, cluster_id, connect, write_cluster
+from tradebot.journal import (
+    MIN_HISTORY_SAMPLE,
+    backfill_marks,
+    cluster_id,
+    connect,
+    historical_performance,
+    write_cluster,
+)
 
 SYMBOL = "TEST"
 SESSION = date(2026, 6, 15)
@@ -104,3 +111,65 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
     assert 15 in marks and 30 in marks
     assert 60 not in marks  # session doesn't extend that far — must not fabricate a price
     assert written == 2
+
+
+def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc):
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc=ts_utc,
+        kinds=kind, headlines="h", score=4.0, close=close, atr14=1.0,
+        trend=trend, detections=[_detection(kind=kind)], code_version_str="abc",
+    )
+    conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, price_at_30))
+    conn.commit()
+    return detection_id
+
+
+def test_historical_performance_computes_continuation_rate_and_avg_return(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # up-trend gap clusters at close=100: 3 continue up, 2 reverse down
+    closes_marks = [105, 102, 98, 101, 97]
+    for i, mark in enumerate(closes_marks):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent")
+    assert result is not None
+    assert result.sample_size == 5
+    assert result.continuation_rate == pytest.approx(0.6)  # 105,102,101 > 100; 98,97 < 100
+    assert result.avg_return_pct == pytest.approx(0.6)  # mean of [+5,+2,-2,+1,-3] % = +0.6%
+    assert result.offset_min == 30
+
+
+def test_historical_performance_returns_none_below_min_sample(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    assert MIN_HISTORY_SAMPLE == 5
+    for i in range(MIN_HISTORY_SAMPLE - 1):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=105,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+    assert historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent") is None
+
+
+def test_historical_performance_filters_by_kind_and_trend_and_excludes_self(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # 6 matching, so excluding one still leaves 5 (>= MIN_HISTORY_SAMPLE)
+    matching_ids = [
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=105,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+        for i in range(6)
+    ]
+    # wrong trend — must not count
+    _write_cluster_with_mark(conn, kind="gap", trend="down", close=100.0, price_at_30=95, ts_utc=(base + timedelta(minutes=100)).isoformat())
+    # wrong kind — must not count
+    _write_cluster_with_mark(conn, kind="vwap_break", trend="up", close=100.0, price_at_30=105, ts_utc=(base + timedelta(minutes=105)).isoformat())
+
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id=matching_ids[0], lookback=20)
+    assert result.sample_size == 5  # 6 matching, minus the excluded one

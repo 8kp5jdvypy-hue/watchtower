@@ -27,10 +27,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tradebot.config import WATCHLIST
 from tradebot.detectors import Bar
 from tradebot.vendors.alpaca import AlpacaCredentialsError, fetch_daily_bars, fetch_intraday_bars
 
-WATCHLIST = ["SPY", "QQQ", "GOOGL", "TSLA", "BE", "IONQ"]
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 MAX_LOOKBACK_DAYS = 60  # safety cap so a long holiday streak can't loop forever
 

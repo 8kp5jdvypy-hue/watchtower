@@ -40,6 +40,7 @@ from tradebot.alerts import (
     TelegramAlerter,
     format_alert,
 )
+from tradebot.config import WATCHLIST
 from tradebot.costs import breakeven_move
 from tradebot.detectors import (
     DETECTORS,
@@ -51,11 +52,10 @@ from tradebot.detectors import (
     score_cluster,
     tier_for_score,
 )
-from tradebot.journal import backfill_marks, code_version, connect
+from tradebot.journal import backfill_marks, code_version, connect, historical_performance
 from tradebot.journal import write_cluster as journal_write_cluster
 from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData
 
-WATCHLIST = ["SPY", "QQQ", "GOOGL", "TSLA", "BE", "IONQ"]
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO_ROOT / "data" / "cache"
 HALT_FILE = REPO_ROOT / "data" / "HALT"
@@ -151,6 +151,7 @@ def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | 
         "close": last.close,
         "atr14": atr(bars),
         "kinds": ",".join(d.kind for d in detections),
+        "primary_kind": max(detections, key=lambda d: d.score).kind,
         "headlines": "; ".join(d.headline for d in detections),
         "score": score_cluster(detections),
         "trend": "up" if last.close >= anchors.prior_close else "down",
@@ -244,7 +245,10 @@ def process_new_bar(
         except NotImplementedError:
             chain = None
         breakeven = breakeven_move(chain, spot=result["close"], atr14=result["atr14"])
-        alerter.send(format_alert(cluster, anchors, quote, breakeven))
+        history = historical_performance(
+            conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id
+        )
+        alerter.send(format_alert(cluster, anchors, quote, breakeven, history))
         conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
         if decision == Decision.CAP_REACHED_NOTICE:
             alerter.send(
@@ -328,7 +332,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                 clock["t"] = bar_close_ts(rth_bars[-1])
 
                 if symbol not in anchors:
-                    daily = md[symbol].daily_bars(symbol, 2)
+                    daily = md[symbol].daily_bars(symbol, 20)
                     if not daily:
                         stats.data_gaps.append(f"{symbol}: no prior daily bar cached for {session_date}")
                         continue
@@ -421,7 +425,7 @@ def run_live(alerter) -> HeartbeatStats:
                 rth_bar_count[symbol] = len(rth_bars)
 
                 if symbol not in anchors:
-                    daily = md[symbol].daily_bars(symbol, 2)
+                    daily = md[symbol].daily_bars(symbol, 20)
                     if not daily:
                         stats.data_gaps.append(f"{symbol}: no prior daily bar cached for {session_date}")
                         continue

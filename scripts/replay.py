@@ -3,8 +3,9 @@
 
 For each (symbol, session) pair, walks bars one at a time via
 ReplayMarketData, freezes DailyAnchors once the first RTH bar (09:30-09:35
-ET) closes, then evaluates level_break / rvol_spike / range_expansion /
-gap on every RTH bar close from that point on — including the anchor bar
+ET) closes, then evaluates every detector in DETECTORS (level_break,
+rvol_spike, range_expansion, vwap_break, round_number_break, gap) on
+every RTH bar close from that point on — including the anchor bar
 itself, since gap() only ever fires there.
 
 Detections that land on the same (symbol, bar) are grouped into a cluster
@@ -34,11 +35,11 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tradebot.config import WATCHLIST
 from tradebot.detectors import DETECTORS, Bar, atr, bar_close_ts, build_anchors, score_cluster
 from tradebot.journal import backfill_marks, code_version, connect, write_cluster
 from tradebot.marketdata import ReplayMarketData
 
-WATCHLIST = ["SPY", "QQQ", "GOOGL", "TSLA", "BE", "IONQ"]
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 OUT_PATH = Path(__file__).resolve().parent.parent / "out" / "replay_detections.csv"
 ET = ZoneInfo("America/New_York")
@@ -76,7 +77,7 @@ def replay_symbol_session(
             return []  # no RTH bars this session at all
         rth_bars = list(md.session_bars(symbol, session_date))
 
-    daily = md.daily_bars(symbol, 2)
+    daily = md.daily_bars(symbol, 20)
     if not daily:
         return []  # no prior daily bar cached yet for this date
 

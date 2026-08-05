@@ -10,12 +10,19 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Mapping, Sequence
 
-# Calibrated 2026-08-05 from a replay of 20 cached sessions x the full
-# watchlist (577 clusters): mean 2.40 HIGH/day, 10.60 MEDIUM/day, no
-# symbol over 27% of HIGH. Re-derive from out/replay_detections.csv if the
-# watchlist or detectors change materially.
-TIER_HIGH = 3.0
-TIER_MEDIUM = 1.5
+# Calibrated 2026-08-05 (6-symbol watchlist, 577 clusters): mean 2.40
+# HIGH/day. Re-checked 2026-08-05 after adding vwap_break and
+# round_number_break (1106 clusters): still mean 2.95 HIGH/day, no
+# change needed. Re-calibrated 2026-08-05 after expanding the watchlist
+# to 11 symbols (added NVDA, AAPL, AMD, META, AMZN; 2064 clusters): mean
+# 3.15 HIGH/day, max 8/day, no symbol over 14% of HIGH. MEDIUM is now
+# ~23/day (vs. the original "about 15" target) — expected since it scales
+# with watchlist size and is delivered as a single hourly digest, not
+# individual pings; tighten TIER_MEDIUM if that digest gets too long.
+# Re-derive from out/replay_detections.csv if the watchlist or detectors
+# change materially.
+TIER_HIGH = 3.4
+TIER_MEDIUM = 1.7
 
 
 class Tier(str, Enum):
@@ -50,6 +57,10 @@ class DailyAnchors:
     opening_range_high: float
     opening_range_low: float
     opening_range_volume: int
+    # highest high / lowest low over however many prior daily bars were
+    # passed to build_anchors() (up to 20 in practice — see callers).
+    swing_high: float
+    swing_low: float
     # bar index (0 = first RTH bar of the day) -> historical average
     # cumulative volume through that bar, used by rvol_spike.
     avg_cum_volume_by_bar: Mapping[int, float]
@@ -97,7 +108,8 @@ def build_anchors(
     """Build and freeze the day's anchor levels.
 
     prior_daily_bars: daily bars up to and including the prior session
-        (used for prior_close/prior_high/prior_low).
+        (used for prior_close/prior_high/prior_low, and swing_high/low
+        over however many days are passed in).
     opening_range_bars: this session's RTH bars from open through 09:35 ET.
     historical_session_bars: RTH bars from prior sessions, one sequence per
         session, used to build avg_cum_volume_by_bar.
@@ -108,6 +120,8 @@ def build_anchors(
         raise ValueError("need opening range bars to build anchors")
 
     prior = prior_daily_bars[-1]
+    swing_high = max(b.high for b in prior_daily_bars)
+    swing_low = min(b.low for b in prior_daily_bars)
 
     cum_by_bar_index: dict[int, list[int]] = {}
     for session_bars in historical_session_bars:
@@ -128,6 +142,8 @@ def build_anchors(
         opening_range_high=max(b.high for b in opening_range_bars),
         opening_range_low=min(b.low for b in opening_range_bars),
         opening_range_volume=sum(b.volume for b in opening_range_bars),
+        swing_high=swing_high,
+        swing_low=swing_low,
         avg_cum_volume_by_bar=avg_cum_volume_by_bar,
     )
 
@@ -159,6 +175,8 @@ def level_break(
         "prior_low": (anchors.prior_low, "down"),
         "opening_range_high": (anchors.opening_range_high, "up"),
         "opening_range_low": (anchors.opening_range_low, "down"),
+        "swing_high": (anchors.swing_high, "up"),
+        "swing_low": (anchors.swing_low, "down"),
     }
     threshold = atr_units * window
 
@@ -260,6 +278,114 @@ def range_expansion(
     )
 
 
+def vwap(bars: Sequence[Bar]) -> float | None:
+    """Session-to-date volume-weighted average price, using typical price
+    (high+low+close)/3 per bar. None if there's no volume yet."""
+    if not bars:
+        return None
+    cum_pv = 0.0
+    cum_volume = 0
+    for b in bars:
+        typical = (b.high + b.low + b.close) / 3
+        cum_pv += typical * b.volume
+        cum_volume += b.volume
+    if cum_volume == 0:
+        return None
+    return cum_pv / cum_volume
+
+
+def vwap_break(
+    bars: Sequence[Bar], anchors: DailyAnchors, atr_units: float = 0.5
+) -> Detection | None:
+    """Fires once, on the bar where the close first moves more than
+    atr_units * ATR away from session VWAP on the side it wasn't on before
+    — not on every later bar that stays on that side. Uses the current
+    bar's VWAP as the reference for both bars, since VWAP itself moves
+    every bar and comparing against two different VWAP values would make
+    'already broken' ambiguous."""
+    _check_symbol(bars, anchors)
+    if len(bars) < 2:
+        return None
+    window = atr(bars)
+    if window is None or window <= 0:
+        return None
+    current_vwap = vwap(bars)
+    if current_vwap is None:
+        return None
+
+    last, prev = bars[-1], bars[-2]
+    threshold = atr_units * window
+    move = last.close - current_vwap
+    prev_move = prev.close - current_vwap
+
+    if abs(move) <= threshold:
+        return None
+    if abs(prev_move) > threshold and (move > 0) == (prev_move > 0):
+        return None  # already on this side of VWAP as of the previous bar
+
+    direction = "above" if move > 0 else "below"
+    score = abs(move) / window
+    return Detection(
+        symbol=last.symbol,
+        kind="vwap_break",
+        ts=bar_close_ts(last),
+        score=score,
+        headline=f"{last.symbol} broke {direction} VWAP ({current_vwap:.2f}), {score:.2f} ATR",
+        context={"vwap": current_vwap, "close": last.close, "atr14": window, "direction": direction},
+    )
+
+
+def _round_increment(price: float) -> float:
+    """Spacing between 'round number' levels, scaled to price magnitude —
+    $1 under $20, $5 under $100, $10 under $500, $25 above."""
+    if price < 20:
+        return 1.0
+    if price < 100:
+        return 5.0
+    if price < 500:
+        return 10.0
+    return 25.0
+
+
+def round_number_break(
+    bars: Sequence[Bar], anchors: DailyAnchors, atr_units: float = 0.5
+) -> Detection | None:
+    """Fires once, on the bar where price crosses the nearest round-number
+    level (spacing scaled to price — see _round_increment) and closes at
+    least atr_units * ATR past it."""
+    _check_symbol(bars, anchors)
+    if len(bars) < 2:
+        return None
+    window = atr(bars)
+    if window is None or window <= 0:
+        return None
+
+    last, prev = bars[-1], bars[-2]
+    increment = _round_increment(last.close)
+    level = round(last.close / increment) * increment
+
+    crossed_up = prev.close < level <= last.close
+    crossed_down = prev.close > level >= last.close
+    if not (crossed_up or crossed_down):
+        return None
+
+    move = abs(last.close - level)
+    threshold = atr_units * window
+    if move < threshold:
+        return None
+
+    direction = "above" if crossed_up else "below"
+    score = move / window
+    return Detection(
+        symbol=last.symbol,
+        kind="round_number_break",
+        ts=bar_close_ts(last),
+        score=score,
+        headline=f"{last.symbol} crossed {direction} round number {level:.2f}, {score:.2f} ATR past it",
+        context={"level": level, "close": last.close, "atr14": window, "direction": direction},
+    )
+
+
 def gap(
     bars: Sequence[Bar], anchors: DailyAnchors, atr_units: float = 0.75
 ) -> Detection | None:
@@ -286,7 +412,7 @@ def gap(
     )
 
 
-DETECTORS = (level_break, rvol_spike, range_expansion, gap)
+DETECTORS = (level_break, rvol_spike, range_expansion, vwap_break, round_number_break, gap)
 
 
 def score_cluster(detections: Sequence[Detection]) -> float:

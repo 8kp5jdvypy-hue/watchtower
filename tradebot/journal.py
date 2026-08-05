@@ -14,8 +14,12 @@ import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from dataclasses import dataclass
+
 from tradebot.detectors import Detection, bar_close_ts, tier_for_score
 from tradebot.marketdata import ReplayMarketData
+
+MIN_HISTORY_SAMPLE = 5
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "journal.db"
@@ -170,3 +174,51 @@ def backfill_marks(
             written += 1
     conn.commit()
     return written
+
+
+@dataclass(frozen=True)
+class HistoricalPerformance:
+    sample_size: int
+    continuation_rate: float  # fraction that moved further in the alert's direction by offset_min
+    avg_return_pct: float  # signed average return at offset_min
+    offset_min: int
+
+
+def historical_performance(
+    conn: sqlite3.Connection,
+    kind: str,
+    trend: str,
+    exclude_id: str,
+    lookback: int = 20,
+    offset_min: int = 30,
+) -> HistoricalPerformance | None:
+    """How past clusters with this same primary detector kind and trend
+    direction actually played out, using real backfilled forward prices —
+    a base rate from the journal's own history, not a prediction. Returns
+    None if there isn't at least MIN_HISTORY_SAMPLE of them yet; never
+    reports a stat built on too few data points to mean anything."""
+    rows = conn.execute(
+        """
+        SELECT d.close, m.price
+        FROM detections d
+        JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        WHERE d.kinds LIKE ? AND d.trend = ? AND d.id != ?
+        ORDER BY d.ts_utc DESC
+        LIMIT ?
+        """,
+        (offset_min, f"%{kind}%", trend, exclude_id, lookback),
+    ).fetchall()
+    if len(rows) < MIN_HISTORY_SAMPLE:
+        return None
+
+    returns = [(price - close) / close for close, price in rows]
+    if trend == "up":
+        continued = sum(1 for r in returns if r > 0)
+    else:
+        continued = sum(1 for r in returns if r < 0)
+    return HistoricalPerformance(
+        sample_size=len(returns),
+        continuation_rate=continued / len(returns),
+        avg_return_pct=sum(returns) / len(returns) * 100,
+        offset_min=offset_min,
+    )

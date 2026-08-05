@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from tradebot.alerts import AlertBudget, Cluster, Decision, format_alert
 from tradebot.costs import Breakeven
 from tradebot.detectors import DailyAnchors
+from tradebot.journal import HistoricalPerformance
 from tradebot.marketdata import OptionContract, Quote
 
 
@@ -23,6 +24,8 @@ def _anchors() -> DailyAnchors:
         opening_range_high=430.0,
         opening_range_low=428.0,
         opening_range_volume=100_000,
+        swing_high=432.0,
+        swing_low=420.0,
         avg_cum_volume_by_bar={},
     )
 
@@ -63,39 +66,55 @@ def _breakeven() -> Breakeven:
     return Breakeven(pct=0.0085, atr_units=1.23, contract=contract)
 
 
+def _history() -> HistoricalPerformance:
+    return HistoricalPerformance(sample_size=20, continuation_rate=0.65, avg_return_pct=0.80, offset_min=30)
+
+
 def test_format_alert_matches_the_scanner_plan_layout():
     cluster = _cluster(kinds="gap,rvol_spike")
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=431.1, ask=431.3, last=431.22)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven())
+    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
     lines = text.split("\n")
     assert lines[0] == "🔴 HIGH — TSLA 📈"
     assert lines[1] == "gap, rvol_spike"
     assert lines[2] == ""
-    assert lines[3] == "fake headline"
+    assert lines[3] == "🎯 BULLISH — favors calls"
     assert lines[4] == ""
-    assert lines[5] == "📊 Score: 5.00 ATR"
-    assert lines[6] == "💵 Close: $431.20  (ATR14: 3.85)"
-    assert lines[7] == "⚖️ Breakeven (60m): 0.85% (1.23 ATR)"
-    assert lines[8] == "📐 Range: $428.00-$430.00  |  Prior close: $425.50"
-    assert lines[9] == "💹 Quote: $431.10 / $431.30  (last $431.22)"
-    assert lines[10] == ""
-    assert lines[11] == "🕐 2026-07-23 09:35 ET"
-    assert lines[12] == "🆔 abc123 · vf665fba"
+    assert lines[5] == "fake headline"
+    assert lines[6] == ""
+    assert lines[7] == "📊 Score: 5.00 ATR"
+    assert lines[8] == "💵 Close: $431.20  (ATR14: 3.85)"
+    assert lines[9] == "⚖️ Breakeven (60m): 0.85% (1.23 ATR)"
+    assert lines[10] == "📚 Similar setups: 65% continued (n=20), avg +0.80% at 30m"
+    assert lines[11] == "📐 Range: $428.00-$430.00  |  Prior close: $425.50"
+    assert lines[12] == "💹 Quote: $431.10 / $431.30  (last $431.22)"
+    assert lines[13] == ""
+    assert lines[14] == "🕐 2026-07-23 09:35 ET"
+    assert lines[15] == "🆔 abc123 · vf665fba"
+
+
+def test_format_alert_bearish_trend_favors_puts():
+    cluster = _cluster()
+    cluster = Cluster(**{**cluster.__dict__, "trend": "down"})
+    quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
+    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
+    assert "🎯 BEARISH — favors puts" in text
 
 
 def test_format_alert_handles_missing_atr():
     cluster = _cluster()
     cluster = Cluster(**{**cluster.__dict__, "atr14": None})
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven())
+    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
     assert "(ATR14: n/a)" in text
 
 
 def test_format_alert_shows_no_tradable_contract_when_breakeven_is_none():
     cluster = _cluster()
     quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=None)
+    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=None, history=None)
     assert "⚖️ Breakeven (60m): no tradable contract" in text
+    assert "📚 Similar setups: not enough history yet" in text
 
 
 def test_high_tier_sends_up_to_the_daily_cap_then_notices_once_then_suppresses():

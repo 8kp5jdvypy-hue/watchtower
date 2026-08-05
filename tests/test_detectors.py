@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from tradebot.detectors import (
     DETECTORS,
     Tier,
@@ -10,9 +12,12 @@ from tradebot.detectors import (
     gap,
     level_break,
     range_expansion,
+    round_number_break,
     rvol_spike,
     score_cluster,
     tier_for_score,
+    vwap,
+    vwap_break,
 )
 from tradebot.marketdata import Bar
 
@@ -118,6 +123,81 @@ def test_range_expansion_fires_on_an_outsized_bar():
     d = range_expansion(wide, anchors)
     assert d is not None
     assert d.kind == "range_expansion"
+
+
+def test_level_break_includes_swing_high_from_days_before_yesterday():
+    prior_daily = [
+        Bar(SYMBOL, OPEN0 - timedelta(days=3), 105, 110.0, 104, 108, 500_000),  # oldest day: high=110
+        Bar(SYMBOL, OPEN0 - timedelta(days=2), 95, 97.0, 94, 96, 500_000),
+        Bar(SYMBOL, OPEN0 - timedelta(days=1), 95, 96.0, 94, 95, 500_000),  # "yesterday": prior_high=96
+    ]
+    opening_range = [_bar(0, 90.0)]  # opening_range_high ~91, well below everything else
+    anchors = build_anchors(SYMBOL, SESSION, prior_daily, opening_range, historical_session_bars=[])
+    assert anchors.prior_high == 96.0
+    assert anchors.swing_high == 110.0
+
+    # calm bars already sit above prior_high/opening_range_high — those are
+    # "already broken" from the start and won't re-fire
+    calm = [_bar(i, 100.0) for i in range(15)]
+    for i in range(1, 15):
+        assert level_break(calm[: i + 1], anchors) is None
+
+    # jump past swing_high specifically — the only fresh crossing this bar
+    breakout = calm + [_bar(15, 115.0)]
+    d = level_break(breakout, anchors)
+    assert d is not None
+    assert d.context["level_name"] == "swing_high"
+
+
+def test_vwap_is_volume_weighted_average_of_typical_price():
+    # with _bar()'s default spread, high/low are symmetric around close, so
+    # typical price ((high+low+close)/3) reduces exactly to close
+    bars = [_bar(0, 100.0, volume=100), _bar(1, 200.0, volume=300)]
+    expected = (100.0 * 100 + 200.0 * 300) / (100 + 300)
+    assert vwap(bars) == pytest.approx(expected)
+
+
+def test_vwap_none_with_no_bars():
+    assert vwap([]) is None
+
+
+def test_vwap_break_fires_once_at_the_crossing_not_on_every_later_bar():
+    anchors = _flat_anchors()
+    calm = [_bar(i, 100.0) for i in range(15)]  # VWAP ~100, small ATR baseline
+    for i in range(1, 15):
+        assert vwap_break(calm[: i + 1], anchors) is None
+
+    jump = calm + [_bar(15, 150.0)]
+    d = vwap_break(jump, anchors)
+    assert d is not None
+    assert d.kind == "vwap_break"
+
+    still_up = jump + [_bar(16, 152.0)]
+    assert vwap_break(still_up, anchors) is None
+
+
+def test_round_number_break_fires_on_a_fresh_crossing():
+    anchors = _flat_anchors()
+    # under $100 the round-number spacing is $5; calm bars sit at 97, well
+    # inside a $5 band, so no crossing happens yet
+    calm = [_bar(i, 97.0, spread=0.2) for i in range(15)]
+    for i in range(1, 15):
+        assert round_number_break(calm[: i + 1], anchors) is None
+
+    crossing = calm + [_bar(15, 101.0, spread=0.2)]
+    d = round_number_break(crossing, anchors)
+    assert d is not None
+    assert d.kind == "round_number_break"
+
+    still_above = crossing + [_bar(16, 102.0, spread=0.2)]
+    assert round_number_break(still_above, anchors) is None
+
+
+def test_all_detectors_are_registered():
+    kinds = {d.__name__ for d in DETECTORS}
+    assert kinds == {
+        "level_break", "rvol_spike", "range_expansion", "vwap_break", "round_number_break", "gap",
+    }
 
 
 def test_score_cluster_rewards_corroboration_but_caps_it_below_double_counting():

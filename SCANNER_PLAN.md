@@ -8,13 +8,17 @@ CLAUDE.md for the engineering rules this project follows.
 
 ## Watchlist
 
-SPY, QQQ, GOOGL, TSLA, BE, IONQ
+SPY, QQQ, GOOGL, TSLA, BE, IONQ, NVDA, AAPL, AMD, META, AMZN — defined
+once in `tradebot/config.py` and imported everywhere else (fetch_cache,
+replay, runner) rather than duplicated.
 
 ## Architecture
 
 1. `tradebot/detectors.py` — pure detection functions: `Bar`,
-   `DailyAnchors`, `build_anchors()`, `level_break`, `rvol_spike`,
-   `range_expansion`, `gap`, `score_cluster()`, `tier_for_score()`.
+   `DailyAnchors`, `build_anchors()`, `level_break` (prior high/low,
+   opening range, and 20-day swing high/low), `rvol_spike`,
+   `range_expansion`, `vwap_break`, `round_number_break`, `gap`,
+   `score_cluster()`, `tier_for_score()`.
 2. `tradebot/marketdata.py` — the `MarketData` protocol and
    `ReplayMarketData` (backtest/replay, cursor-gated).
 3. `tradebot/vendors/alpaca.py` — the only file that imports the Alpaca
@@ -39,10 +43,11 @@ SPY, QQQ, GOOGL, TSLA, BE, IONQ
 Detections are scored in ATR units (or a ratio, for `rvol_spike`) and
 bucketed by `tier_for_score()`:
 
-- `TIER_HIGH = 3.0`, `TIER_MEDIUM = 1.5` (calibrated 2026-08-05 from a
-  20-session replay across the full watchlist — see
+- `TIER_HIGH = 3.4`, `TIER_MEDIUM = 1.7` (calibrated 2026-08-05 from a
+  20-session replay across the full 11-symbol watchlist — see
   `out/replay_detections.csv` and `detectors.py`'s comment for the
-  derivation). Targets ~2-5 high-tier clusters/day across the watchlist.
+  derivation history). Targets ~2-5 high-tier clusters/day across the
+  watchlist; medium tier runs ~23/day, delivered as one hourly digest.
 
 ## Alert format
 
@@ -56,11 +61,14 @@ not as individual messages.
 {tier_emoji} {TIER} — {symbol} {trend_emoji}
 {kinds}
 
+🎯 {BULLISH|BEARISH} — favors {calls|puts}
+
 {headlines}
 
 📊 Score: {score:.2f} ATR
 💵 Close: ${close:.2f}  (ATR14: {atr14})
 ⚖️ Breakeven (60m): {breakeven}
+📚 Similar setups: {history}
 📐 Range: ${opening_range_low:.2f}-${opening_range_high:.2f}  |  Prior close: ${prior_close:.2f}
 💹 Quote: ${bid:.2f} / ${ask:.2f}  (last ${last:.2f})
 
@@ -73,6 +81,10 @@ not as individual messages.
 - `{TIER}` — uppercase: `HIGH`, `MEDIUM`, or `LOG`.
 - `{kinds}` — the cluster's detector kinds, comma-and-space joined (e.g.
   `gap, rvol_spike`).
+- `🎯 {BULLISH|BEARISH}` — a mechanical translation of `trend` (up/down)
+  into the option side it favors. Not a prediction — pair with the
+  history line below to judge how reliable that direction actually is
+  for this kind of setup.
 - `{headlines}` — the constituent detections' headlines, semicolon
   joined, as already stored in the journal.
 - `{atr14}` — two decimals, or `n/a` if unavailable.
@@ -81,6 +93,12 @@ not as individual messages.
   `no tradable contract` if the chain is unavailable or the ATM contract
   fails the liquidity filter (spread > 12% of mid, or open interest <
   500) — never a guessed delta.
+- `{history}` — from `journal.historical_performance()`: what past
+  clusters with this same primary detector kind and trend direction
+  actually did, using real backfilled +30min prices from the `marks`
+  table (e.g. `65% continued (n=20), avg +0.80% at 30m`). Shows
+  `not enough history yet` below `MIN_HISTORY_SAMPLE` (5) — never a stat
+  built on too few data points to mean anything.
 - `{ts_et}` — `YYYY-MM-DD HH:MM` in US/Eastern.
 - `{id}` — the journal's detection id.
 - `{code_version}` — the short git hash the cluster was journaled under.
