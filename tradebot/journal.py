@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS detections (
     context_json TEXT,
     code_version TEXT,
     alerted INTEGER DEFAULT 0,
-    suppress_reason TEXT
+    suppress_reason TEXT,
+    no_trade INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -56,11 +57,24 @@ CREATE TABLE IF NOT EXISTS marks (
 """
 
 
-def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = True) -> sqlite3.Connection:
+    """check_same_thread=False is for callers (the Telegram command
+    dispatcher) that hand this connection to a worker-thread pool and
+    serialize access themselves with their own lock — see
+    tradebot.telegram_bot.dispatcher. Every other caller (the scanner,
+    replay, scripts) is single-threaded and should leave the default."""
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS won't retroactively add a column to a
+    # pre-existing detections table — added after no_trade was introduced
+    # to track "alert fired but no tradable contract" for /performance.
+    try:
+        conn.execute("ALTER TABLE detections ADD COLUMN no_trade INTEGER")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 
@@ -125,6 +139,15 @@ def write_cluster(
         ),
     )
     return detection_id
+
+
+def set_no_trade(conn: sqlite3.Connection, detection_id: str, no_trade: bool) -> None:
+    """Records whether a dispatched HIGH alert ended up with a tradable
+    contract — set once breakeven_move() has actually been computed, since
+    write_cluster() happens before that. NULL (never called) means 'not
+    applicable or not yet computed', not 'had a contract' — see
+    /performance, which reports that distinction rather than assuming."""
+    conn.execute("UPDATE detections SET no_trade = ? WHERE id = ?", (int(no_trade), detection_id))
 
 
 def _all_bars_for_session(cache_dir: Path, symbol: str, session_date: date):

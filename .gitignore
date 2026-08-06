@@ -1,6 +1,10 @@
 .env
 data/cache/
 data/journal.db
+data/users.db
+data/HALT
+data/heartbeat.json
+data/*.log
 out/
 __pycache__/
 .venv/

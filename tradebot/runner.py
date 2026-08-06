@@ -42,6 +42,7 @@ from tradebot.config import WATCHLIST
 from tradebot.costs import breakeven_move
 from tradebot.formatting import templates
 from tradebot.formatting.guard import validate_alert_data
+from tradebot.telegram_bot import heartbeat as bot_liveness
 from tradebot.detectors import (
     DETECTORS,
     Bar,
@@ -52,13 +53,14 @@ from tradebot.detectors import (
     score_cluster,
     tier_for_score,
 )
-from tradebot.journal import backfill_marks, code_version, connect, historical_performance, tier_performance
+from tradebot.journal import backfill_marks, code_version, connect, historical_performance, set_no_trade, tier_performance
 from tradebot.journal import write_cluster as journal_write_cluster
 from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO_ROOT / "data" / "cache"
 HALT_FILE = REPO_ROOT / "data" / "HALT"
+HEARTBEAT_FILE = REPO_ROOT / "data" / "heartbeat.json"
 ET = ZoneInfo("America/New_York")
 STALENESS_SECONDS = 90
 BAR_MINUTES = 5
@@ -182,8 +184,15 @@ class TelegramHaltChecker:
 
 
 def process_new_bar(
-    conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats
+    conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
+    subscriber_hook=None,
 ) -> None:
+    """subscriber_hook(cluster, rendered_text), if given, is called right
+    after a HIGH alert is sent to the ops channel/console — it's how the
+    live per-user DM fan-out (tradebot.telegram_bot.delivery) plugs in
+    without this module needing to know anything about Telegram users.
+    None (the default) preserves the exact prior behavior — no fan-out,
+    used by replay and by every existing test."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
@@ -236,11 +245,18 @@ def process_new_bar(
             except NotImplementedError:
                 chain = None
             breakeven = breakeven_move(chain, spot=result["close"], atr14=result["atr14"])
+            set_no_trade(conn, detection_id, breakeven is None)
             history = historical_performance(
                 conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id
             )
-            alerter.send(templates.render_high_alert(cluster, anchors, quote, breakeven, history))
+            text = templates.render_high_alert(cluster, anchors, quote, breakeven, history)
+            alerter.send(text)
             conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
+            if subscriber_hook is not None:
+                try:
+                    subscriber_hook(cluster, text)
+                except Exception:
+                    stats.errors.append(f"{symbol}: subscriber fan-out failed — {traceback.format_exc()}")
         else:
             stats.errors.append(f"{symbol}: alert suppressed by data guard — {guard_reason}")
             conn.execute(
@@ -385,7 +401,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
 # --------------------------------------------------------------------------
 
 
-def run_live(alerter) -> HeartbeatStats:
+def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
     open_ts, close_ts = session_bounds(session_date)
@@ -459,7 +475,7 @@ def run_live(alerter) -> HeartbeatStats:
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
                     lambda s, _sym=symbol: md[_sym].chain(s, expiry=session_date),
-                    stats,
+                    stats, subscriber_hook,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start)
             except Exception:
@@ -474,6 +490,7 @@ def run_live(alerter) -> HeartbeatStats:
                     pass
                 continue
 
+        bot_liveness.write_heartbeat(HEARTBEAT_FILE, loop_start)
         elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
         time.sleep(max(0.0, BAR_MINUTES * 60 - elapsed))
 
@@ -496,6 +513,10 @@ def main() -> None:
         "--replay-date", type=str, default=None,
         help="YYYY-MM-DD — run against a cached session instead of live market hours",
     )
+    parser.add_argument(
+        "--no-personal-alerts", action="store_true",
+        help="with --live, skip the per-user DM fan-out (tradebot.telegram_bot) and only push the ops channel",
+    )
     args = parser.parse_args()
 
     alerter = TelegramAlerter() if args.live else ConsoleAlerter()
@@ -503,7 +524,20 @@ def main() -> None:
     if args.replay_date:
         run_replay(date.fromisoformat(args.replay_date), alerter)
     else:
-        run_live(alerter)
+        subscriber_hook = None
+        if args.live and not args.no_personal_alerts:
+            # Deferred import: the command layer (and its own DB) is only
+            # needed here, so replay/console-only runs stay decoupled from it.
+            from tradebot.telegram_bot.client import BotClient
+            from tradebot.telegram_bot.db import connect as users_connect
+            from tradebot.telegram_bot.delivery import make_subscriber_hook
+
+            client = BotClient(alerter.token)
+            users_conn = users_connect()
+            subscriber_hook = make_subscriber_hook(
+                client, users_conn, lambda now: now.astimezone(ET).date(), WATCHLIST
+            )
+        run_live(alerter, subscriber_hook)
 
 
 if __name__ == "__main__":

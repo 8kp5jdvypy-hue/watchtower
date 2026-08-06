@@ -1,0 +1,595 @@
+"""One function per command, matching tradebot.telegram_bot.commands.COMMANDS
+exactly. Every handler is `(HandlerContext) -> Reply` — plain data in,
+plain data out — so tests never need a real Telegram connection; see
+tests/telegram_bot/test_handlers.py.
+
+Free-text onboarding steps (quiet hours, risk limits) are `(ctx, text) ->
+Reply` instead, registered in ONBOARDING_TEXT_STEPS and dispatched by
+Dispatcher._maybe_handle_onboarding_text whenever the user's
+onboarding_step expects typed input rather than a button tap.
+"""
+from __future__ import annotations
+
+import csv
+import html
+import io
+from datetime import datetime
+
+from tradebot.formatting.fields import money, pct, qty, ts
+from tradebot.telegram_bot import db, keyboards, performance
+from tradebot.telegram_bot.context import HandlerContext, Reply
+
+
+def _parse_float(raw: str) -> float | None:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_bucket(bucket) -> str:
+    if bucket is None:
+        return "not enough samples yet"
+    rate, n = bucket
+    return f"{pct(rate * 100)} (n={qty(n)})"
+
+
+# -------------------------------------------------------------------- #
+# /start — onboarding. Real track record first, explicit risk ack,
+# then timezone (buttons) -> quiet hours (typed) -> limits (typed).
+# -------------------------------------------------------------------- #
+
+
+def _track_record_and_risk_text(ctx: HandlerContext) -> str:
+    tr = performance.track_record(ctx.journal_conn, tier="high")
+    lines = [f"<b>Welcome to {html.escape(ctx.app.bot_name)}.</b>", "", "Before anything else — the real track record, losing stretches included:"]
+    if tr is None:
+        lines.append("Not enough history yet for real numbers. Until this fills in, every alert is unproven — treat it that way.")
+    else:
+        lines += [
+            "",
+            f"HIGH tier, last {qty(tr.sample_size)} alerts @ +{tr.offset_min}m:",
+            f"  Hit rate: {pct(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
+            f"  Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
+            f"  Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)}",
+        ]
+    lines += [
+        "",
+        "This bot detects patterns and reports what actually happened after — it is not advice, and losses are a normal, likely part of using it, not a bug.",
+        "",
+        "Tap below only if you actually understand that.",
+    ]
+    return "\n".join(lines)
+
+
+def _settings_summary(ctx: HandlerContext) -> str:
+    user = ctx.user
+    lines = [
+        f"<b>{html.escape(ctx.app.bot_name)}</b> — you're already set up.",
+        "",
+        f"Timezone: {html.escape(user.timezone)}",
+        f"Quiet hours: {user.quiet_hours_start}–{user.quiet_hours_end}" if user.quiet_hours_start else "Quiet hours: none set",
+        f"Max trades/day: {user.max_trades_per_day if user.max_trades_per_day is not None else 'not set'}",
+        f"Max daily loss: {money(user.max_daily_loss) if user.max_daily_loss is not None else 'not set'}",
+        f"Max position size: {user.max_position_size if user.max_position_size is not None else 'not set'}",
+        "",
+        "Change any of this with /limits, /watchlist, or /pause. This won't wipe or reset anything.",
+    ]
+    return "\n".join(lines)
+
+
+_RESUME_ONBOARDING_TEXT = {
+    "timezone": "Pick your timezone:",
+    "quiet_hours": "What are your quiet hours (no alerts)? Reply like 22:00-06:00, or 'none'.",
+    "limits": "Set your risk limits — reply as: <max trades/day> <max daily loss $> <max position size>. Example: 5 200 10",
+}
+
+
+def handle_start(ctx: HandlerContext) -> Reply:
+    user = ctx.user
+    if user.is_onboarded:
+        return Reply(text=_settings_summary(ctx))
+
+    if user.onboarding_step is None:
+        db.set_onboarding_step(ctx.users_conn, user.telegram_user_id, "risk_ack")
+        return Reply(text=_track_record_and_risk_text(ctx), keyboard=keyboards.risk_ack_keyboard())
+
+    if user.onboarding_step == "risk_ack":
+        return Reply(text=_track_record_and_risk_text(ctx), keyboard=keyboards.risk_ack_keyboard())
+    if user.onboarding_step == "timezone":
+        return Reply(text=_RESUME_ONBOARDING_TEXT["timezone"], keyboard=keyboards.timezone_keyboard())
+    return Reply(text=_RESUME_ONBOARDING_TEXT.get(user.onboarding_step, "Let's pick this back up — reply to continue."))
+
+
+def _handle_quiet_hours_text(ctx: HandlerContext, text: str) -> Reply:
+    raw = text.strip().lower()
+    if raw in ("none", "no", "n/a", "skip"):
+        db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, None, None)
+    else:
+        parts = raw.split("-")
+        if len(parts) != 2 or not all(_looks_like_time(p) for p in parts):
+            return Reply(text="Couldn't read that. Reply like 22:00-06:00, or 'none'.")
+        db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, parts[0].strip(), parts[1].strip())
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "limits")
+    return Reply(text=_RESUME_ONBOARDING_TEXT["limits"])
+
+
+def _looks_like_time(value: str) -> bool:
+    value = value.strip()
+    if ":" not in value:
+        return False
+    hh, _, mm = value.partition(":")
+    return hh.isdigit() and mm.isdigit() and 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
+
+
+def _handle_limits_text(ctx: HandlerContext, text: str) -> Reply:
+    parts = text.split()
+    if len(parts) != 3 or any(_parse_float(p) is None for p in parts):
+        return Reply(text="Reply with three numbers: <max trades/day> <max daily loss $> <max position size>. Example: 5 200 10")
+    trades, loss, size = (_parse_float(p) for p in parts)
+    market_open = ctx.app.market_is_open_fn(ctx.now)
+    for field, value in (("max_trades_per_day", trades), ("max_daily_loss", loss), ("max_position_size", size)):
+        db.apply_limit_change(ctx.users_conn, ctx.user.telegram_user_id, field, value, now=ctx.now, market_is_open=market_open)
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, None)
+    db.mark_onboarded(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
+    return Reply(
+        text="You're set. Alerts will respect these limits and your quiet hours from now on.\n"
+        "/watchlist to customize your symbols, /limits to change these later, /help any time."
+    )
+
+
+ONBOARDING_TEXT_STEPS = {
+    "quiet_hours": _handle_quiet_hours_text,
+    "limits": _handle_limits_text,
+}
+
+
+# -------------------------------------------------------------------- #
+# /status
+# -------------------------------------------------------------------- #
+
+
+def handle_status(ctx: HandlerContext) -> Reply:
+    now = ctx.now
+    session_date = ctx.app.session_date_fn(now)
+    market_open = ctx.app.market_is_open_fn(now)
+    globally_halted = ctx.app.halt_file.exists()
+
+    from tradebot.telegram_bot import heartbeat as bot_liveness
+
+    hb = bot_liveness.read_heartbeat(ctx.app.heartbeat_file)
+    if hb is None:
+        feed_line = "no heartbeat recorded yet — the live scanner may not be running"
+    else:
+        age = (now - datetime.fromisoformat(hb["ts_utc"])).total_seconds()
+        stale = age > ctx.app.bar_minutes * 60 * 2
+        feed_line = f"last loop {int(age)}s ago" + (" — looks STALE" if stale else "")
+
+    fired_today = ctx.journal_conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE tier='high' AND alerted=1 AND session=?", (session_date.isoformat(),)
+    ).fetchone()[0]
+    cooldowns_today = ctx.journal_conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE tier='high' AND suppress_reason='cooldown_active' AND session=?",
+        (session_date.isoformat(),),
+    ).fetchone()[0]
+
+    header = "🛑 Globally halted" if globally_halted else ("🟢 Live" if market_open else "⚪ Market closed")
+    lines = [
+        f"<b>{header}</b>",
+        f"Data feed: {feed_line}",
+        f"HIGH alerts today: {qty(fired_today)}/{qty(ctx.app.high_tier_daily_cap)}",
+        f"Cooldown suppressions today: {qty(cooldowns_today)}",
+    ]
+    if ctx.user.is_locked(now):
+        lines.append(f"You: locked until {ts(datetime.fromisoformat(ctx.user.locked_until))} — {ctx.user.lock_reason}")
+    elif ctx.user.is_paused(now):
+        lines.append(f"You: paused until {ts(datetime.fromisoformat(ctx.user.paused_until))}")
+    elif ctx.user.is_halted_for_session(session_date):
+        lines.append("You: alerts halted for the rest of today's session")
+    else:
+        lines.append("You: active, receiving alerts")
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /performance — journal only
+# -------------------------------------------------------------------- #
+
+
+def handle_performance(ctx: HandlerContext) -> Reply:
+    tr = performance.track_record(ctx.journal_conn, tier="high")
+    if tr is None:
+        return Reply(text="Not enough journaled history yet for a real track record. Check back after a few more sessions.")
+    lines = [
+        f"<b>HIGH tier track record</b> · @ +{tr.offset_min}m, n={qty(tr.sample_size)}",
+        "",
+        f"Hit rate: {pct(tr.hit_rate * 100)}",
+        f"Avg move: {pct(tr.avg_return_pct)}",
+        f"Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
+        f"Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)} (equal-weighted, back-to-back — not real compounded P/L)",
+        "",
+        f"News-driven (gap): {tr.news_driven and pct(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
+        f"Clean technical: {tr.clean_technical and pct(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
+        "",
+    ]
+    if tr.no_trade_tracked_count:
+        lines.append(
+            f"Alerts sent: {qty(tr.total_alerts)} · NO TRADE (no tradable contract): "
+            f"{qty(tr.total_no_trade)} of {qty(tr.no_trade_tracked_count)} tracked"
+        )
+    else:
+        lines.append(f"Alerts sent: {qty(tr.total_alerts)} · NO TRADE tracking not available for this history yet")
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /me — personal stats
+# -------------------------------------------------------------------- #
+
+
+def handle_me(ctx: HandlerContext) -> Reply:
+    stats = db.personal_stats(ctx.users_conn, ctx.user.telegram_user_id)
+    if stats["overall"] is None:
+        return Reply(text=f"Not enough closed trades yet (need {db.MIN_STAT_SAMPLE}+) — log outcomes with /took and /closed to build this out.")
+
+    lines = ["<b>Your stats</b>", "", f"Overall: {_fmt_bucket(stats['overall'])}", ""]
+
+    lines.append("By detector:")
+    for kind, val in stats["by_detector"].items():
+        lines.append(f"  {html.escape(kind)}: {_fmt_bucket(val)}")
+
+    lines.append("By symbol:")
+    for symbol, val in stats["by_symbol"].items():
+        lines.append(f"  {html.escape(symbol)}: {_fmt_bucket(val)}")
+
+    lines.append("")
+    lines.append(f"Taken within 2min: {_fmt_bucket(stats['fast_vs_slow']['within_2min'])}")
+    lines.append(f"Taken later: {_fmt_bucket(stats['fast_vs_slow']['later'])}")
+
+    lines.append("")
+    lines.append(f"After a NO TRADE gate: {_fmt_bucket(stats['no_trade_comparison']['after_no_trade'])}")
+    lines.append(f"Normal entries: {_fmt_bucket(stats['no_trade_comparison']['normal'])}")
+
+    if stats["pnl_by_tag"]:
+        lines.append("")
+        lines.append("P/L by tag:")
+        for tag, val in stats["pnl_by_tag"].items():
+            tag_text = (f"{pct(val[0])} avg (n={qty(val[1])})") if val else "not enough samples yet"
+            lines.append(f"  {html.escape(tag)}: {tag_text}")
+
+    if stats["adherence_score"] is not None:
+        lines.append("")
+        lines.append(
+            f"Adherence: {pct(stats['adherence_score'] * 100)} of alerts you responded to were logged "
+            f"through to a real outcome (n={qty(stats['total_alerts_responded'])})"
+        )
+        if stats["open_trades"]:
+            lines.append(f"({qty(stats['open_trades'])} still open — /closed to wrap them up)")
+
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /took
+# -------------------------------------------------------------------- #
+
+
+def _resolve_detection(ctx: HandlerContext, alert_id: str):
+    return ctx.journal_conn.execute(
+        "SELECT id, symbol, kinds, tier, ts_utc, close, no_trade FROM detections WHERE id = ? OR id LIKE ?",
+        (alert_id, f"{alert_id}%"),
+    ).fetchone()
+
+
+def log_took(ctx: HandlerContext, detection_id: str, symbol: str, kind: str, tier: str, alert_ts_utc: str,
+             after_no_trade: bool, contracts: float | None, entry_price: float | None) -> db.Trade | str:
+    """Shared by the typed /took handler and the "I took this" button —
+    returns the Trade on success, or a short reason string if one already
+    exists for this alert."""
+    existing = db.get_open_trade_for_alert(ctx.users_conn, ctx.user.telegram_user_id, detection_id)
+    if existing is not None:
+        return f"already logged as taken ({ts(datetime.fromisoformat(existing.taken_at))})"
+    trade = db.log_took(
+        ctx.users_conn, ctx.user.telegram_user_id, detection_id=detection_id, symbol=symbol, kind=kind,
+        tier=tier, alert_ts_utc=alert_ts_utc, taken_at=ctx.now, after_no_trade=after_no_trade,
+        contracts=contracts, entry_price=entry_price,
+    )
+    if not db.has_responded(ctx.users_conn, ctx.user.telegram_user_id, detection_id):
+        db.record_alert_response(ctx.users_conn, ctx.user.telegram_user_id, detection_id, "took", ctx.now)
+    return trade
+
+
+def handle_took(ctx: HandlerContext) -> Reply:
+    if not ctx.args:
+        return Reply(text="Usage: /took <alert_id> [contracts] [entry price]\nTip: tap \"I took this\" on the alert instead — no typing needed.")
+    alert_id = ctx.args[0]
+    row = _resolve_detection(ctx, alert_id)
+    if row is None:
+        return Reply(text=f"I don't recognize alert id {html.escape(alert_id)} — check the short id in the alert's footer.")
+    detection_id, symbol, kinds, tier, alert_ts_utc, close, no_trade = row
+    contracts = _parse_float(ctx.args[1]) if len(ctx.args) > 1 else None
+    entry = _parse_float(ctx.args[2]) if len(ctx.args) > 2 else close
+
+    result = log_took(ctx, detection_id, symbol, kinds.split(",")[0], tier, alert_ts_utc, bool(no_trade), contracts, entry)
+    if isinstance(result, str):
+        return Reply(text=f"{result.capitalize()}. Use /closed to log the exit.")
+    extra = f" · {qty(contracts)} contracts" if contracts else ""
+    return Reply(text=f"Logged: {symbol} · entry {money(entry) if entry else '—'}{extra}. /closed {result.id[:8]} when you're out.")
+
+
+# -------------------------------------------------------------------- #
+# /closed
+# -------------------------------------------------------------------- #
+
+
+def _find_open_trade_by_prefix(ctx: HandlerContext, prefix: str) -> db.Trade | None:
+    rows = ctx.users_conn.execute(
+        "SELECT id FROM user_trades WHERE telegram_user_id = ? AND id LIKE ? AND status = 'open'",
+        (ctx.user.telegram_user_id, f"{prefix}%"),
+    ).fetchall()
+    if len(rows) == 1:
+        return db.get_trade(ctx.users_conn, rows[0][0])
+    return None
+
+
+def handle_closed(ctx: HandlerContext) -> Reply:
+    if not ctx.args:
+        open_trade = db.most_recent_open_trade(ctx.users_conn, ctx.user.telegram_user_id)
+        if open_trade is None:
+            return Reply(text="No open trade to close. Usage: /closed [trade_id] <exit price> [tag]")
+        return Reply(text=f"Usage: /closed <exit price> [tag] — closes your open {open_trade.symbol} from {ts(datetime.fromisoformat(open_trade.taken_at))}.")
+
+    first = ctx.args[0]
+    maybe_price = _parse_float(first)
+    if maybe_price is not None:
+        trade = db.most_recent_open_trade(ctx.users_conn, ctx.user.telegram_user_id)
+        if trade is None:
+            return Reply(text="No open trade to close.")
+        exit_price = maybe_price
+        tag = " ".join(ctx.args[1:]) or None
+    else:
+        trade = db.get_trade(ctx.users_conn, first) or _find_open_trade_by_prefix(ctx, first)
+        if trade is None or trade.telegram_user_id != ctx.user.telegram_user_id:
+            return Reply(text=f"I don't recognize trade id {html.escape(first)}.")
+        if len(ctx.args) < 2:
+            return Reply(text="Usage: /closed <trade_id> <exit price> [tag]")
+        exit_price = _parse_float(ctx.args[1])
+        if exit_price is None:
+            return Reply(text=f"Couldn't read {html.escape(ctx.args[1])} as a price.")
+        tag = " ".join(ctx.args[2:]) or None
+
+    if trade.status == "closed":
+        return Reply(text="That trade's already closed.")
+
+    closed = db.log_closed(ctx.users_conn, trade.id, exit_price=exit_price, closed_at=ctx.now, emotional_tag=tag)
+    sign = "+" if (closed.pnl_pct or 0) >= 0 else ""
+    pnl_text = f"{sign}{closed.pnl_pct:.2f}%" if closed.pnl_pct is not None else "n/a (no entry price on file)"
+    return Reply(text=f"Closed {closed.symbol}: {pnl_text} (entry {money(closed.entry_price) if closed.entry_price else '—'} → exit {money(exit_price)}).")
+
+
+# -------------------------------------------------------------------- #
+# /limits
+# -------------------------------------------------------------------- #
+
+LIMIT_ALIASES = {
+    "trades": "max_trades_per_day", "max_trades_per_day": "max_trades_per_day",
+    "loss": "max_daily_loss", "max_daily_loss": "max_daily_loss",
+    "size": "max_position_size", "max_position_size": "max_position_size",
+}
+
+
+def handle_limits(ctx: HandlerContext) -> Reply:
+    session_date = ctx.app.session_date_fn(ctx.now)
+    db.apply_pending_limits_if_due(ctx.users_conn, ctx.user.telegram_user_id, session_date)
+    user = db.get_user(ctx.users_conn, ctx.user.telegram_user_id)
+
+    if not ctx.args:
+        lines = [
+            "<b>Your limits</b>",
+            f"Max trades/day: {user.max_trades_per_day if user.max_trades_per_day is not None else 'not set'}",
+            f"Max daily loss: {money(user.max_daily_loss) if user.max_daily_loss is not None else 'not set'}",
+            f"Max position size: {user.max_position_size if user.max_position_size is not None else 'not set'}",
+        ]
+        if user.pending_limits:
+            lines.append("")
+            lines.append("Queued for next session:")
+            for p in user.pending_limits:
+                lines.append(f"  {p['field']} → {p['value']}")
+        lines.append("")
+        lines.append("Set with: /limits trades 3   /limits loss 200   /limits size 5")
+        return Reply(text="\n".join(lines))
+
+    if len(ctx.args) < 2:
+        return Reply(text="Usage: /limits <trades|loss|size> <value>")
+
+    field = LIMIT_ALIASES.get(ctx.args[0].lower())
+    if field is None:
+        return Reply(text="Unknown limit — use trades, loss, or size.")
+    value = _parse_float(ctx.args[1])
+    if value is None or value <= 0:
+        return Reply(text=f"Couldn't read {html.escape(ctx.args[1])} as a positive number.")
+
+    market_open = ctx.app.market_is_open_fn(ctx.now)
+    result = db.apply_limit_change(ctx.users_conn, ctx.user.telegram_user_id, field, value, now=ctx.now, market_is_open=market_open)
+    if result == "queued":
+        return Reply(text=f"Noted — but you set this limit for exactly this moment. {field} → {value} is queued and takes effect next session, not mid-day.")
+    return Reply(text=f"Done — {field} is now {value}, effective immediately.")
+
+
+# -------------------------------------------------------------------- #
+# /pause, /resume
+# -------------------------------------------------------------------- #
+
+
+def handle_pause(ctx: HandlerContext) -> Reply:
+    if ctx.user.is_locked(ctx.now):
+        return Reply(text=f"You're already locked until {ts(datetime.fromisoformat(ctx.user.locked_until))} ({ctx.user.lock_reason}) — pausing won't change anything.")
+    return Reply(text="Pause alerts for how long?", keyboard=keyboards.pause_keyboard())
+
+
+def handle_resume(ctx: HandlerContext) -> Reply:
+    if ctx.user.is_locked(ctx.now):
+        return Reply(text=f"Can't — you're locked until {ts(datetime.fromisoformat(ctx.user.locked_until))} ({ctx.user.lock_reason}). That doesn't lift early.")
+    session_date = ctx.app.session_date_fn(ctx.now)
+    was_paused = ctx.user.is_paused(ctx.now)
+    was_halted = ctx.user.is_halted_for_session(session_date)
+    if not was_paused and not was_halted:
+        return Reply(text="You weren't paused.")
+    db.clear_pause(ctx.users_conn, ctx.user.telegram_user_id)
+    db.clear_session_halt(ctx.users_conn, ctx.user.telegram_user_id)
+    return Reply(text="Alerts back on.")
+
+
+# -------------------------------------------------------------------- #
+# /watchlist
+# -------------------------------------------------------------------- #
+
+
+def handle_watchlist(ctx: HandlerContext) -> Reply:
+    custom = db.get_watchlist(ctx.users_conn, ctx.user.telegram_user_id)
+    active = custom or ctx.app.default_watchlist
+    lines = [f"<b>Your watchlist</b> ({'custom' if custom else 'default'})", "", ", ".join(active)]
+    if ctx.user.tier == "free":
+        lines.append("")
+        lines.append("Editing is a paid feature — see /tiers.")
+        return Reply(text="\n".join(lines))
+    lines.append("")
+    lines.append("Tap a symbol to toggle it, then Save. (Deselecting everything reverts you to the default list.)")
+    return Reply(text="\n".join(lines), keyboard=keyboards.watchlist_keyboard(ctx.app.default_watchlist, set(active)))
+
+
+# -------------------------------------------------------------------- #
+# /events
+# -------------------------------------------------------------------- #
+
+
+def handle_events(ctx: HandlerContext) -> Reply:
+    session_date = ctx.app.session_date_fn(ctx.now)
+    events = db.list_events_for_date(ctx.users_conn, session_date)
+    if not events:
+        return Reply(
+            text=f"No events loaded for {session_date.isoformat()}. (No live earnings/macro feed wired in yet — "
+            "this means 'nothing loaded', not 'nothing happening'.)"
+        )
+    lines = [f"<b>Events — {session_date.isoformat()}</b>", ""]
+    for e in events:
+        prefix = f"{html.escape(e['symbol'])} — " if e["symbol"] else ""
+        lines.append(f"{prefix}{html.escape(e['kind'])}: {html.escape(e['note'])}")
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /tiers
+# -------------------------------------------------------------------- #
+
+
+def handle_tiers(ctx: HandlerContext) -> Reply:
+    lines = ["<b>Plans</b>", "", f"Your current plan: {html.escape(ctx.user.tier)}"]
+    if ctx.app.plans:
+        lines.append("")
+        for name, price, desc in ctx.app.plans:
+            lines.append(f"{html.escape(name)} — {html.escape(price)}: {html.escape(desc)}")
+    else:
+        lines.append("")
+        lines.append("Plan details aren't configured yet.")
+    if ctx.app.stripe_portal_url is None:
+        lines.append("")
+        lines.append(f"Billing isn't configured yet — contact {html.escape(ctx.app.support_contact)} to change plans for now.")
+    keyboard = keyboards.tiers_keyboard(ctx.app.stripe_portal_url)
+    return Reply(text="\n".join(lines), keyboard=keyboard)
+
+
+# -------------------------------------------------------------------- #
+# /export
+# -------------------------------------------------------------------- #
+
+_EXPORT_COLUMNS = [
+    "id", "symbol", "kind", "tier", "alert_ts_utc", "taken_at", "reaction_seconds", "after_no_trade",
+    "contracts", "entry_price", "exit_price", "closed_at", "pnl_pct", "status", "emotional_tag",
+]
+
+
+def handle_export(ctx: HandlerContext) -> Reply:
+    trades = db.list_trades(ctx.users_conn, ctx.user.telegram_user_id)
+    if not trades:
+        return Reply(text="No logged trades yet — nothing to export. Your data is always available here whenever you have some.")
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(_EXPORT_COLUMNS)
+    for t in trades:
+        writer.writerow([getattr(t, col) for col in _EXPORT_COLUMNS])
+    content = buf.getvalue().encode("utf-8")
+    filename = f"journal_{ctx.user.telegram_user_id}_{ctx.now.date().isoformat()}.csv"
+    return Reply(text=f"{len(trades)} trade(s).", document=(filename, content))
+
+
+# -------------------------------------------------------------------- #
+# /help
+# -------------------------------------------------------------------- #
+
+
+def handle_help(ctx: HandlerContext) -> Reply:
+    lines = [
+        f"<b>{html.escape(ctx.app.bot_name)} commands</b>",
+        "",
+        "<b>Account</b>",
+        "/status — bot & your state",
+        "/performance — real track record",
+        "/me — your personal stats",
+        "",
+        "<b>Journaling</b>",
+        "/took &lt;alert_id&gt; — log a trade (or tap the alert's button)",
+        "/closed &lt;exit price&gt; — log an exit",
+        "/export — your journal as CSV",
+        "",
+        "<b>Controls</b>",
+        "/limits — daily loss/trade caps",
+        "/pause, /resume — mute/unmute alerts",
+        "/watchlist — your symbols",
+        "/halt — emergency stop",
+        "",
+        "<b>Info</b>",
+        "/events — today's calendar",
+        "/tiers — plans &amp; billing",
+        "",
+        f"Support: {html.escape(ctx.app.support_contact)}",
+        "",
+        "If trading ever stops feeling like a choice, the National Council on Problem Gambling "
+        "(1-800-522-4700, ncpgambling.org) is free, confidential, and available any time — no judgment.",
+    ]
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /halt
+# -------------------------------------------------------------------- #
+
+
+def handle_halt(ctx: HandlerContext) -> Reply:
+    if ctx.user.is_admin:
+        ctx.app.halt_file.parent.mkdir(parents=True, exist_ok=True)
+        ctx.app.halt_file.write_text(f"halted by {ctx.user.telegram_user_id} at {ctx.now.isoformat()}\n")
+        return Reply(text="🛑 Global halt engaged — all publishing stops for everyone. Remove data/HALT to resume.")
+    session_date = ctx.app.session_date_fn(ctx.now)
+    db.set_session_halt(ctx.users_conn, ctx.user.telegram_user_id, session_date)
+    return Reply(text="Stopped your alerts for the rest of today's session. /resume brings them back early if you change your mind.")
+
+
+HANDLERS = {
+    "start": handle_start,
+    "status": handle_status,
+    "performance": handle_performance,
+    "me": handle_me,
+    "took": handle_took,
+    "closed": handle_closed,
+    "limits": handle_limits,
+    "pause": handle_pause,
+    "resume": handle_resume,
+    "watchlist": handle_watchlist,
+    "events": handle_events,
+    "tiers": handle_tiers,
+    "export": handle_export,
+    "help": handle_help,
+    "halt": handle_halt,
+}
