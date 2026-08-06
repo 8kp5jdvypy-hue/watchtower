@@ -8,6 +8,7 @@ queries (button taps), long-polling updates, and sending documents
 """
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 
@@ -94,16 +95,28 @@ class BotClient:
         result = resp.json()["result"]
         return SentMessage(chat_id=result["chat"]["id"], message_id=result["message_id"])
 
-    def get_updates(self, offset: int | None = None, timeout: int = 30) -> list[dict]:
+    def get_updates(self, offset: int | None = None, timeout: int = 30, allowed_updates: list[str] | None = None) -> list[dict]:
         params = {"timeout": timeout}
         if offset is not None:
             params["offset"] = offset
+        if allowed_updates is not None:
+            # Telegram wants this as a JSON-encoded array in the query string.
+            params["allowed_updates"] = json.dumps(allowed_updates)
         resp = requests.get(self._url("getUpdates"), params=params, timeout=timeout + 10)
         resp.raise_for_status()
         return resp.json()["result"]
 
     def get_my_commands(self) -> list[dict]:
         resp = requests.get(self._url("getMyCommands"), timeout=10)
+        resp.raise_for_status()
+        return resp.json()["result"]
+
+    def set_my_commands(self, commands: list[tuple[str, str]]) -> None:
+        payload = {"commands": [{"command": c, "description": d} for c, d in commands]}
+        self._call("setMyCommands", payload)
+
+    def get_webhook_info(self) -> dict:
+        resp = requests.get(self._url("getWebhookInfo"), timeout=10)
         resp.raise_for_status()
         return resp.json()["result"]
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from tradebot.formatting.fields import ts
+from tradebot.rendering.fields import ts
 from tradebot.telegram_bot import db, keyboards
 from tradebot.telegram_bot.context import CallbackReply
 from tradebot.telegram_bot.handlers import _RESUME_ONBOARDING_TEXT, _resolve_detection, log_took

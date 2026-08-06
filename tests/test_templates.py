@@ -1,4 +1,4 @@
-"""Golden-file tests for tradebot.formatting.templates — one function per
+"""Golden-file tests for tradebot.rendering.templates — one function per
 message type, snapshotted exactly so a formatting change shows up as a
 diff here instead of surprising someone in Telegram.
 """
@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from tradebot.alerts import Cluster
 from tradebot.costs import Breakeven
 from tradebot.detectors import DailyAnchors
-from tradebot.formatting import templates
+from tradebot.rendering import templates
 from tradebot.journal import HistoricalPerformance, TierPerformance
 from tradebot.marketdata import OptionContract, Quote
 
@@ -62,41 +62,74 @@ def _cluster(**overrides) -> Cluster:
     return Cluster(**fields)
 
 
-def test_render_high_alert_golden():
-    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), _breakeven(), _history())
+def test_render_high_alert_golden_matches_the_target_render_exactly():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
     assert text == (
-        "<b>🔴 HIGH GOOGL</b>\n"
-        "BEARISH · level_break, range_expansion, round_number_break\n"
+        "<b>🔴 HIGH · GOOGL · BEARISH</b>\n"
+        "\n"
         "Broke below the $370 round number and took out the prior low on a range 15x its 14-day average.\n"
         "\n"
-        "<code>Score         15.77 ATR\n"
-        "Close         $366.00\n"
-        "ATR14         1.77 ATR\n"
-        "Breakeven     +2.90% (2.90 ATR)\n"
-        "Track Record  +35.00% continued (n=20), -0.62% avg\n"
-        "Range         $378.90–$380.20\n"
-        "Prior Close   $377.68\n"
-        "Quote         $365.98 / $366.02</code>\n"
+        "<code>Last         $366.00\n"
+        "Prior close  $377.68\n"
+        "Session      $379.50–$384.44\n"
+        "Score        15.77 ATR\n"
+        "ATR(14)      1.77\n"
+        "Similar      35% cont. (n=20)\n"
+        "Contract     none tradable</code>\n"
         "\n"
-        "<i>2026-07-23 12:05 ET · fd153a · Not financial advice.</i>"
+        "level break · range expansion · round number\n"
+        "<i>12:05 ET · fd153a · Not advice.</i>"
     )
+
+
+def test_render_high_alert_body_is_under_12_visual_lines():
+    # "visual lines" = distinct content lines a reader scans, not the
+    # blank spacer lines between sections (the target render itself has
+    # 3 of those) and not extra lines from Telegram client-side wrapping
+    # of the rationale sentence (which the source never hard-wraps).
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
+    content_lines = [line for line in text.split("\n") if line.strip()]
+    assert len(content_lines) <= 12
+
+
+def test_render_high_alert_has_exactly_one_emoji_the_tier_marker():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
+    tier_emojis = {"🔴", "🟡", "⚪"}
+    found = [ch for ch in text if ch in tier_emojis]
+    assert found == ["🔴"]
+
+
+def test_render_high_alert_has_no_exclamation_marks():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
+    assert "!" not in text
+
+
+def test_render_high_alert_shows_a_tradable_contract():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), _breakeven(), _history())
+    assert "Contract     $365.00P 8/14 · BE +2.90%" in text
 
 
 def test_render_high_alert_never_omits_a_row_when_breakeven_and_history_are_none():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, None)
-    assert "Breakeven     no tradable contract" in text
-    assert "Track Record  no track record yet" in text
+    assert "Contract     none tradable" in text
+    assert "Similar      —" in text
 
 
 def test_render_high_alert_dashes_missing_atr_instead_of_omitting_the_row():
     text = templates.render_high_alert(_cluster(atr14=None), _anchors(), _quote(), None, None)
-    assert "ATR14         —" in text
+    assert "ATR(14)      —" in text
 
 
 def test_render_high_alert_never_exposes_the_full_uuid():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, None)
     assert "fd153a2c-89ab-4c00-9e12-abc123456789" not in text
     assert "fd153a" in text
+
+
+def test_render_high_alert_humanizes_detector_kinds_on_the_tag_line():
+    text = templates.render_high_alert(_cluster(kinds="vwap_break,rvol_spike"), _anchors(), _quote(), None, None)
+    assert "VWAP break · volume spike" in text
+    assert "vwap_break" not in text and "rvol_spike" not in text
 
 
 def test_render_digest_golden():
@@ -109,12 +142,12 @@ def test_render_digest_golden():
     text = templates.render_digest("Medium Digest", "medium", clusters, tier_perf, when)
     assert text == (
         "<b>🟡 Medium Digest</b> · 2 tickers\n"
-        "<i>Track record: +51.00% continued (n=45), +0.08% avg</i>\n"
+        "<i>Track record: 51% cont. (n=45)</i>\n"
         "\n"
-        "TSLA · vwap_break · 2.10 ATR\n"
-        "AMD · rvol_spike · 2.50 ATR\n"
+        "TSLA · VWAP break · 2.10 ATR\n"
+        "AMD · volume spike · 2.50 ATR\n"
         "\n"
-        "<i>2026-07-23 11:00 ET · Not financial advice.</i>"
+        "<i>11:00 ET · Not advice.</i>"
     )
 
 
@@ -135,12 +168,12 @@ def test_render_log_summary_golden():
     text = templates.render_log_summary(clusters, tier_perf, when)
     assert text == (
         "<b>⚪ Log Summary</b> · 3 sub-threshold\n"
-        "<i>Track record: +50.00% continued (n=200), +0.01% avg</i>\n"
+        "<i>Track record: 50% cont. (n=200)</i>\n"
         "\n"
         "TSLA: 2\n"
         "AMD: 1\n"
         "\n"
-        "<i>2026-07-23 16:00 ET · Not financial advice.</i>"
+        "<i>16:00 ET · Not advice.</i>"
     )
 
 
@@ -149,25 +182,24 @@ def test_render_morning_briefing_golden():
     when = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
     text = templates.render_morning_briefing(tier_perf, when)
     assert text == (
-        "<b>🌅 Morning Briefing</b>\n"
+        "<b>Morning Briefing</b>\n"
         "\n"
         "1. HIGH tier only — MEDIUM/LOG sit near a coin flip, not actionable.\n"
         "2. Act immediately — waiting for confirmation tested worse, not better.\n"
         "3. No proven best hours — trade HIGH whenever it fires, not on a schedule.\n"
-        "4. Check Track Record before acting — a low rate is a real reason to skip.\n"
-        "5. Compare Score to Breakeven — skip if the hurdle exceeds typical delivery.\n"
+        "4. Check the track record before acting — a low rate is a real reason to skip.\n"
+        "5. Compare Score to the contract's breakeven — skip if the hurdle exceeds typical delivery.\n"
         "6. Respect the daily cap and cooldown — they stop overtrading.\n"
         "\n"
-        "<i>Current HIGH track record: +59.50% continued (n=42), +0.36% avg</i>\n"
+        "<i>Current HIGH track record: 60% cont. (n=42)</i>\n"
         "\n"
-        "<i>2026-07-23 09:30 ET · Not financial advice.</i>"
+        "<i>09:30 ET · Not advice.</i>"
     )
 
 
 def test_render_morning_briefing_omits_track_record_line_on_an_empty_journal():
     text = templates.render_morning_briefing(None, datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc))
     assert "Current HIGH track record" not in text
-    assert "no line to fabricate" not in text  # sanity: no stray placeholder text
 
 
 def test_render_heartbeat_golden():
@@ -178,7 +210,7 @@ def test_render_heartbeat_golden():
         {"cooldown_active": 3}, ["BE: no prior daily bar"], [], tier_perf, when,
     )
     assert text == (
-        "<b>💓 Heartbeat</b> · 2026-07-23\n"
+        "<b>Heartbeat</b> · 2026-07-23\n"
         "\n"
         "<code>Uptime      6:30:00\n"
         "High        2\n"
@@ -188,11 +220,11 @@ def test_render_heartbeat_golden():
         "Data gaps   1\n"
         "Errors      0</code>\n"
         "\n"
-        "<i>HIGH: +59.50% continued (n=42), +0.36% avg</i>\n"
+        "<i>HIGH: 60% cont. (n=42)</i>\n"
         "\n"
         "- BE: no prior daily bar\n"
         "\n"
-        "<i>2026-07-23 16:00 ET · Not financial advice.</i>"
+        "<i>16:00 ET · Not advice.</i>"
     )
 
 
@@ -211,11 +243,28 @@ def test_render_system_notice_golden():
         "Daily high-tier alert cap (8) reached. Suppressing further HIGH alerts today.", when,
     )
     assert text == (
-        "<b>⚠️ System</b>\n"
+        "<b>System</b>\n"
         "Daily high-tier alert cap (8) reached. Suppressing further HIGH alerts today.\n"
         "\n"
-        "<i>2026-07-23 15:00 ET · Not financial advice.</i>"
+        "<i>15:00 ET · Not advice.</i>"
     )
+
+
+def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
+    when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
+    tier_perf = TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30)
+    messages = [
+        templates.render_high_alert(_cluster(), _anchors(), _quote(), _breakeven(), _history()),
+        templates.render_digest("Medium Digest", "medium", [_cluster(tier="medium")], tier_perf, when),
+        templates.render_log_summary([_cluster(tier="log")], tier_perf, when),
+        templates.render_morning_briefing(tier_perf, when),
+        templates.render_heartbeat(date(2026, 7, 23), timedelta(hours=1), {}, {}, [], [], None, when),
+        templates.render_system_notice("halt requested", when),
+    ]
+    for text in messages:
+        assert "!" not in text
+        assert "financial advice" not in text.lower()
+        assert text.rstrip().endswith("Not advice.</i>")
 
 
 def test_all_interpolated_text_is_html_escaped():

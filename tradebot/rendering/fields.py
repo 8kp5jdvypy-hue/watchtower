@@ -1,6 +1,6 @@
 """Shared numeric formatting primitives.
 
-Every rendered message in tradebot.formatting.templates composes its
+Every rendered message in tradebot.rendering.templates composes its
 numbers from these — no ad-hoc f-string number formatting anywhere else
 in the codebase (see CLAUDE.md-style rule for this subpackage: pure,
 data in, string out).
@@ -41,6 +41,15 @@ def ratio(value: float) -> str:
 
 
 def ts(dt: datetime) -> str:
-    """2026-08-05 09:35 ET — always Eastern, matching the exchange this
-    project trades; this codebase never displays any other timezone."""
-    return f"{dt.astimezone(ET).strftime('%Y-%m-%d %H:%M')} ET"
+    """09:35 ET — always Eastern, matching the exchange this project
+    trades. Time only, no date: every message here is read in real time
+    about today, so a date is noise, not information."""
+    return f"{dt.astimezone(ET).strftime('%H:%M')} ET"
+
+
+def dash(value, formatter) -> str:
+    """em-dash for a missing value, otherwise `formatter(value)` — the
+    rule is a row is never omitted for missing data, it prints with a
+    dash instead. `formatter` is one of the functions above (or any
+    callable taking the raw value)."""
+    return "—" if value is None else formatter(value)

@@ -1,28 +1,48 @@
 """Message templates — one function per message type, pure: data in,
 string out. No formatting logic anywhere else in the codebase; every
-number is composed from tradebot.formatting.fields.
+number is composed from tradebot.rendering.fields.
 
-Telegram HTML parse mode (not MarkdownV2 — fewer escaping bugs). All
-interpolated text is html.escape()'d. Maximum one emoji per message, as
-a tier indicator only (🔴 HIGH / 🟡 MEDIUM / ⚪ LOG). Bold the headline
-only. No hard-wrapped prose — only structural line breaks between
-semantically distinct fields/rows.
+Voice: Kestrel is calm and precise. The thesis is patience, and the copy
+has to sound like it — no rockets, no urgency emoji, no exclamation
+marks. Telegram HTML parse mode (not MarkdownV2 — fewer escaping bugs).
+All interpolated text is html.escape()'d. Exactly one emoji per message,
+the tier marker (🔴 HIGH / 🟡 MEDIUM / ⚪ LOG) — every other emoji that
+used to live here (per-field icons, section headers) has been deleted.
+No hard-wrapped prose in source: Telegram wraps the client side, so
+rationale text is written as one unbroken sentence.
 """
 from __future__ import annotations
 
 import html
 from datetime import datetime
 
-from tradebot.formatting.fields import atr, money, pct, qty, ts
+from tradebot.rendering.fields import atr, dash, money, pct, qty, ts
 
 TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
-BIAS_TEXT = {"up": ("BULLISH", "calls"), "down": ("BEARISH", "puts")}
-DISCLAIMER = "Not financial advice."
+BIAS_LABEL = {"up": "BULLISH", "down": "BEARISH"}
+DISCLAIMER = "Not advice."
+
+# Detector kind -> the human label it gets on a tag line or digest row.
+# Kestrel never shows a raw kind string (round_number_break, etc.) to a
+# reader.
+KIND_LABELS = {
+    "level_break": "level break",
+    "range_expansion": "range expansion",
+    "round_number_break": "round number",
+    "vwap_break": "VWAP break",
+    "gap": "gap",
+    "rvol_spike": "volume spike",
+}
+
+
+def _kind_tag(kinds: str) -> str:
+    return " · ".join(html.escape(KIND_LABELS.get(k, k)) for k in kinds.split(","))
 
 
 def _stats_block(rows: list[tuple[str, str]]) -> str:
     """Aligned two-column <code> block: label left, value right, padded
-    to the longest label so columns line up in a monospace font."""
+    to the longest label so columns line up in a monospace font. A row
+    is never omitted for missing data — see fields.dash."""
     escaped = [(html.escape(label), html.escape(value)) for label, value in rows]
     width = max(len(label) for label, _ in escaped) + 2
     lines = [f"{label:<{width}}{value}" for label, value in escaped]
@@ -37,56 +57,53 @@ def _footer(when: datetime, short_id: str | None = None) -> str:
     return "<i>" + " · ".join(html.escape(p) for p in parts) + "</i>"
 
 
-def _dash_if_none(value: float | None, formatter) -> str:
-    return "—" if value is None else formatter(value)
-
-
-def _render_breakeven(breakeven) -> str:
+def _render_contract(breakeven) -> str:
+    """"none tradable" is a real, checked answer, not missing data — it
+    does not get fields.dash's em-dash treatment."""
     if breakeven is None:
-        return "no tradable contract"
-    return f"{pct(breakeven.pct * 100)} ({atr(breakeven.atr_units)})"
+        return "none tradable"
+    contract = breakeven.contract
+    side = "C" if contract.right == "call" else "P"
+    expiry = f"{contract.expiry.month}/{contract.expiry.day}"
+    return f"{money(contract.strike)}{side} {expiry} · BE {pct(breakeven.pct * 100)}"
 
 
-def _render_history(history) -> str:
-    if history is None:
-        return "no track record yet"
-    return f"{pct(history.continuation_rate * 100)} continued (n={qty(history.sample_size)}), {pct(history.avg_return_pct)} avg"
+def _render_similar(history) -> str:
+    return f"{history.continuation_rate * 100:.0f}% cont. (n={qty(history.sample_size)})"
 
 
 def render_high_alert(cluster, anchors, quote, breakeven, history) -> str:
-    """The single-ticker, full-detail HIGH alert. Fixed field order:
-    headline -> direction -> one-sentence rationale -> stats block ->
-    footer, every time, no exceptions.
+    """The single-ticker, full-detail HIGH alert. Fixed field order,
+    every time: headline -> rationale -> stats block -> tag line ->
+    footer.
 
     `cluster.primary_headline` is the highest-scoring constituent
     detection's own headline — the rationale is that one sentence, not
-    every trigger chained together (the full kind list is in the
-    direction line's tag instead).
+    every trigger chained together (the full kind list is the tag line
+    instead).
     """
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
-    bias_label, _option_side = BIAS_TEXT.get(cluster.trend, ("NEUTRAL", "either side"))
-    kinds_tag = html.escape(", ".join(cluster.kinds.split(",")))
+    bias = BIAS_LABEL.get(cluster.trend, "NEUTRAL")
     symbol = html.escape(cluster.symbol)
     rationale = html.escape(cluster.primary_headline)
 
-    headline = f"<b>{tier_emoji} {cluster.tier.upper()} {symbol}</b>"
-    direction_line = f"{html.escape(bias_label)} · {kinds_tag}"
+    headline = f"<b>{tier_emoji} {cluster.tier.upper()} · {symbol} · {bias}</b>"
 
     rows = [
+        ("Last", money(quote.last)),
+        ("Prior close", money(anchors.prior_close)),
+        ("Session", f"{money(anchors.prior_low)}–{money(anchors.prior_high)}"),
         ("Score", atr(cluster.score)),
-        ("Close", money(cluster.close)),
-        ("ATR14", _dash_if_none(cluster.atr14, atr)),
-        ("Breakeven", _render_breakeven(breakeven)),
-        ("Track Record", _render_history(history)),
-        ("Range", f"{money(anchors.opening_range_low)}–{money(anchors.opening_range_high)}"),
-        ("Prior Close", money(anchors.prior_close)),
-        ("Quote", f"{money(quote.bid)} / {money(quote.ask)}"),
+        ("ATR(14)", dash(cluster.atr14, lambda v: f"{v:.2f}")),
+        ("Similar", dash(history, _render_similar)),
+        ("Contract", _render_contract(breakeven)),
     ]
 
     when = datetime.fromisoformat(cluster.ts_utc)
-    return "\n".join(
-        [headline, direction_line, rationale, "", _stats_block(rows), "", _footer(when, cluster.id)]
-    )
+    return "\n".join([
+        headline, "", rationale, "", _stats_block(rows), "",
+        _kind_tag(cluster.kinds), _footer(when, cluster.id),
+    ])
 
 
 def render_digest(title: str, tier: str, clusters: list, tier_perf, when: datetime) -> str:
@@ -97,11 +114,10 @@ def render_digest(title: str, tier: str, clusters: list, tier_perf, when: dateti
     header = f"<b>{tier_emoji} {html.escape(title)}</b> · {qty(len(clusters))} tickers"
     lines = [header]
     if tier_perf is not None:
-        lines.append(f"<i>Track record: {_render_history(tier_perf)}</i>")
+        lines.append(f"<i>Track record: {_render_similar(tier_perf)}</i>")
     lines.append("")
     for c in clusters:
-        kinds = html.escape(", ".join(c.kinds.split(",")))
-        lines.append(f"{html.escape(c.symbol)} · {kinds} · {atr(c.score)}")
+        lines.append(f"{html.escape(c.symbol)} · {_kind_tag(c.kinds)} · {atr(c.score)}")
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)
@@ -115,7 +131,7 @@ def render_log_summary(clusters: list, tier_perf, when: datetime) -> str:
     header = f"<b>{tier_emoji} Log Summary</b> · {qty(len(clusters))} sub-threshold"
     lines = [header]
     if tier_perf is not None:
-        lines.append(f"<i>Track record: {_render_history(tier_perf)}</i>")
+        lines.append(f"<i>Track record: {_render_similar(tier_perf)}</i>")
     lines.append("")
     counts: dict[str, int] = {}
     for c in clusters:
@@ -133,18 +149,18 @@ def render_morning_briefing(tier_perf, when: datetime) -> str:
     tested against this project's own data (see SCANNER_PLAN.md): HIGH
     tier only, no confirmation delay, no time-of-day filter."""
     lines = [
-        "<b>🌅 Morning Briefing</b>",
+        "<b>Morning Briefing</b>",
         "",
         "1. HIGH tier only — MEDIUM/LOG sit near a coin flip, not actionable.",
         "2. Act immediately — waiting for confirmation tested worse, not better.",
         "3. No proven best hours — trade HIGH whenever it fires, not on a schedule.",
-        "4. Check Track Record before acting — a low rate is a real reason to skip.",
-        "5. Compare Score to Breakeven — skip if the hurdle exceeds typical delivery.",
+        "4. Check the track record before acting — a low rate is a real reason to skip.",
+        "5. Compare Score to the contract's breakeven — skip if the hurdle exceeds typical delivery.",
         "6. Respect the daily cap and cooldown — they stop overtrading.",
     ]
     if tier_perf is not None:
         lines.append("")
-        lines.append(f"<i>Current HIGH track record: {_render_history(tier_perf)}</i>")
+        lines.append(f"<i>Current HIGH track record: {_render_similar(tier_perf)}</i>")
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)
@@ -165,12 +181,12 @@ def render_heartbeat(
         ("Data gaps", qty(len(data_gaps))),
         ("Errors", qty(len(errors))),
     ]
-    lines = [f"<b>💓 Heartbeat</b> · {html.escape(str(session_date))}", "", _stats_block(rows)]
+    lines = [f"<b>Heartbeat</b> · {html.escape(str(session_date))}", "", _stats_block(rows)]
     if tier_perf:
         lines.append("")
         order = {"high": 0, "medium": 1, "log": 2}
         for tier in sorted(tier_perf, key=lambda t: order.get(t, 99)):
-            lines.append(f"<i>{tier.upper()}: {_render_history(tier_perf[tier])}</i>")
+            lines.append(f"<i>{tier.upper()}: {_render_similar(tier_perf[tier])}</i>")
     if data_gaps:
         lines.append("")
         for gap_note in data_gaps[:5]:
@@ -185,4 +201,4 @@ def render_heartbeat(
 def render_system_notice(text: str, when: datetime) -> str:
     """Operational notices (halt, stale data, cap reached, errors) — no
     tier emoji (these aren't trading signals), just a short bold line."""
-    return f"<b>⚠️ System</b>\n{html.escape(text)}\n\n{_footer(when)}"
+    return f"<b>System</b>\n{html.escape(text)}\n\n{_footer(when)}"

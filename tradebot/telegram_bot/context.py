@@ -28,6 +28,8 @@ class AppConfig:
     bar_minutes: int = 5
     bot_name: str = "Kestrel"
     bot_username: str | None = None
+    allowed_user_ids: frozenset | None = None  # None/empty = unrestricted, matches admin_ids' precedent
+    channel_commands_enabled: bool = False
 
 
 @dataclass
@@ -42,7 +44,7 @@ class HandlerContext:
     client: object  # BotClient — typed loosely to avoid an import cycle in tests using fakes
     users_conn: object
     journal_conn: object
-    user: User
+    user: User | None  # None for a channel_post — channel posts carry no `from` field, no identity to attach
     chat_id: int
     chat_type: str
     args: list

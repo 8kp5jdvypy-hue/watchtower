@@ -9,6 +9,7 @@ talk to this process directly.
 """
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import sys
@@ -20,10 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from tradebot.config import WATCHLIST
 from tradebot.journal import connect as journal_connect
 from tradebot.runner import CALENDAR, ET, HALT_FILE, HEARTBEAT_FILE
-from tradebot.telegram_bot import callbacks, db, handlers
+from tradebot.telegram_bot import callbacks, commands, db, handlers
 from tradebot.telegram_bot.client import BotClient
 from tradebot.telegram_bot.context import AppConfig
 from tradebot.telegram_bot.dispatcher import Dispatcher
+
+logger = logging.getLogger("watchtower.telegram_bot")
 
 
 def _market_is_open(now: datetime) -> bool:
@@ -39,14 +42,21 @@ def _session_date(now: datetime) -> date:
     return now.astimezone(ET).date()
 
 
-def _admin_ids() -> frozenset:
-    raw = os.environ.get("ADMIN_TELEGRAM_IDS", "")
+def _parse_id_list(env_var: str) -> frozenset:
+    raw = os.environ.get(env_var, "")
     return frozenset(int(x) for x in raw.split(",") if x.strip())
+
+
+def _parse_bool(env_var: str, default: bool = False) -> bool:
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def build_app_config(bot_username: str | None = None) -> AppConfig:
     return AppConfig(
-        admin_ids=_admin_ids(),
+        admin_ids=_parse_id_list("ADMIN_TELEGRAM_IDS"),
         default_watchlist=list(WATCHLIST),
         stripe_portal_url=os.environ.get("STRIPE_PORTAL_URL") or None,
         plans=[],  # populate once real Stripe products exist — see /tiers
@@ -56,18 +66,42 @@ def build_app_config(bot_username: str | None = None) -> AppConfig:
         halt_file=HALT_FILE,
         heartbeat_file=HEARTBEAT_FILE,
         bot_username=bot_username,
+        allowed_user_ids=_parse_id_list("ALLOWED_USER_IDS") or None,
+        channel_commands_enabled=_parse_bool("CHANNEL_COMMANDS_ENABLED", default=False),
     )
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--sync-commands", action="store_true",
+        help="push tradebot/telegram_bot/commands.py's registry to BotFather via setMyCommands before "
+        "starting, instead of only verifying it matches. Use this once after intentionally changing the "
+        "command list — the startup drift check stays fail-loudly for everything else.",
+    )
+    args = parser.parse_args()
+
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     client = BotClient(token)
+
+    if args.sync_commands:
+        logger.info("--sync-commands: pushing local command registry to BotFather via setMyCommands")
+        client.set_my_commands(commands.COMMANDS)
+
     users_conn = db.connect()
     journal_conn = journal_connect(check_same_thread=False)
     bot_username = client.get_me().get("username")
     app_config = build_app_config(bot_username)
+
+    logger.info(
+        "config: allowed_user_ids=%s channel_commands_enabled=%s admin_ids=%s",
+        sorted(app_config.allowed_user_ids) if app_config.allowed_user_ids else "unrestricted",
+        app_config.channel_commands_enabled,
+        sorted(app_config.admin_ids) or "none",
+    )
 
     dispatcher = Dispatcher(
         client=client,

@@ -15,7 +15,7 @@ import html
 import io
 from datetime import datetime
 
-from tradebot.formatting.fields import money, pct, qty, ts
+from tradebot.rendering.fields import money, pct, qty, ts
 from tradebot.telegram_bot import db, keyboards, performance
 from tradebot.telegram_bot.context import HandlerContext, Reply
 
@@ -180,7 +180,9 @@ def handle_status(ctx: HandlerContext) -> Reply:
         f"HIGH alerts today: {qty(fired_today)}/{qty(ctx.app.high_tier_daily_cap)}",
         f"Cooldown suppressions today: {qty(cooldowns_today)}",
     ]
-    if ctx.user.is_locked(now):
+    if ctx.user is None:
+        pass  # channel_post — no per-user identity, so no personal "You: ..." line to show
+    elif ctx.user.is_locked(now):
         lines.append(f"You: locked until {ts(datetime.fromisoformat(ctx.user.locked_until))} — {ctx.user.lock_reason}")
     elif ctx.user.is_paused(now):
         lines.append(f"You: paused until {ts(datetime.fromisoformat(ctx.user.paused_until))}")

@@ -1,6 +1,6 @@
 """Alert delivery and budgeting.
 
-Message rendering lives in tradebot.formatting (templates.py + fields.py)
+Message rendering lives in tradebot.rendering (templates.py + fields.py)
 — this module only decides WHETHER and WHEN to send (AlertBudget) and
 HOW to deliver (ConsoleAlerter / TelegramAlerter). See CLAUDE.md: live
 alerting is opt-in, default log-only.

@@ -28,6 +28,17 @@ from tradebot.telegram_bot.ratelimit import RateLimiter
 ACK_THRESHOLD_SECONDS = 1.5
 ACK_TEXT = "⏳ One sec…"
 
+# channel_post/edited_channel_post: the bot posting alerts into a channel
+# where it's admin also means people can type commands INTO that channel —
+# those arrive as this update type, not `message`, and carry no `from`
+# field (no user identity). Telegram's default (when allowed_updates is
+# omitted) already includes channel_post, so leaving this off was never
+# actually why they were dropped — they were dropped because
+# _handle_update() below didn't look for the key at all. Being explicit
+# here is still worth doing: it survives a future Telegram default change,
+# and it's the config this module now logs on startup so that's visible.
+ALLOWED_UPDATES = ["message", "callback_query", "channel_post", "edited_channel_post"]
+
 logger = logging.getLogger("watchtower.telegram_bot")
 
 
@@ -74,9 +85,10 @@ class Dispatcher:
 
     def run_forever(self) -> None:
         self.startup_check()
+        logger.info("polling with allowed_updates=%s", ALLOWED_UPDATES)
         while True:
             try:
-                updates = self.client.get_updates(offset=self._offset, timeout=30)
+                updates = self.client.get_updates(offset=self._offset, timeout=30, allowed_updates=ALLOWED_UPDATES)
             except Exception:
                 # A single network blip or a 409 (another process already
                 # long-polling this same bot token) must never take the
@@ -106,6 +118,34 @@ class Dispatcher:
             user = db.get_user(self.users_conn, user_id)
         return user
 
+    def _is_allowed_user(self, user_id: int) -> bool:
+        """ALLOWED_USER_IDS is opt-in: unset/empty means unrestricted
+        (matches the existing ADMIN_TELEGRAM_IDS precedent) — set it to
+        lock the bot down to specific Telegram user IDs only."""
+        return not self.app.allowed_user_ids or user_id in self.app.allowed_user_ids
+
+    @staticmethod
+    def _extract_identity(payload: dict) -> tuple:
+        """(chat_id, user_id_or_None, is_channel) — the one place that
+        reads a `chat`/`from` pair, so every caller handles a missing
+        `from` (channel posts have none) the same way instead of each
+        re-deriving it and risking a KeyError."""
+        chat = payload["chat"]
+        chat_id = chat["id"]
+        is_channel = chat.get("type") == "channel"
+        from_user = payload.get("from")
+        user_id = from_user["id"] if from_user else None
+        return chat_id, user_id, is_channel
+
+    @staticmethod
+    def _describe_update(update: dict) -> tuple:
+        for key in ("message", "edited_message", "channel_post", "edited_channel_post", "callback_query"):
+            if key in update:
+                payload = update[key]
+                chat = (payload.get("message") or {}).get("chat") if key == "callback_query" else payload.get("chat")
+                return key, (chat or {}).get("type")
+        return "unknown", None
+
     def _safe_handle_update(self, update: dict) -> None:
         try:
             self._handle_update(update)
@@ -113,8 +153,15 @@ class Dispatcher:
             logger.exception("unhandled error routing update: %r", update)
 
     def _handle_update(self, update: dict) -> None:
+        update_type, chat_type = self._describe_update(update)
+        logger.debug("inbound update: type=%s chat_type=%s", update_type, chat_type)
+
         if "callback_query" in update:
             self._handle_callback(update["callback_query"])
+        elif "channel_post" in update:
+            self._handle_channel_post(update["channel_post"])
+        elif "edited_channel_post" in update:
+            self._handle_channel_post(update["edited_channel_post"])
         elif "message" in update and "text" in update["message"]:
             self._handle_message(update["message"])
         # other update types (edited_message, non-text media, etc.) are ignored
@@ -146,6 +193,10 @@ class Dispatcher:
         text = message["text"].strip()
         now = datetime.now(timezone.utc)
 
+        if not self._is_allowed_user(user_id):
+            self._reply(chat_id, "This bot is invite-only right now — your account isn't on the allowed list.")
+            return
+
         with self._handler_lock:
             user = self._get_user(user_id, chat_id, username)
 
@@ -172,6 +223,46 @@ class Dispatcher:
             ctx = HandlerContext(
                 client=self.client, users_conn=self.users_conn, journal_conn=self.journal_conn,
                 user=user, chat_id=chat_id, chat_type=chat_type, args=args, now=now, app=self.app,
+            )
+            self._run_with_ack(chat_id, lambda: handler(ctx))
+
+    # ---------------------------------------------------------------- #
+    # Channel posts — no `from` field, so no user identity at all. Off
+    # by default (channel_commands_enabled=False); when on, only the
+    # read-only CHANNEL_ALLOWED commands are reachable, and no per-user
+    # DB row is ever created for a channel post — see context.HandlerContext
+    # .user, which is Optional exactly for this case.
+    # ---------------------------------------------------------------- #
+
+    def _handle_channel_post(self, post: dict) -> None:
+        chat_id, user_id, _is_channel = self._extract_identity(post)
+        text = post.get("text", "").strip()
+
+        if not self.app.channel_commands_enabled:
+            return  # feature is off — exactly today's (silent) behavior
+
+        if not text.startswith("/"):
+            return  # not a command attempt — most channel posts are the bot's own alerts
+
+        command, args = self._parse_command(text)
+
+        if command not in commands.COMMAND_NAMES:
+            return  # avoid replying to every non-command post in an active channel
+
+        if command not in commands.CHANNEL_ALLOWED:
+            self._reply(chat_id, f"/{command} isn't available in a channel post (no user identity to scope it to) — DM me instead.")
+            return
+
+        now = datetime.now(timezone.utc)
+        # No per-user identity to rate-limit on — use the chat itself as the key.
+        if not self.rate_limiter.allow(chat_id, now):
+            return
+
+        handler = self.handlers[command]
+        with self._handler_lock:
+            ctx = HandlerContext(
+                client=self.client, users_conn=self.users_conn, journal_conn=self.journal_conn,
+                user=None, chat_id=chat_id, chat_type="channel", args=args, now=now, app=self.app,
             )
             self._run_with_ack(chat_id, lambda: handler(ctx))
 
@@ -255,6 +346,10 @@ class Dispatcher:
         chat_id = chat.get("id")
         message_id = message.get("message_id")
         now = datetime.now(timezone.utc)
+
+        if not self._is_allowed_user(user_id):
+            self._answer_callback(cq_id, "This bot is invite-only right now.", True)
+            return
 
         with self._handler_lock:
             user = self._get_user(user_id, chat_id if chat_id is not None else user_id, username)

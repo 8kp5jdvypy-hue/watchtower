@@ -17,6 +17,7 @@ runs it live and confirms.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 import traceback
@@ -40,8 +41,9 @@ from tradebot.alerts import (
 )
 from tradebot.config import WATCHLIST
 from tradebot.costs import breakeven_move
-from tradebot.formatting import templates
-from tradebot.formatting.guard import validate_alert_data
+from tradebot.rendering import templates
+from tradebot.guard import validate_alert_data
+from tradebot import metrics
 from tradebot.telegram_bot import heartbeat as bot_liveness
 from tradebot.detectors import (
     DETECTORS,
@@ -66,6 +68,8 @@ STALENESS_SECONDS = 90
 BAR_MINUTES = 5
 
 CALENDAR = ecals.get_calendar("XNYS")
+
+logger = logging.getLogger("watchtower.runner")
 
 
 # --------------------------------------------------------------------------
@@ -135,13 +139,30 @@ def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | 
             f"lookahead violation: {d.kind} detection ts={d.ts} precedes bar close={expected_close} for {symbol}"
         )
     primary = max(detections, key=lambda d: d.score)
+    # Root cause of the dual-ATR bug: level_break/range_expansion/vwap_break/
+    # round_number_break each compute their OWN ATR14 window (inconsistently
+    # — range_expansion uses bars[:-1], the others use bars) and print it
+    # directly in their headline ("...42.10x ATR(14)=0.88"). Independently
+    # recomputing atr(bars) here for the cluster-level ATR14 stat meant the
+    # alert could show a second, different number for the same concept —
+    # e.g. headline "ATR(14)=0.88" next to a stats-block "ATR14  1.77".
+    # Reuse whatever ATR the primary (headline) detector actually used, so
+    # the two can never disagree — this changes zero detector scoring, only
+    # which number the cluster reports alongside it. Detectors that don't
+    # reference ATR in their headline at all (gap, rvol_spike) have no
+    # context["atr14"], so this falls back to the general bars-window ATR,
+    # which nothing in their headline could contradict anyway.
+    atr14 = primary.context.get("atr14")
+    if atr14 is None:
+        atr14 = atr(bars)
     return {
         "ts": expected_close,
         "close": last.close,
-        "atr14": atr(bars),
+        "atr14": atr14,
         "kinds": ",".join(d.kind for d in detections),
         "primary_kind": primary.kind,
         "primary_headline": primary.headline,
+        "primary_detection": primary,
         "headlines": "; ".join(d.headline for d in detections),
         "score": score_cluster(detections),
         "trend": "up" if last.close >= anchors.prior_close else "down",
@@ -185,14 +206,20 @@ class TelegramHaltChecker:
 
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
-    subscriber_hook=None,
+    subscriber_hook=None, now=None,
 ) -> None:
     """subscriber_hook(cluster, rendered_text), if given, is called right
     after a HIGH alert is sent to the ops channel/console — it's how the
     live per-user DM fan-out (tradebot.telegram_bot.delivery) plugs in
     without this module needing to know anything about Telegram users.
     None (the default) preserves the exact prior behavior — no fan-out,
-    used by replay and by every existing test."""
+    used by replay and by every existing test.
+
+    now: real wall-clock time, tz-aware, for the guard's quote-staleness
+    check. Only run_live() passes this — a replayed historical quote is
+    definitionally hours/days "stale" relative to real now, so replay
+    passes None and the guard skips that one check, the same way
+    STALENESS_SECONDS/is_stale() is already a live-only concept here."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
@@ -238,7 +265,9 @@ def process_new_bar(
 
     if decision in (Decision.SEND, Decision.CAP_REACHED_NOTICE):
         quote = quote_fn(symbol)
-        guard_reason = validate_alert_data(cluster, anchors, quote)
+        guard_reason = validate_alert_data(
+            cluster, anchors, quote, bars=bars, now=now, primary_detection=result["primary_detection"],
+        )
         if guard_reason is None:
             try:
                 chain = chain_fn(symbol)
@@ -258,6 +287,13 @@ def process_new_bar(
                 except Exception:
                     stats.errors.append(f"{symbol}: subscriber fan-out failed — {traceback.format_exc()}")
         else:
+            rule_name = guard_reason.split(":", 1)[0]
+            logger.error(
+                "alert suppressed by data guard: rule=%s symbol=%s detection_id=%s reason=%r "
+                "cluster=%r anchors=%r quote=%r",
+                rule_name, symbol, detection_id, guard_reason, cluster, anchors, quote,
+            )
+            metrics.increment("validator_rejection", rule=rule_name)
             stats.errors.append(f"{symbol}: alert suppressed by data guard — {guard_reason}")
             conn.execute(
                 "UPDATE detections SET suppress_reason=? WHERE id=?",
@@ -475,7 +511,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
                     lambda s, _sym=symbol: md[_sym].chain(s, expiry=session_date),
-                    stats, subscriber_hook,
+                    stats, subscriber_hook, now=loop_start,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start)
             except Exception:

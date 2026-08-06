@@ -36,6 +36,15 @@ COMMAND_NAMES = [name for name, _ in COMMANDS]
 # session (see handlers.halt), so it's safe to allow there too.
 GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt"})
 
+# Channel posts (the bot posting alerts into a channel where it's admin)
+# carry NO user identity at all — Telegram's `channel_post` update has no
+# `from` field, so there's no one to attribute a mutation to. This is
+# strictly narrower than GROUP_ALLOWED: /halt is excluded here even though
+# it's group-safe, because /halt always mutates state (a personal session
+# halt, or — for an admin — the global halt file) and there's no user to
+# scope that mutation to in a channel post.
+CHANNEL_ALLOWED = frozenset({"status", "performance", "help"})
+
 
 class CommandDriftError(RuntimeError):
     """Raised when the code's command list and BotFather's registered

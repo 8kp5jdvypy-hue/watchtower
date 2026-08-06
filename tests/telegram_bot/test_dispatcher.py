@@ -52,8 +52,17 @@ class FakeClient:
             return self._commands_reply
         return [{"command": c, "description": d} for c, d in commands.COMMANDS]
 
+    def get_updates(self, offset=None, timeout=30, allowed_updates=None):
+        return []
 
-def _app_config():
+    def get_me(self):
+        return {"username": "TestBot"}
+
+    def get_webhook_info(self):
+        return {"url": "", "pending_update_count": 0}
+
+
+def _app_config(channel_commands_enabled=False, allowed_user_ids=None):
     return AppConfig(
         admin_ids=frozenset(),
         default_watchlist=["TSLA"],
@@ -64,15 +73,19 @@ def _app_config():
         session_date_fn=lambda now: now.date(),
         halt_file=__import__("pathlib").Path("/tmp/does_not_exist_HALT"),
         heartbeat_file=__import__("pathlib").Path("/tmp/does_not_exist_heartbeat.json"),
+        channel_commands_enabled=channel_commands_enabled,
+        allowed_user_ids=allowed_user_ids,
     )
 
 
-def _build(client=None, handlers=None, callback_handlers=None, onboarding_text_handlers=None, rate_limiter=None):
+def _build(client=None, handlers=None, callback_handlers=None, onboarding_text_handlers=None, rate_limiter=None,
+           channel_commands_enabled=False, allowed_user_ids=None):
     client = client or FakeClient()
     users_conn = db.connect(":memory:")
     journal_conn = journal_connect(":memory:")
+    app_config = _app_config(channel_commands_enabled=channel_commands_enabled, allowed_user_ids=allowed_user_ids)
     d = Dispatcher(
-        client=client, users_conn=users_conn, journal_conn=journal_conn, app_config=_app_config(),
+        client=client, users_conn=users_conn, journal_conn=journal_conn, app_config=app_config,
         handlers=handlers or {}, callback_handlers=callback_handlers or {},
         onboarding_text_handlers=onboarding_text_handlers or {}, rate_limiter=rate_limiter,
     )
@@ -102,6 +115,16 @@ def _callback_update(data, user_id=1, chat_id=1, message_id=42, username="alice"
     }
 
 
+def _channel_post_update(text, chat_id=-1001234567890, edited=False):
+    # Real Telegram channel_post/edited_channel_post payloads carry NO
+    # `from` field at all — this is the shape that broke the old dispatcher.
+    key = "edited_channel_post" if edited else "channel_post"
+    return {
+        "update_id": 1,
+        key: {"chat": {"id": chat_id, "type": "channel"}, "text": text},
+    }
+
+
 # ---------------------------------------------------------------------- #
 # Startup check
 # ---------------------------------------------------------------------- #
@@ -125,7 +148,7 @@ def test_run_forever_survives_a_get_updates_failure_instead_of_dying(monkeypatch
             super().__init__()
             self.calls = 0
 
-        def get_updates(self, offset=None, timeout=30):
+        def get_updates(self, offset=None, timeout=30, allowed_updates=None):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("simulated 409 conflict")
@@ -280,3 +303,107 @@ def test_callback_edits_the_message_when_the_handler_asks_to():
     d, client = _build(callback_handlers={"ack_risk": edits})
     d.process_updates_once([_callback_update("ack_risk:")])
     assert client.edited == [(1, 42, "new text", None)]
+
+
+# ---------------------------------------------------------------------- #
+# Channel posts — no `from` field at all. This is the exact bug report:
+# commands typed into the channel got no response.
+# ---------------------------------------------------------------------- #
+
+
+def test_channel_post_is_ignored_by_default():
+    # channel_commands_enabled defaults to False — a fresh deploy behaves
+    # exactly like before this fix: silent, no crash, no reply.
+    calls = []
+    d, client = _build(handlers={"status": lambda ctx: calls.append(ctx) or Reply(text="ok")})
+    d.process_updates_once([_channel_post_update("/status")])
+    assert calls == []
+    assert client.sent == []
+
+
+def test_channel_post_status_with_no_from_user_does_not_raise_and_gets_a_reply():
+    # The literal regression case from the bug report: a /status channel_post
+    # with no from_user must be handled without raising anywhere in the stack.
+    d, client = _build(handlers={"status": lambda ctx: Reply(text="all good")}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("/status")])  # must not raise
+    assert client.sent == [(-1001234567890, "all good", None)]
+
+
+def test_channel_post_handler_receives_user_none():
+    seen = {}
+
+    def capture(ctx):
+        seen["user"] = ctx.user
+        seen["chat_type"] = ctx.chat_type
+        return Reply(text="ok")
+
+    d, client = _build(handlers={"status": capture}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("/status")])
+    assert seen["user"] is None
+    assert seen["chat_type"] == "channel"
+
+
+def test_channel_post_blocks_a_mutating_command_even_when_enabled():
+    calls = []
+    d, client = _build(handlers={"took": lambda ctx: calls.append(ctx) or Reply(text="logged")}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("/took abc123")])
+    assert calls == []
+    assert len(client.sent) == 1
+    assert "DM me" in client.sent[0][1]
+
+
+def test_channel_post_allows_read_only_commands_when_enabled():
+    for cmd in sorted(commands.CHANNEL_ALLOWED):
+        d, client = _build(handlers={cmd: lambda ctx: Reply(text=f"ok-{ctx.chat_type}")}, channel_commands_enabled=True)
+        d.process_updates_once([_channel_post_update(f"/{cmd}")])
+        assert client.sent == [(-1001234567890, "ok-channel", None)], cmd
+
+
+def test_edited_channel_post_is_routed_the_same_as_channel_post():
+    d, client = _build(handlers={"status": lambda ctx: Reply(text="ok")}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("/status", edited=True)])
+    assert client.sent == [(-1001234567890, "ok", None)]
+
+
+def test_channel_post_unknown_command_stays_silent():
+    d, client = _build(handlers={"status": lambda ctx: Reply(text="ok")}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("/frobnicate")])
+    assert client.sent == []
+
+
+def test_channel_post_non_command_text_is_ignored():
+    d, client = _build(handlers={"status": lambda ctx: Reply(text="ok")}, channel_commands_enabled=True)
+    d.process_updates_once([_channel_post_update("just posting an alert, not a command")])
+    assert client.sent == []
+
+
+# ---------------------------------------------------------------------- #
+# ALLOWED_USER_IDS — opt-in allowlist for DM/group commands
+# ---------------------------------------------------------------------- #
+
+
+def test_allowed_user_ids_unset_means_unrestricted():
+    d, client = _build(handlers={"help": lambda ctx: Reply(text="hi")}, allowed_user_ids=None)
+    d.process_updates_once([_message_update("/help", user_id=12345, chat_id=12345)])
+    assert client.sent == [(12345, "hi", None)]
+
+
+def test_allowed_user_ids_rejects_a_user_not_on_the_list():
+    d, client = _build(handlers={"help": lambda ctx: Reply(text="hi")}, allowed_user_ids=frozenset({1}))
+    d.process_updates_once([_message_update("/help", user_id=999)])
+    assert len(client.sent) == 1
+    assert "invite-only" in client.sent[0][1].lower()
+
+
+def test_allowed_user_ids_allows_a_listed_user():
+    d, client = _build(handlers={"help": lambda ctx: Reply(text="hi")}, allowed_user_ids=frozenset({999}))
+    d.process_updates_once([_message_update("/help", user_id=999, chat_id=999)])
+    assert client.sent == [(999, "hi", None)]
+
+
+def test_allowed_user_ids_rejects_callback_queries_too():
+    d, client = _build(callback_handlers={"took": lambda ctx: None}, allowed_user_ids=frozenset({1}))
+    d.process_updates_once([_callback_update("took:abc", user_id=999)])
+    assert len(client.answered) == 1
+    assert client.answered[0][2] is True  # show_alert
+    assert "invite-only" in client.answered[0][1].lower()
