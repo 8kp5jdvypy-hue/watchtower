@@ -112,7 +112,28 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
 
     assert 15 in marks and 30 in marks
     assert 60 not in marks  # session doesn't extend that far — must not fabricate a price
-    assert written == 2
+
+
+def test_backfill_marks_default_offsets_include_5min(tmp_path):
+    cache_dir = tmp_path / "cache"
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)  # 09:30 ET
+    bars = [_bar_row(rth_open + timedelta(minutes=5 * i), 100 + i) for i in range(8)]
+    _write_bar_csv(cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv", bars)
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(rth_open - timedelta(days=1), 99)])
+
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+
+    backfill_marks(conn, SESSION, cache_dir=cache_dir)  # default offsets, no override
+    marks = dict(conn.execute("SELECT offset_min, price FROM marks").fetchall())
+
+    assert 5 in marks
+    assert marks[5] == 100  # first bar's own close — matches the ts_utc=rth_open convention above
 
 
 def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0):

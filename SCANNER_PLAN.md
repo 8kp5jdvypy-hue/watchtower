@@ -30,10 +30,11 @@ replay, runner) rather than duplicated.
    `out/replay_detections.csv` and journals every cluster.
 6. `tradebot/journal.py` — SQLite (`data/journal.db`): `detections` (every
    cluster, including sub-threshold) and `marks` (forward prices at
-   +15/+30/+60min). Also `historical_performance()` (per detector kind +
-   direction), `tier_performance()` (per tier, surfaced in the medium
-   digest and heartbeat), and `hour_performance()` (per ET hour,
-   informational only via `scripts/hour_report.py` — see "Best hours"
+   +5/+15/+30/+60min — see "Time horizons" below for why 5min was added
+   and what it actually showed). Also `historical_performance()` (per
+   detector kind + direction), `tier_performance()` (per tier, surfaced
+   in the medium digest and heartbeat), and `hour_performance()` (per ET
+   hour, informational only via `scripts/hour_report.py` — see "Best hours"
    below for why this doesn't gate anything).
 7. `tradebot/alerts.py` — `format_alert()`, `TelegramAlerter` /
    `ConsoleAlerter`, `AlertBudget` (daily cap, per-detector cooldown,
@@ -74,6 +75,35 @@ and `scripts/hour_report.py` exist to keep tracking it as an
 **informational-only** report — never used to gate or suppress an
 alert — so the question can be revisited once there's enough data for a
 train/test split to actually agree with itself.
+
+## Time horizons (why +5min is tracked but not featured)
+
+`backfill_marks()` records forward prices at +5/+15/+30/+60min (added
+2026-08-05, retroactively backfilled across all 143 cached sessions).
+Checked whether the shorter horizon showed a cleaner signal than the
+existing ones — it's the opposite:
+
+| Horizon | n | Continued | Avg return |
+|---|---|---|---|
+| +5min | 520 | 51.7% | +0.01% |
+| +15min | 423 | 55.6% | +0.06% |
+| +30min | 395 | 50.6% | +0.06% |
+| +60min | 323 | 51.7% | +0.11% |
+
++5min has the largest sample (available for almost every alert, unlike
++60min which needs a full hour of remaining session) but the smallest
+average return by an order of magnitude — consistent with 5 minutes
+being too little time for a real directional move to separate from
+bid-ask bounce and immediate-reaction noise. It's tracked (queryable via
+`offset_min=5` on any of the `*_performance()` functions) but not used
+as the default anywhere; +30min remains the default for the alert's
+"Similar setups" line and the digest/heartbeat track record.
+
+A +1min horizon was considered and rejected outright: this project only
+fetches and evaluates 5-minute bars, so a 1-minute mark isn't derivable
+from cached data at all — it would need an entirely separate, much
+larger dataset (1-minute bars) fetched solely to measure what's likely
+pure market microstructure noise at that timescale.
 
 ## Before/after: did the detector changes actually help?
 

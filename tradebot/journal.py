@@ -147,7 +147,7 @@ def backfill_marks(
     conn: sqlite3.Connection,
     session: date,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
-    offsets_min: tuple[int, ...] = (15, 30, 60),
+    offsets_min: tuple[int, ...] = (5, 15, 30, 60),
 ) -> int:
     """Fill the marks table at +offsets_min from every journaled
     detection in `session`, reading forward prices from cached bars.
