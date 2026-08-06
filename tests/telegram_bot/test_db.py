@@ -190,6 +190,36 @@ def test_list_subscribers_for_symbol_excludes_unonboarded_paused_locked_and_halt
     assert [u.telegram_user_id for u in subs] == [1]
 
 
+def test_list_subscribers_for_symbol_excludes_telegram_unreachable_users():
+    """Set by the outbox worker on a Forbidden/ChatNotFound response —
+    see db.mark_telegram_unreachable. No point enqueueing a future alert
+    for a chat that's already confirmed unreachable."""
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "blocked_the_bot")
+    db.mark_onboarded(conn, 1, now)
+    db.set_risk_ack(conn, 1, now)
+    db.mark_telegram_unreachable(conn, 1, now)
+
+    subs = db.list_subscribers_for_symbol(conn, "TSLA", now.date(), now, default_watchlist=["TSLA"])
+    assert subs == []
+    assert db.get_user(conn, 1).is_telegram_unreachable is True
+
+
+def test_get_or_create_user_clears_telegram_unreachable_on_a_new_update():
+    """A real update arriving FROM the chat (e.g. /start after unblocking
+    the bot) is concrete proof the chat is reachable again — the one
+    thing that can undo mark_telegram_unreachable's terminal marking."""
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "alice")
+    db.mark_telegram_unreachable(conn, 1, now)
+    assert db.get_user(conn, 1).is_telegram_unreachable is True
+
+    db.get_or_create_user(conn, 1, 1, "alice")  # dispatcher calls this on every incoming update
+    assert db.get_user(conn, 1).is_telegram_unreachable is False
+
+
 def test_log_took_computes_reaction_seconds_and_log_closed_computes_pnl():
     conn = _conn()
     db.get_or_create_user(conn, 1, 1, "a")

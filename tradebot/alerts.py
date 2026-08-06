@@ -4,17 +4,22 @@ Message rendering lives in tradebot.rendering (templates.py + fields.py)
 — this module only decides WHETHER and WHEN to send (AlertBudget) and
 HOW to deliver (ConsoleAlerter / TelegramAlerter). See CLAUDE.md: live
 alerting is opt-in, default log-only.
+
+TelegramAlerter.send() persists to the outbox (tradebot.telegram_bot.
+outbox) and returns immediately — it never calls the Telegram API
+itself. tradebot.telegram_bot.worker is the only thing that does that,
+on its own schedule, respecting priority and rate limits. This is a
+deliberate architecture change: the scanner's hot path must never block
+on a network call or a retry loop.
 """
 from __future__ import annotations
 
 import os
-import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable
-
-import requests
 
 
 @dataclass(frozen=True)
@@ -40,9 +45,12 @@ class Cluster:
 
 
 class ConsoleAlerter:
-    """Default, log-only alerter — used whenever --live is absent."""
+    """Default, log-only alerter — used whenever --live is absent.
+    Accepts the same priority/alert_id kwargs as TelegramAlerter.send()
+    (and ignores them) so every call site can pass them uniformly
+    regardless of which alerter is active."""
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, priority: int | None = None, alert_id: str | None = None) -> None:
         print(f"\n--- ALERT (console, not sent) ---\n{text}\n")
 
 
@@ -51,9 +59,11 @@ class TelegramCredentialsError(RuntimeError):
 
 
 class TelegramAlerter:
-    """Pushes to Telegram. Only used with --live."""
+    """Enqueues to the outbox for the ops channel. Only used with --live.
+    See tradebot.telegram_bot.worker for the process that actually calls
+    the Telegram API — this class never does."""
 
-    def __init__(self) -> None:
+    def __init__(self, users_db_path=None) -> None:
         self.token = os.environ.get("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.environ.get("TELEGRAM_CHAT_ID")
         if not self.token or not self.chat_id:
@@ -61,34 +71,35 @@ class TelegramAlerter:
                 "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set in the environment. "
                 "Set them before running with --live."
             )
+        self._users_db_path = users_db_path  # None -> db.py's own default path; overridable for tests
+        self._users_conn = None
 
-    def send(self, text: str, max_retries: int = 5, base_delay: float = 1.0) -> None:
-        """Retries on both a 429 (rate limit — honors Telegram's own
-        retry_after hint) and transient network failures (timeouts,
-        connection errors). A single rate limit or network blip must
-        never crash the runner mid-session — see CLAUDE.md: per-iteration
-        exceptions get logged and the loop continues, but that's only a
-        safety net; routine transient failures shouldn't need it."""
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
-        for attempt in range(max_retries):
-            try:
-                resp = requests.post(url, json=payload, timeout=10)
-            except requests.exceptions.RequestException:
-                if attempt == max_retries - 1:
-                    raise
-                time.sleep(base_delay * (2**attempt))
-                continue
+    def _outbox_conn(self):
+        # Lazy: a ConsoleAlerter-only run (replay, tests) never needs
+        # users.db opened at all.
+        if self._users_conn is None:
+            from tradebot.telegram_bot.db import connect as users_connect
 
-            if resp.status_code != 429 or attempt == max_retries - 1:
-                resp.raise_for_status()
-                return
-            delay = base_delay * (2**attempt)
-            try:
-                delay = resp.json().get("parameters", {}).get("retry_after", delay)
-            except ValueError:
-                pass
-            time.sleep(delay)
+            self._users_conn = (
+                users_connect(self._users_db_path) if self._users_db_path is not None else users_connect()
+            )
+        return self._users_conn
+
+    def send(self, text: str, priority: int | None = None, alert_id: str | None = None) -> None:
+        """Persists to the outbox and returns immediately — no network
+        call, no retry loop, here. `alert_id` should be the real
+        detection_id when this send is about one specific cluster (gives
+        real crash-safe idempotency across a runner.py restart); when
+        there isn't one (a digest, a heartbeat, a system notice), a fresh
+        id is generated, since there's nothing meaningful to dedupe a
+        one-off aggregate message against anyway."""
+        from tradebot.telegram_bot import outbox
+
+        resolved_priority = priority if priority is not None else outbox.PRIORITY_NORMAL
+        resolved_alert_id = alert_id or uuid.uuid4().hex
+        outbox.enqueue_broadcast(
+            self._outbox_conn(), resolved_alert_id, [(int(self.chat_id), text, None)], resolved_priority,
+        )
 
 
 class Decision(str, Enum):

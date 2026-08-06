@@ -46,6 +46,7 @@ from tradebot.rendering import templates
 from tradebot.guard import validate_alert_data
 from tradebot import metrics
 from tradebot.telegram_bot import heartbeat as bot_liveness
+from tradebot.telegram_bot import outbox
 from tradebot.detectors import (
     DETECTORS,
     Bar,
@@ -382,7 +383,7 @@ def process_new_bar(
                 )
 
             text = templates.render_high_alert(cluster, anchors, quote, selection, similar_setups, news_driven=news_driven)
-            alerter.send(text)
+            alerter.send(text, priority=outbox.PRIORITY_HIGH, alert_id=detection_id)
             conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
             if subscriber_hook is not None:
                 try:
@@ -408,7 +409,8 @@ def process_new_bar(
                     f"Daily high-tier alert cap ({budget.max_high_per_day}) reached. "
                     "Suppressing further HIGH alerts today.",
                     result["ts"],
-                )
+                ),
+                priority=outbox.PRIORITY_HIGH,
             )
             if guard_reason is None:
                 conn.execute(
@@ -427,7 +429,7 @@ def send_medium_digest_if_due(budget: AlertBudget, alerter, conn, when: datetime
     if not digest:
         return
     tier_perf = tier_performance(conn).get("medium")
-    alerter.send(templates.render_digest("Medium Digest", "medium", digest, tier_perf, when))
+    alerter.send(templates.render_digest("Medium Digest", "medium", digest, tier_perf, when), priority=outbox.PRIORITY_NORMAL)
 
 
 def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None:
@@ -435,7 +437,7 @@ def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None
     if not summary:
         return
     tier_perf = tier_performance(conn).get("log")
-    alerter.send(templates.render_log_summary(summary, tier_perf, when))
+    alerter.send(templates.render_log_summary(summary, tier_perf, when), priority=outbox.PRIORITY_LOG)
 
 
 # --------------------------------------------------------------------------
@@ -522,8 +524,11 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
     stats = HeartbeatStats(start_time=open_ts, session_date=session_date)
 
     try:
-        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), clock["t"]))
-        alerter.send(templates.render_pre_open_card(events_for_date(conn, session_date), session_date, clock["t"]))
+        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), clock["t"]), priority=outbox.PRIORITY_NORMAL)
+        alerter.send(
+            templates.render_pre_open_card(events_for_date(conn, session_date), session_date, clock["t"]),
+            priority=outbox.PRIORITY_NORMAL,
+        )
     except Exception:
         stats.errors.append(traceback.format_exc())
 
@@ -583,14 +588,15 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                     alerter.send(
                         templates.render_system_notice(
                             f"{symbol}: exception during evaluation. See logs. Continuing.", clock["t"]
-                        )
+                        ),
+                        priority=outbox.PRIORITY_HIGH,
                     )
                 except Exception:
                     pass
                 continue
 
         if HALT_FILE.exists():
-            alerter.send(templates.render_system_notice("HALT file present. Stopping replay.", clock["t"]))
+            alerter.send(templates.render_system_notice("HALT file present. Stopping replay.", clock["t"]), priority=outbox.PRIORITY_HIGH)
             halted = True
         if not any_advanced:
             break
@@ -602,7 +608,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
         session_date, clock["t"] - open_ts, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), clock["t"],
     )
-    alerter.send(heartbeat)
+    alerter.send(heartbeat, priority=outbox.PRIORITY_LOG)
     conn.close()
     return stats
 
@@ -624,8 +630,11 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     stats = HeartbeatStats(start_time=now, session_date=session_date)
 
     try:
-        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now))
-        alerter.send(templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now))
+        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now), priority=outbox.PRIORITY_NORMAL)
+        alerter.send(
+            templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now),
+            priority=outbox.PRIORITY_NORMAL,
+        )
     except Exception:
         stats.errors.append(traceback.format_exc())
 
@@ -648,7 +657,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
         if loop_start >= close_ts:
             break
         if HALT_FILE.exists() or (halt_checker is not None and halt_checker.check()):
-            alerter.send(templates.render_system_notice("halt requested. Stopping.", loop_start))
+            alerter.send(templates.render_system_notice("halt requested. Stopping.", loop_start), priority=outbox.PRIORITY_HIGH)
             break
 
         for symbol in WATCHLIST:
@@ -663,7 +672,8 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                                 f"{symbol} data is stale (>{STALENESS_SECONDS}s). "
                                 "Suppressing alerts until fresh.",
                                 loop_start,
-                            )
+                            ),
+                            priority=outbox.PRIORITY_HIGH,
                         )
                         stale_notified = True
                     continue
@@ -697,7 +707,8 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                     alerter.send(
                         templates.render_system_notice(
                             f"{symbol}: exception during evaluation. See logs. Continuing.", loop_start
-                        )
+                        ),
+                        priority=outbox.PRIORITY_HIGH,
                     )
                 except Exception:
                     pass
@@ -716,7 +727,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
         session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,
     )
-    alerter.send(heartbeat)
+    alerter.send(heartbeat, priority=outbox.PRIORITY_LOG)
     conn.close()
     return stats
 
@@ -743,14 +754,15 @@ def main() -> None:
         if args.live and not args.no_personal_alerts:
             # Deferred import: the command layer (and its own DB) is only
             # needed here, so replay/console-only runs stay decoupled from it.
-            from tradebot.telegram_bot.client import BotClient
+            # No BotClient here anymore — the hook only enqueues to the
+            # outbox now; tradebot.telegram_bot.worker is the only thing
+            # that actually calls the Telegram API.
             from tradebot.telegram_bot.db import connect as users_connect
             from tradebot.telegram_bot.delivery import make_subscriber_hook
 
-            client = BotClient(alerter.token)
             users_conn = users_connect()
             subscriber_hook = make_subscriber_hook(
-                client, users_conn, lambda now: now.astimezone(ET).date(), WATCHLIST
+                users_conn, lambda now: now.astimezone(ET).date(), WATCHLIST
             )
         run_live(alerter, subscriber_hook)
 

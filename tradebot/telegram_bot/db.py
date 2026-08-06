@@ -85,6 +85,31 @@ CREATE TABLE IF NOT EXISTS alert_responses (
     response TEXT NOT NULL,
     ts_utc TEXT NOT NULL
 );
+
+-- Outbox pattern (see tradebot.telegram_bot.outbox / .worker): every
+-- outbound Telegram send is persisted here BEFORE delivery is attempted,
+-- and the worker is the only thing that ever calls the Telegram API.
+-- UNIQUE(alert_id, chat_id) is the idempotency key — re-enqueueing the
+-- same (alert_id, chat_id) pair (e.g. a producer retry after a crash) is
+-- a safe no-op, never a duplicate row.
+CREATE TABLE IF NOT EXISTS outbox (
+    id TEXT PRIMARY KEY,
+    alert_id TEXT NOT NULL,
+    chat_id INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    reply_markup_json TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    leased_by TEXT,
+    leased_at TEXT,
+    created_at TEXT NOT NULL,
+    delivered_at TEXT,
+    last_error TEXT,
+    UNIQUE(alert_id, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox(status, priority, next_attempt_at);
 """
 
 
@@ -107,6 +132,7 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _add_column_if_missing(conn, "user_trades", "note", "TEXT")
     _add_column_if_missing(conn, "users", "account_size", "REAL")
     _add_column_if_missing(conn, "users", "risk_per_trade_pct", "REAL")
+    _add_column_if_missing(conn, "users", "telegram_unreachable_at", "TEXT")
     return conn
 
 
@@ -144,6 +170,7 @@ class User:
     onboarding_step: str | None
     account_size: float | None
     risk_per_trade_pct: float | None
+    telegram_unreachable_at: str | None
 
     @property
     def is_onboarded(self) -> bool:
@@ -152,6 +179,13 @@ class User:
     @property
     def has_risk_ack(self) -> bool:
         return self.risk_ack_at is not None
+
+    @property
+    def is_telegram_unreachable(self) -> bool:
+        """Set by the outbox worker on a Forbidden (blocked the bot) or
+        ChatNotFound response — terminal, never retried automatically.
+        See db.mark_telegram_unreachable / outbox.py."""
+        return self.telegram_unreachable_at is not None
 
     def is_paused(self, now: datetime) -> bool:
         return self.paused_until is not None and now < datetime.fromisoformat(self.paused_until)
@@ -167,7 +201,8 @@ _USER_COLUMNS = (
     "telegram_user_id, chat_id, username, created_at, onboarded_at, risk_ack_at, timezone, "
     "quiet_hours_start, quiet_hours_end, tier, is_admin, paused_until, pause_reason, "
     "locked_until, lock_reason, max_trades_per_day, max_daily_loss, max_position_size, "
-    "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct"
+    "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct, "
+    "telegram_unreachable_at"
 )
 
 
@@ -176,7 +211,7 @@ def _row_to_user(row) -> User:
         uid, chat_id, username, created_at, onboarded_at, risk_ack_at, tz, qh_start, qh_end,
         tier, is_admin, paused_until, pause_reason, locked_until, lock_reason,
         max_trades, max_loss, max_size, pending_json, halted_session, onboarding_step,
-        account_size, risk_per_trade_pct,
+        account_size, risk_per_trade_pct, telegram_unreachable_at,
     ) = row
     return User(
         telegram_user_id=uid, chat_id=chat_id, username=username, created_at=created_at,
@@ -186,6 +221,7 @@ def _row_to_user(row) -> User:
         lock_reason=lock_reason, max_trades_per_day=max_trades, max_daily_loss=max_loss,
         max_position_size=max_size, pending_limits=json.loads(pending_json), halted_session=halted_session,
         onboarding_step=onboarding_step, account_size=account_size, risk_per_trade_pct=risk_per_trade_pct,
+        telegram_unreachable_at=telegram_unreachable_at,
     )
 
 
@@ -196,13 +232,28 @@ def get_user(conn: sqlite3.Connection, telegram_user_id: int) -> User | None:
     return _row_to_user(row) if row else None
 
 
+def get_user_by_chat_id(conn: sqlite3.Connection, chat_id: int) -> User | None:
+    """For a DM, chat_id and telegram_user_id are the same Telegram id in
+    practice, but the outbox worker looks this up rather than assume it —
+    an outbox row only carries chat_id (it's what Telegram sends to), and
+    an ops-channel broadcast's chat_id has no user row at all."""
+    row = conn.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE chat_id = ?", (chat_id,)).fetchone()
+    return _row_to_user(row) if row else None
+
+
 def get_or_create_user(conn: sqlite3.Connection, telegram_user_id: int, chat_id: int, username: str | None) -> User:
     """Idempotent — see /start requirement: re-running never wipes
     existing settings. Only touches chat_id/username on an existing row
-    (they can legitimately change), never resets onboarding state."""
+    (they can legitimately change), never resets onboarding state.
+
+    Also clears telegram_unreachable_at: this only runs when a real
+    update arrives FROM this chat (see dispatcher._get_user), which is
+    concrete proof the chat is reachable again — the one event that can
+    legitimately undo mark_telegram_unreachable's terminal marking."""
     conn.execute(
         "INSERT INTO users (telegram_user_id, chat_id, username, created_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(telegram_user_id) DO UPDATE SET chat_id=excluded.chat_id, username=excluded.username",
+        "ON CONFLICT(telegram_user_id) DO UPDATE SET chat_id=excluded.chat_id, username=excluded.username, "
+        "telegram_unreachable_at=NULL",
         (telegram_user_id, chat_id, username, _now_iso()),
     )
     conn.commit()
@@ -438,10 +489,26 @@ def list_subscribers_for_symbol(
         user = _row_to_user(row)
         if user.is_paused(now) or user.is_locked(now) or user.is_halted_for_session(session_date):
             continue
+        if user.is_telegram_unreachable:
+            continue
         watchlist = get_watchlist(conn, user.telegram_user_id) or default_watchlist
         if symbol in watchlist:
             subscribers.append(user)
     return subscribers
+
+
+def mark_telegram_unreachable(conn: sqlite3.Connection, telegram_user_id: int, when: datetime) -> None:
+    """Set by the outbox worker (tradebot.telegram_bot.worker) on a
+    Forbidden or ChatNotFound response — the bot was blocked, or the
+    chat/account is gone. Terminal: never cleared automatically, since
+    there's no event that tells us the user unblocked the bot. A real
+    person can only get back on the list by re-running /start, which
+    calls get_or_create_user and this doesn't touch that path."""
+    conn.execute(
+        "UPDATE users SET telegram_unreachable_at = ? WHERE telegram_user_id = ?",
+        (when.isoformat(), telegram_user_id),
+    )
+    conn.commit()
 
 
 # --------------------------------------------------------------------------

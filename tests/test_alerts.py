@@ -5,16 +5,20 @@ WHETHER/WHEN to send and HOW to deliver.
 
 AlertBudget takes an injectable clock, so these tests never sleep or
 depend on real time.
+
+TelegramAlerter.send() only enqueues to the outbox now — it makes no
+network call itself, so there's nothing here to mock at the requests
+level. The retry/backoff/429-handling behavior that used to live in this
+class moved to tradebot.telegram_bot.outbound (single-attempt HTTP,
+tested in test_outbound.py) and tradebot.telegram_bot.worker (retry
+scheduling, tested in test_worker.py).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
-
-import pytest
-import requests
 
 from tradebot.alerts import AlertBudget, Cluster, Decision, TelegramAlerter
+from tradebot.telegram_bot import outbox
 
 
 class FakeClock:
@@ -122,83 +126,50 @@ def test_budget_resets_on_a_new_day():
     assert budget.evaluate(_cluster(symbol="TSLA", cid="c")) == Decision.SEND
 
 
-def test_telegram_alerter_retries_on_429_then_succeeds(monkeypatch):
+def test_telegram_alerter_enqueues_without_calling_the_network(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    alerter = TelegramAlerter()
+    alerter = TelegramAlerter(users_db_path=tmp_path / "users.db")
 
-    rate_limited = MagicMock(status_code=429)
-    rate_limited.json.return_value = {"parameters": {"retry_after": 0.01}}
-    ok = MagicMock(status_code=200)
+    alerter.send("hello", priority=outbox.PRIORITY_HIGH, alert_id="det1")
 
-    with patch("tradebot.alerts.requests.post", side_effect=[rate_limited, ok]) as mock_post, \
-         patch("tradebot.alerts.time.sleep") as mock_sleep:
-        alerter.send("hello")
-
-    assert mock_post.call_count == 2
-    mock_sleep.assert_called_once_with(0.01)  # honored Telegram's own retry_after hint
-    ok.raise_for_status.assert_called_once()
-    rate_limited.raise_for_status.assert_not_called()  # never raised on the retryable attempt
+    row = alerter._outbox_conn().execute("SELECT chat_id, text, priority, status FROM outbox").fetchone()
+    assert row == (12345, "hello", outbox.PRIORITY_HIGH, "pending")
 
 
-def test_telegram_alerter_sends_html_parse_mode(monkeypatch):
+def test_telegram_alerter_default_priority_is_normal(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    alerter = TelegramAlerter()
+    alerter = TelegramAlerter(users_db_path=tmp_path / "users.db")
 
-    ok = MagicMock(status_code=200)
-    with patch("tradebot.alerts.requests.post", return_value=ok) as mock_post:
-        alerter.send("<b>hi</b>")
+    alerter.send("hello")
 
-    assert mock_post.call_args.kwargs["json"]["parse_mode"] == "HTML"
+    priority = alerter._outbox_conn().execute("SELECT priority FROM outbox").fetchone()[0]
+    assert priority == outbox.PRIORITY_NORMAL
 
 
-def test_telegram_alerter_raises_after_max_retries_exhausted(monkeypatch):
+def test_telegram_alerter_generates_an_alert_id_when_none_given(monkeypatch, tmp_path):
+    """Digests, heartbeats, and system notices have no natural alert_id —
+    each gets its own fresh id rather than colliding on an empty string."""
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    alerter = TelegramAlerter()
+    alerter = TelegramAlerter(users_db_path=tmp_path / "users.db")
 
-    rate_limited = MagicMock(status_code=429)
-    rate_limited.json.return_value = {"parameters": {"retry_after": 0.01}}
-    rate_limited.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
+    alerter.send("digest one")
+    alerter.send("digest two")
 
-    with patch("tradebot.alerts.requests.post", return_value=rate_limited) as mock_post, \
-         patch("tradebot.alerts.time.sleep"):
-        with pytest.raises(requests.exceptions.HTTPError):
-            alerter.send("hello", max_retries=3)
-
-    assert mock_post.call_count == 3
+    rows = alerter._outbox_conn().execute("SELECT alert_id, text FROM outbox ORDER BY text").fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] != rows[1][0]  # distinct alert_ids -> both actually got enqueued, not deduped
 
 
-def test_telegram_alerter_retries_on_network_timeout_then_succeeds(monkeypatch):
-    """Real failure this caught: a transient ReadTimeout during a live
-    send used to propagate straight up and crash the whole runner."""
+def test_telegram_alerter_reuses_the_same_connection_across_sends(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    alerter = TelegramAlerter()
+    alerter = TelegramAlerter(users_db_path=tmp_path / "users.db")
 
-    ok = MagicMock(status_code=200)
+    alerter.send("one", alert_id="a1")
+    conn_after_first = alerter._users_conn
+    alerter.send("two", alert_id="a2")
 
-    with patch(
-        "tradebot.alerts.requests.post",
-        side_effect=[requests.exceptions.ReadTimeout("timed out"), ok],
-    ) as mock_post, patch("tradebot.alerts.time.sleep") as mock_sleep:
-        alerter.send("hello")
-
-    assert mock_post.call_count == 2
-    mock_sleep.assert_called_once()  # backed off before retrying
-    ok.raise_for_status.assert_called_once()
-
-
-def test_telegram_alerter_raises_after_network_timeouts_exhaust_retries(monkeypatch):
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
-    alerter = TelegramAlerter()
-
-    with patch(
-        "tradebot.alerts.requests.post", side_effect=requests.exceptions.ReadTimeout("timed out")
-    ) as mock_post, patch("tradebot.alerts.time.sleep"):
-        with pytest.raises(requests.exceptions.ReadTimeout):
-            alerter.send("hello", max_retries=3)
-
-    assert mock_post.call_count == 3
+    assert alerter._users_conn is conn_after_first  # lazy-opened once, not reopened per send
