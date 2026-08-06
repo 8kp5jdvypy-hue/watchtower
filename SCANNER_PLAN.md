@@ -8,9 +8,10 @@ CLAUDE.md for the engineering rules this project follows.
 
 ## Watchlist
 
-SPY, QQQ, GOOGL, TSLA, BE, IONQ, NVDA, AAPL, AMD, META, AMZN — defined
-once in `tradebot/config.py` and imported everywhere else (fetch_cache,
-replay, runner) rather than duplicated.
+SPY, QQQ, GOOGL, TSLA, BE, IONQ, NVDA, AAPL, AMD, META, AMZN, MSFT, COIN,
+PLTR, SMCI, IWM, USO (17 symbols) — defined once in `tradebot/config.py`
+and imported everywhere else (fetch_cache, replay, runner) rather than
+duplicated.
 
 ## Architecture
 
@@ -41,18 +42,30 @@ replay, runner) rather than duplicated.
    hourly medium digest, EOD log summary).
 8. `tradebot/costs.py` — `breakeven_move()` for the ATM option contract,
    shown in every alert.
-9. `tradebot/runner.py` — the live 5-minute loop.
+9. `tradebot/runner.py` — the live 5-minute loop. Sends
+   `format_morning_briefing()` once at the start of every run (live or
+   replay) — the validated rules (HIGH tier only, no confirmation delay,
+   no time-of-day filter — see below) plus the live HIGH-tier track
+   record, not a static list.
 
 ## Tiers
 
 Detections are scored in ATR units (or a ratio, for `rvol_spike`) and
 bucketed by `tier_for_score()`:
 
-- `TIER_HIGH = 3.4`, `TIER_MEDIUM = 1.7` (calibrated 2026-08-05, re-verified
-  the same day against 143 cached sessions spanning Jan-Aug 2026 — see
+- `TIER_HIGH = 3.8`, `TIER_MEDIUM = 1.9` (calibrated 2026-08-05 for the
+  17-symbol watchlist, after fixing a real bug in `gap()` — see
   `out/replay_detections.csv` and `detectors.py`'s comment for the
   derivation history). Targets ~2-5 high-tier clusters/day across the
-  watchlist; medium tier runs ~22/day, delivered as one hourly digest.
+  watchlist; medium tier delivered as one hourly digest.
+- **Bug fixed 2026-08-05**: `gap()` used to score against the triggering
+  bar's own high-low range, which could blow up to an astronomically
+  large, meaningless score on a thin/near-zero-range bar (real example:
+  USO premarket prints on ~100 shares volume). Fixed to score against
+  the prior session's range instead — stable and always meaningful,
+  never a single noisy 5-minute print. This cut gap detections ~4x
+  (~1420 → 362) and changed the score distribution materially, hence
+  the recalibration above.
 - HIGH tier is the one part of this system with a measured (not assumed)
   edge, and even that is fragile: a Jan-May vs. Jun-Aug split showed
   58.7%/+0.40% avg on the later half alone vs. 50.4%/+0.09% combined
@@ -75,6 +88,27 @@ and `scripts/hour_report.py` exist to keep tracking it as an
 **informational-only** report — never used to gate or suppress an
 alert — so the question can be revisited once there's enough data for a
 train/test split to actually agree with itself.
+
+## Confirmation delay (tested and rejected)
+
+Tested whether waiting for the bar after a HIGH-tier trigger to also
+continue in the same direction — before treating it as actionable —
+improves outcomes. Backfilled the required forward marks (+20/+35/+65min
+from the original trigger, i.e. +15/+30/+60min held from the confirm
+bar) and compared:
+
+| | n | Win rate | Avg return |
+|---|---|---|---|
+| Immediate entry (+30min) | 395 | 50.6% | +0.063% |
+| Confirmed entry (+30min from confirm) | 214 | 49.5% | +0.085% |
+
+Worse or flat at every horizon (+15/+30/+60min all checked), and only
+51.7% of alerts even pass the confirmation filter — fewer trades with no
+better odds on the ones that remain. Likely explanation: requiring
+confirmation means entering after the "easy" part of the move already
+happened, i.e. chasing. **Not implemented** — same bar of evidence as
+best-hours: reject an idea the moment real data contradicts it, no
+matter how reasonable it sounded going in.
 
 ## Time horizons (why +5min is tracked but not featured)
 

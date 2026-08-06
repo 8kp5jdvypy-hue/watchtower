@@ -81,10 +81,33 @@ def test_level_break_needs_at_least_two_bars():
 
 
 def test_gap_fires_only_on_the_first_bar():
-    anchors = _flat_anchors(prior_close=95.0)
-    first = _bar(0, 105.0)  # gapped well above prior_close (95) relative to its own range
+    anchors = _flat_anchors(prior_close=95.0)  # prior_high=96, prior_low=94, range=2
+    first = _bar(0, 105.0)  # gapped well above prior_close (95) relative to the prior day's range
     assert gap([first], anchors) is not None
     assert gap([first, _bar(1, 105.0)], anchors) is None
+
+
+def test_gap_uses_prior_session_range_not_first_bars_own_thin_range():
+    """Regression: gap()'s proxy is the prior session's range, not the
+    first bar's own range. Real example that motivated this: USO
+    premarket prints with a near-zero own-range (thin volume) used to
+    either blow up to an astronomical score or get floored to zero. A
+    thin opening print with a genuine gap must still fire correctly,
+    scored against the prior day's range — not its own tiny range."""
+    anchors = _flat_anchors(prior_close=95.0)  # prior_high=96, prior_low=94, range=2
+    thin_first = _bar(0, 105.0, spread=0.001)  # tiny own-range, real gap up from 95
+    d = gap([thin_first], anchors)
+    assert d is not None
+    assert d.score == pytest.approx((105 - 95) / 2)  # gap_size / prior range, not / thin own-range
+
+
+def test_gap_returns_none_when_prior_session_range_is_degenerate():
+    """If the prior day itself was flat (high == low), there's no
+    meaningful proxy at all — must return None, never fabricate a score."""
+    flat_prior_daily = [Bar(SYMBOL, OPEN0 - timedelta(days=1), 95.0, 95.0, 95.0, 95.0, 500_000)]
+    anchors = build_anchors(SYMBOL, SESSION, flat_prior_daily, [_bar(0, 100.0)], historical_session_bars=[])
+    first = _bar(0, 105.0)  # a perfectly normal bar — the degeneracy is in the prior day, not this bar
+    assert gap([first], anchors) is None
 
 
 def _anchors_with_volume_history() -> "object":

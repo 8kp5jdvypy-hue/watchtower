@@ -12,9 +12,10 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from tradebot.alerts import Decision
-from tradebot.journal import TierPerformance
+from tradebot.detectors import Detection
+from tradebot.journal import TierPerformance, connect, write_cluster
 from tradebot.marketdata import Bar
-from tradebot.runner import HeartbeatStats, is_halted_bar, is_stale, session_bounds
+from tradebot.runner import HeartbeatStats, format_morning_briefing, is_halted_bar, is_stale, session_bounds
 
 
 def test_is_stale_true_past_the_threshold():
@@ -87,3 +88,33 @@ def test_heartbeat_stats_summary_omits_tier_performance_when_empty():
     stats = HeartbeatStats(start_time=start, session_date=date(2026, 7, 23))
     text = stats.summary_text(start + timedelta(hours=1), tier_perf={})
     assert "Tier track record" not in text
+
+
+def test_morning_briefing_covers_the_validated_rules_and_rejects_untested_ones():
+    conn = connect(":memory:")
+    text = format_morning_briefing(conn)
+    assert "HIGH tier as actionable" in text
+    assert "confirmation" in text.lower() and "WORSE" in text
+    assert "no proven best time of day" in text
+    assert "Similar Setups" in text
+    assert "Breakeven" in text
+    assert "daily cap and cooldown" in text
+    assert "Not financial advice" in text
+    # empty journal — no track record line to fabricate
+    assert "Current HIGH-tier track record" not in text
+
+
+def test_morning_briefing_includes_live_track_record_when_available():
+    conn = connect(":memory:")
+    base = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        detection_id = write_cluster(
+            conn, session="2026-06-15", symbol="TEST", ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection("TEST", "gap", base, 5.0, "h", {})], code_version_str="abc",
+        )
+        conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, mark))
+    conn.commit()
+
+    text = format_morning_briefing(conn)
+    assert "Current HIGH-tier track record: 100.0% continued (n=5)" in text

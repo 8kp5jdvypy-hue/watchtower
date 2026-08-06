@@ -22,10 +22,19 @@ from typing import Mapping, Sequence
 # Re-verified 2026-08-05 after expanding history from 20 to 143 cached
 # sessions (Jan-Aug 2026, 14626 clusters): still mean 3.79 HIGH/day, no
 # symbol over 16% of HIGH — no change needed at the larger sample.
+# Re-calibrated 2026-08-05 after expanding to 17 symbols (added MSFT,
+# COIN, PLTR, SMCI, IWM, USO) AND fixing a real bug in gap() (it used to
+# score against the triggering bar's own high-low range, which blew up
+# to absurd values on thin/near-zero-range bars — real example: USO
+# premarket prints on ~100 shares volume; fixed to score against the
+# prior session's range instead, which cut gap detections ~4x, from
+# ~1420 to 362, and changed the overall score distribution materially).
+# 21552 clusters: mean 3.62 HIGH/day, max 20/day (one real volatile day,
+# 2026-01-21), no symbol over 17% of HIGH.
 # Re-derive from out/replay_detections.csv if the watchlist or detectors
 # change materially.
-TIER_HIGH = 3.4
-TIER_MEDIUM = 1.7
+TIER_HIGH = 3.8
+TIER_MEDIUM = 1.9
 
 
 class Tier(str, Enum):
@@ -393,14 +402,25 @@ def gap(
     bars: Sequence[Bar], anchors: DailyAnchors, atr_units: float = 0.75
 ) -> Detection | None:
     """Fires only on the session's first bar, when the open gaps from
-    prior_close by more than atr_units times that first bar's own range
-    (a same-session ATR isn't available yet at the first bar)."""
+    prior_close by more than atr_units times the prior session's true
+    range (prior_high - prior_low).
+
+    Earlier versions used the first bar's own high-low range as the proxy
+    (a same-session ATR isn't available yet at the first bar). That's
+    fragile: a single 5-minute bar, especially in thin opening liquidity,
+    can have a near-zero range independent of how large the real gap is,
+    which either divides out to an astronomically large, meaningless score
+    (real example: USO premarket prints with high==low on ~100 shares
+    volume) or gets suppressed by an arbitrary epsilon floor. A full prior
+    session's range is a stable, always-meaningful baseline instead."""
     _check_symbol(bars, anchors)
     if len(bars) != 1:
         return None
     first = bars[0]
+    proxy_range = anchors.prior_high - anchors.prior_low
+    if proxy_range <= 0:
+        return None
     gap_size = first.open - anchors.prior_close
-    proxy_range = max(first.high - first.low, 1e-9)
     score = abs(gap_size) / proxy_range
     if score < atr_units:
         return None

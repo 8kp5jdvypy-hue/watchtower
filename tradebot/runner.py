@@ -155,6 +155,47 @@ def format_tier_performance_lines(tier_perf: dict) -> list[str]:
     return lines
 
 
+def format_morning_briefing(conn) -> str:
+    """Rules grounded in what's actually been tested against this
+    project's own data — not conventional wisdom. Sent once at the start
+    of a run, before the first bar close. See SCANNER_PLAN.md for the
+    validation behind each rule (best-hours and confirmation-delay were
+    both tested and rejected; don't reintroduce them without re-testing)."""
+    lines = [
+        "🌅 Morning Briefing — Rules for Today",
+        "",
+        "1️⃣ Only treat 🔴 HIGH tier as actionable. MEDIUM/LOG are for",
+        "   awareness only — tested, they sit at ~49% continued, ~0% avg",
+        "   return, statistically indistinguishable from a coin flip.",
+        "2️⃣ Act on a HIGH alert when it fires, not a bar later. Waiting",
+        "   for a 'confirmation' bar was tested and made outcomes WORSE",
+        "   (fewer trades, lower win rate) — don't chase the move.",
+        "3️⃣ There is no proven best time of day. An hour-of-day rule was",
+        "   tested with a real train/test split and rejected — the",
+        "   pattern inverted between halves of the data. Trade HIGH",
+        "   alerts whenever they fire, not on a schedule.",
+        "4️⃣ Read 📚 Similar Setups before acting. A low historical",
+        "   continuation rate for that exact kind+direction is a real",
+        "   reason to sit it out, not just decoration.",
+        "5️⃣ Compare Score against ⚖️ Breakeven. If the move needed to",
+        "   profit is bigger than what similar setups typically deliver,",
+        "   skip it — 'no tradable contract' means skip it outright.",
+        "6️⃣ Respect the daily cap and cooldown. They exist to stop",
+        "   overtrading, not to be worked around.",
+    ]
+    tier_perf = tier_performance(conn)
+    if "high" in tier_perf:
+        tp = tier_perf["high"]
+        lines.append("")
+        lines.append(
+            f"📊 Current HIGH-tier track record: {tp.continuation_rate * 100:.1f}% continued "
+            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}% at {tp.offset_min}m"
+        )
+    lines.append("")
+    lines.append("Patterns in this bot's own journaled history, not guarantees. Not financial advice.")
+    return "\n".join(lines)
+
+
 def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | None:
     detections = [d for d in (detector(bars, anchors) for detector in DETECTORS) if d is not None]
     if not detections:
@@ -326,6 +367,8 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
     budget = AlertBudget(now=lambda: clock["t"])
     stats = HeartbeatStats(start_time=open_ts, session_date=session_date)
 
+    alerter.send(format_morning_briefing(conn))
+
     historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
     history_by_symbol = {
         symbol: [full_session_rth_bars(symbol, s) for s in historical_sessions] for symbol in WATCHLIST
@@ -411,6 +454,8 @@ def run_live(alerter) -> HeartbeatStats:
     version = code_version()
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
     stats = HeartbeatStats(start_time=now, session_date=session_date)
+
+    alerter.send(format_morning_briefing(conn))
 
     historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
     history_by_symbol = {
