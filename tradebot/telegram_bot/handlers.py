@@ -529,6 +529,18 @@ def handle_export(ctx: HandlerContext) -> Reply:
 # -------------------------------------------------------------------- #
 
 
+def _dm_setup_note(ctx: HandlerContext) -> str | None:
+    """Most of what this bot does only works in a DM (see GROUP_ALLOWED) —
+    /help is one of the few commands that runs in both places, so it's the
+    natural spot to point people at DMing the bot to actually set up."""
+    who = f"@{ctx.app.bot_username}" if ctx.app.bot_username else "me"
+    if ctx.chat_type != "private":
+        return f"👉 DM {who} and send /start to set up personalized alerts, limits, and your watchlist — most commands only work there."
+    if not ctx.user.is_onboarded:
+        return "👉 New here? Send /start to set up personalized alerts, limits, and your watchlist."
+    return None
+
+
 def handle_help(ctx: HandlerContext) -> Reply:
     lines = [
         f"<b>{html.escape(ctx.app.bot_name)} commands</b>",
@@ -558,6 +570,10 @@ def handle_help(ctx: HandlerContext) -> Reply:
         "If trading ever stops feeling like a choice, the National Council on Problem Gambling "
         "(1-800-522-4700, ncpgambling.org) is free, confidential, and available any time — no judgment.",
     ]
+    note = _dm_setup_note(ctx)
+    if note:
+        lines.insert(2, "")
+        lines.insert(2, note)
     return Reply(text="\n".join(lines))
 
 

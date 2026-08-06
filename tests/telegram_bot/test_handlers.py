@@ -15,7 +15,7 @@ from tradebot.telegram_bot.context import AppConfig, HandlerContext
 NOW = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
 
 
-def _app(market_open=True):
+def _app(market_open=True, bot_username=None):
     return AppConfig(
         admin_ids=frozenset({999}),
         default_watchlist=["SPY", "QQQ", "TSLA"],
@@ -26,6 +26,7 @@ def _app(market_open=True):
         session_date_fn=lambda now: now.date(),
         halt_file=Path("/tmp/watchtower_test_HALT_handlers"),
         heartbeat_file=Path("/tmp/watchtower_test_heartbeat_handlers.json"),
+        bot_username=bot_username,
     )
 
 
@@ -44,10 +45,11 @@ def _setup(user_id=1, onboarded=True, admin=False, tier="free", market_open=True
     return users_conn, journal_conn
 
 
-def _ctx(users_conn, journal_conn, user_id=1, args=None, now=NOW, market_open=True):
+def _ctx(users_conn, journal_conn, user_id=1, args=None, now=NOW, market_open=True, chat_type="private", bot_username=None):
     return HandlerContext(
         client=None, users_conn=users_conn, journal_conn=journal_conn, user=db.get_user(users_conn, user_id),
-        chat_id=user_id, chat_type="private", args=args or [], now=now, app=_app(market_open=market_open),
+        chat_id=user_id, chat_type=chat_type, args=args or [], now=now,
+        app=_app(market_open=market_open, bot_username=bot_username),
     )
 
 
@@ -320,6 +322,33 @@ def test_help_lists_commands_and_a_gambling_resource_line():
     reply = handlers.handle_help(_ctx(users_conn, journal_conn))
     assert "/status" in reply.text and "/took" in reply.text
     assert "ncpgambling.org" in reply.text.lower()
+
+
+def test_help_in_a_group_points_people_to_dm_the_bot():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username="KestrelBot"))
+    assert "@KestrelBot" in reply.text
+    assert "/start" in reply.text
+    assert "DM" in reply.text
+
+
+def test_help_in_a_group_without_a_known_username_still_says_dm_me():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username=None))
+    assert "DM me" in reply.text
+
+
+def test_help_in_dm_for_an_unonboarded_user_nudges_toward_start():
+    users_conn, journal_conn = _setup(onboarded=False)
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="private"))
+    assert "New here" in reply.text and "/start" in reply.text
+
+
+def test_help_in_dm_for_an_onboarded_user_has_no_setup_nag():
+    users_conn, journal_conn = _setup(onboarded=True)
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="private"))
+    assert "New here" not in reply.text
+    assert "DM " not in reply.text
 
 
 # ---------------------------------------------------------------------- #

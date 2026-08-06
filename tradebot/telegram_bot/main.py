@@ -44,7 +44,7 @@ def _admin_ids() -> frozenset:
     return frozenset(int(x) for x in raw.split(",") if x.strip())
 
 
-def build_app_config() -> AppConfig:
+def build_app_config(bot_username: str | None = None) -> AppConfig:
     return AppConfig(
         admin_ids=_admin_ids(),
         default_watchlist=list(WATCHLIST),
@@ -55,6 +55,7 @@ def build_app_config() -> AppConfig:
         session_date_fn=_session_date,
         halt_file=HALT_FILE,
         heartbeat_file=HEARTBEAT_FILE,
+        bot_username=bot_username,
     )
 
 
@@ -65,7 +66,8 @@ def main() -> None:
     client = BotClient(token)
     users_conn = db.connect()
     journal_conn = journal_connect(check_same_thread=False)
-    app_config = build_app_config()
+    bot_username = client.get_me().get("username")
+    app_config = build_app_config(bot_username)
 
     dispatcher = Dispatcher(
         client=client,

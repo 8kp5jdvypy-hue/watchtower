@@ -106,3 +106,8 @@ class BotClient:
         resp = requests.get(self._url("getMyCommands"), timeout=10)
         resp.raise_for_status()
         return resp.json()["result"]
+
+    def get_me(self) -> dict:
+        resp = requests.get(self._url("getMe"), timeout=10)
+        resp.raise_for_status()
+        return resp.json()["result"]

@@ -27,6 +27,7 @@ class AppConfig:
     high_tier_daily_cap: int = 8
     bar_minutes: int = 5
     bot_name: str = "Kestrel"
+    bot_username: str | None = None
 
 
 @dataclass
