@@ -17,12 +17,21 @@ from zoneinfo import ZoneInfo
 
 from dataclasses import dataclass
 
+from tradebot.config import liquidity_class
 from tradebot.detectors import Detection, bar_close_ts, tier_for_score
 from tradebot.marketdata import ReplayMarketData
 
 ET = ZoneInfo("America/New_York")
 
 MIN_HISTORY_SAMPLE = 5
+
+# Sentinel offset_min for "the session close" — not a fixed number of
+# minutes after the detection (that varies with when in the day it
+# fired), so it can't share a positive-minutes value with the 15/30/60
+# checkpoints. Used in both `marks` (underlying close price) and
+# `contract_selections` (mid_close) so both share one query pattern.
+CLOSE_MARK_OFFSET_MIN = -1
+OUTCOME_OFFSETS_MIN = (15, 30, 60)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "journal.db"
@@ -46,7 +55,11 @@ CREATE TABLE IF NOT EXISTS detections (
     alerted INTEGER DEFAULT 0,
     suppress_reason TEXT,
     no_trade INTEGER,
-    news_driven INTEGER
+    news_driven INTEGER,
+    primary_kind TEXT,
+    symbol_class TEXT,
+    event_kind TEXT,
+    event_severity TEXT
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -78,7 +91,8 @@ CREATE TABLE IF NOT EXISTS contract_selections (
     entry_ts_utc TEXT NOT NULL,
     mid_15m REAL,
     mid_30m REAL,
-    mid_60m REAL
+    mid_60m REAL,
+    mid_close REAL
 );
 
 CREATE TABLE IF NOT EXISTS event_windows (
@@ -101,6 +115,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
 """
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, sql_type: str) -> None:
+    """CREATE TABLE IF NOT EXISTS won't retroactively add a column to a
+    pre-existing table — every column added after a table's first release
+    needs one of these so an existing data/journal.db picks it up."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
 def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = True) -> sqlite3.Connection:
     """check_same_thread=False is for callers (the Telegram command
     dispatcher) that hand this connection to a worker-thread pool and
@@ -111,19 +136,13 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.executescript(SCHEMA)
-    # CREATE TABLE IF NOT EXISTS won't retroactively add a column to a
-    # pre-existing detections table — added after no_trade was introduced
-    # to track "alert fired but no tradable contract" for /performance.
-    try:
-        conn.execute("ALTER TABLE detections ADD COLUMN no_trade INTEGER")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
-    try:
-        conn.execute("ALTER TABLE detections ADD COLUMN news_driven INTEGER")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    _add_column_if_missing(conn, "detections", "no_trade", "INTEGER")
+    _add_column_if_missing(conn, "detections", "news_driven", "INTEGER")
+    _add_column_if_missing(conn, "detections", "primary_kind", "TEXT")
+    _add_column_if_missing(conn, "detections", "symbol_class", "TEXT")
+    _add_column_if_missing(conn, "detections", "event_kind", "TEXT")
+    _add_column_if_missing(conn, "detections", "event_severity", "TEXT")
+    _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     return conn
 
 
@@ -165,26 +184,37 @@ def write_cluster(
     code_version_str: str,
     alerted: bool = False,
     suppress_reason: str | None = None,
+    primary_kind: str | None = None,
 ) -> str:
+    """symbol_class (deep/thin liquidity, see tradebot.config) is derived
+    and frozen here at write time, not looked up later — the watchlist's
+    classification could change in the future, and a historical row
+    should keep reporting what was true when the alert actually fired,
+    the same discipline historical_performance() already applies to each
+    row's own atr14 rather than borrowing a current value."""
     tier = tier_for_score(score).value
     detection_id = cluster_id(symbol, session, ts_utc, kinds)
     context_json = json.dumps([d.context for d in detections])
+    symbol_class = liquidity_class(symbol)
     conn.execute(
         """
         INSERT INTO detections
             (id, ts_utc, session, symbol, kinds, headlines, score, tier,
-             close, atr14, trend, context_json, code_version, alerted, suppress_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             close, atr14, trend, context_json, code_version, alerted, suppress_reason,
+             primary_kind, symbol_class)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ts_utc=excluded.ts_utc, kinds=excluded.kinds, headlines=excluded.headlines,
             score=excluded.score, tier=excluded.tier, close=excluded.close,
             atr14=excluded.atr14, trend=excluded.trend, context_json=excluded.context_json,
             code_version=excluded.code_version, alerted=excluded.alerted,
-            suppress_reason=excluded.suppress_reason
+            suppress_reason=excluded.suppress_reason, primary_kind=excluded.primary_kind,
+            symbol_class=excluded.symbol_class
         """,
         (
             detection_id, ts_utc, session, symbol, kinds, headlines, score, tier,
             close, atr14, trend, context_json, code_version_str, int(alerted), suppress_reason,
+            primary_kind, symbol_class,
         ),
     )
     return detection_id
@@ -199,7 +229,10 @@ def set_no_trade(conn: sqlite3.Connection, detection_id: str, no_trade: bool) ->
     conn.execute("UPDATE detections SET no_trade = ? WHERE id = ?", (int(no_trade), detection_id))
 
 
-def set_news_driven(conn: sqlite3.Connection, detection_id: str, news_driven: bool) -> None:
+def set_news_driven(
+    conn: sqlite3.Connection, detection_id: str, news_driven: bool,
+    kind: str | None = None, severity: str | None = None,
+) -> None:
     """Records whether this cluster overlaps a known event window (EDGAR
     filing, earnings, FOMC/CPI/NFP/EIA — see tradebot.events), set by
     runner.py right after journal_write_cluster() for every tier, not
@@ -208,8 +241,18 @@ def set_news_driven(conn: sqlite3.Connection, detection_id: str, news_driven: bo
     discipline as set_no_trade(). Used by historical_performance() to
     exclude event-driven history from the technical continuation sample,
     and by /performance to report news-driven vs clean-technical
-    separately."""
-    conn.execute("UPDATE detections SET news_driven = ? WHERE id = ?", (int(news_driven), detection_id))
+    separately.
+
+    kind/severity snapshot which event window applied (e.g. "earnings",
+    "suppress"), frozen at decision time rather than left to a later join
+    against event_windows — the same "recompute from a frozen fact, not a
+    live re-lookup" discipline as symbol_class in write_cluster(). Only
+    the caller that already resolved active_event_window() knows these;
+    left None when there's no window (news_driven=False)."""
+    conn.execute(
+        "UPDATE detections SET news_driven = ?, event_kind = ?, event_severity = ? WHERE id = ?",
+        (int(news_driven), kind, severity, detection_id),
+    )
 
 
 def _all_bars_for_session(cache_dir: Path, symbol: str, session_date: date):
@@ -232,12 +275,18 @@ def backfill_marks(
     conn: sqlite3.Connection,
     session: date,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
-    offsets_min: tuple[int, ...] = (5, 15, 30, 60),
+    offsets_min: tuple[int, ...] = OUTCOME_OFFSETS_MIN,
 ) -> int:
     """Fill the marks table at +offsets_min from every journaled
-    detection in `session`, reading forward prices from cached bars.
-    Skips an offset silently if the session ended before reaching it —
-    never fabricates a price."""
+    detection in `session`, reading forward prices from cached bars, plus
+    one CLOSE_MARK_OFFSET_MIN row per detection — the session's actual
+    final bar close, not a fixed-minutes offset, so every alert gets a
+    real end-of-day outcome regardless of when in the session it fired.
+    Skips an offset silently if the session ended before reaching it, and
+    skips the close mark if there are no bars at all — never fabricates a
+    price. Automatic and unconditional: called once at the end of every
+    replay/live session (see runner.py), never gated on how the alert
+    performed — a loss is exactly as recordable as a win."""
     cache_dir = Path(cache_dir)
     rows = conn.execute(
         "SELECT id, symbol, ts_utc FROM detections WHERE session = ?", (session.isoformat(),)
@@ -258,6 +307,12 @@ def backfill_marks(
             conn.execute(
                 "INSERT OR REPLACE INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
                 (detection_id, offset, price),
+            )
+            written += 1
+        if bars:
+            conn.execute(
+                "INSERT OR REPLACE INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
+                (detection_id, CLOSE_MARK_OFFSET_MIN, bars[-1].close),
             )
             written += 1
     conn.commit()
@@ -293,6 +348,14 @@ def historical_performance(
     None if there isn't at least MIN_HISTORY_SAMPLE of them yet; never
     reports a stat built on too few data points to mean anything.
 
+    Matches on the real primary_kind column (exact match), not a LIKE
+    scan over the full multi-detector `kinds` string — the old fuzzy
+    match would count a row where `kind` fired as a SECONDARY detector,
+    not the primary/headline one, as if it were a same-kind setup. Rows
+    written before primary_kind existed have it NULL and so never match
+    here — excluded rather than fuzzy-matched, the same "never fabricate"
+    call as everywhere else in this module.
+
     Excludes news-driven history (news_driven=1) from the sample: these
     stats are continuation rates for TECHNICAL setups, and an event-driven
     move (earnings, an 8-K, a macro print) doesn't share that mechanism —
@@ -303,12 +366,12 @@ def historical_performance(
         SELECT d.close, m.price, d.atr14
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
-        WHERE d.kinds LIKE ? AND d.trend = ? AND d.id != ?
+        WHERE d.primary_kind = ? AND d.trend = ? AND d.id != ?
               AND (d.news_driven IS NULL OR d.news_driven = 0)
         ORDER BY d.ts_utc DESC
         LIMIT ?
         """,
-        (offset_min, f"%{kind}%", trend, exclude_id, lookback),
+        (offset_min, kind, trend, exclude_id, lookback),
     ).fetchall()
     if len(rows) < MIN_HISTORY_SAMPLE:
         return None
@@ -533,10 +596,13 @@ def record_contract_selection(
     conn.commit()
 
 
+_CONTRACT_MID_COLUMNS = {15: "mid_15m", 30: "mid_30m", 60: "mid_60m", CLOSE_MARK_OFFSET_MIN: "mid_close"}
+
+
 def record_contract_forward_mid(conn: sqlite3.Connection, detection_id: str, offset_min: int, mid: float) -> None:
-    column = {15: "mid_15m", 30: "mid_30m", 60: "mid_60m"}.get(offset_min)
+    column = _CONTRACT_MID_COLUMNS.get(offset_min)
     if column is None:
-        raise ValueError(f"unsupported contract forward-mid offset: {offset_min} (only 15/30/60 are journaled)")
+        raise ValueError(f"unsupported contract forward-mid offset: {offset_min} (only 15/30/60/close are journaled)")
     conn.execute(f"UPDATE contract_selections SET {column} = ? WHERE detection_id = ?", (mid, detection_id))
     conn.commit()
 
@@ -544,15 +610,41 @@ def record_contract_forward_mid(conn: sqlite3.Connection, detection_id: str, off
 def pending_contract_backfills(conn: sqlite3.Connection, older_than: datetime, offset_min: int) -> list[tuple]:
     """Selections whose entry is at least offset_min old but don't have
     that forward mid recorded yet — what a live backfill loop should
-    still go fetch. Returns (detection_id, symbol, right, strike, expiry)
-    rows."""
-    column = {15: "mid_15m", 30: "mid_30m", 60: "mid_60m"}.get(offset_min)
-    if column is None:
-        raise ValueError(f"unsupported contract forward-mid offset: {offset_min}")
+    still go fetch every iteration for the 15/30/60m checkpoints (see
+    runner.py's backfill_pending_contract_mids). Returns (detection_id,
+    symbol, right, strike, expiry, is_vertical, short_strike) rows —
+    is_vertical/short_strike are needed to compute the SAME long-minus-
+    short mid formula used for entry_mid, not just the long leg's price.
+
+    CLOSE_MARK_OFFSET_MIN isn't valid here: "close" isn't due at a fixed
+    number of minutes after entry, it's due once the session itself has
+    ended — see pending_contract_close_backfills for that case."""
+    column = _CONTRACT_MID_COLUMNS.get(offset_min)
+    if column is None or offset_min == CLOSE_MARK_OFFSET_MIN:
+        raise ValueError(f"unsupported contract forward-mid offset: {offset_min} (use pending_contract_close_backfills for close)")
     cutoff = (older_than - timedelta(minutes=offset_min)).isoformat()
     rows = conn.execute(
-        f"SELECT detection_id, symbol, right, strike, expiry FROM contract_selections "
+        f"SELECT detection_id, symbol, right, strike, expiry, is_vertical, short_strike FROM contract_selections "
         f"WHERE entry_ts_utc <= ? AND {column} IS NULL",
         (cutoff,),
+    ).fetchall()
+    return rows
+
+
+def pending_contract_close_backfills(conn: sqlite3.Connection, session: date) -> list[tuple]:
+    """Every contract_selections row from `session` still missing its
+    close mid — what a live end-of-session backfill pass should fetch
+    (see runner.py's backfill_pending_contract_close_mids). Unlike
+    pending_contract_backfills (elapsed-time gated, for the 15/30/60m
+    checkpoints), 'close' is due once the session has ended, which the
+    caller already knows by the time it calls this — no cutoff math."""
+    rows = conn.execute(
+        """
+        SELECT cs.detection_id, cs.symbol, cs.right, cs.strike, cs.expiry, cs.is_vertical, cs.short_strike
+        FROM contract_selections cs
+        JOIN detections d ON d.id = cs.detection_id
+        WHERE d.session = ? AND cs.mid_close IS NULL
+        """,
+        (session.isoformat(),),
     ).fetchall()
     return rows

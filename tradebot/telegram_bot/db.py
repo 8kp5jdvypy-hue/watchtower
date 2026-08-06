@@ -47,7 +47,9 @@ CREATE TABLE IF NOT EXISTS users (
     max_position_size REAL,
     pending_limits_json TEXT NOT NULL DEFAULT '[]',
     halted_session TEXT,
-    onboarding_step TEXT
+    onboarding_step TEXT,
+    account_size REAL,
+    risk_per_trade_pct REAL
 );
 
 CREATE TABLE IF NOT EXISTS watchlists (
@@ -86,11 +88,25 @@ CREATE TABLE IF NOT EXISTS alert_responses (
 """
 
 
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, sql_type: str) -> None:
+    """CREATE TABLE IF NOT EXISTS won't retroactively add a column to a
+    pre-existing table — same migration pattern as tradebot.journal."""
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.executescript(SCHEMA)
+    _add_column_if_missing(conn, "user_trades", "direction", "TEXT")
+    _add_column_if_missing(conn, "user_trades", "note", "TEXT")
+    _add_column_if_missing(conn, "users", "account_size", "REAL")
+    _add_column_if_missing(conn, "users", "risk_per_trade_pct", "REAL")
     return conn
 
 
@@ -126,6 +142,8 @@ class User:
     pending_limits: list
     halted_session: str | None
     onboarding_step: str | None
+    account_size: float | None
+    risk_per_trade_pct: float | None
 
     @property
     def is_onboarded(self) -> bool:
@@ -149,7 +167,7 @@ _USER_COLUMNS = (
     "telegram_user_id, chat_id, username, created_at, onboarded_at, risk_ack_at, timezone, "
     "quiet_hours_start, quiet_hours_end, tier, is_admin, paused_until, pause_reason, "
     "locked_until, lock_reason, max_trades_per_day, max_daily_loss, max_position_size, "
-    "pending_limits_json, halted_session, onboarding_step"
+    "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct"
 )
 
 
@@ -158,6 +176,7 @@ def _row_to_user(row) -> User:
         uid, chat_id, username, created_at, onboarded_at, risk_ack_at, tz, qh_start, qh_end,
         tier, is_admin, paused_until, pause_reason, locked_until, lock_reason,
         max_trades, max_loss, max_size, pending_json, halted_session, onboarding_step,
+        account_size, risk_per_trade_pct,
     ) = row
     return User(
         telegram_user_id=uid, chat_id=chat_id, username=username, created_at=created_at,
@@ -166,7 +185,7 @@ def _row_to_user(row) -> User:
         paused_until=paused_until, pause_reason=pause_reason, locked_until=locked_until,
         lock_reason=lock_reason, max_trades_per_day=max_trades, max_daily_loss=max_loss,
         max_position_size=max_size, pending_limits=json.loads(pending_json), halted_session=halted_session,
-        onboarding_step=onboarding_step,
+        onboarding_step=onboarding_step, account_size=account_size, risk_per_trade_pct=risk_per_trade_pct,
     )
 
 
@@ -348,6 +367,25 @@ def apply_pending_limits_if_due(conn: sqlite3.Connection, telegram_user_id: int,
 
 
 # --------------------------------------------------------------------------
+# Sizing inputs (account_size, risk_per_trade_pct) — feed the per-alert
+# position-size calculator (tradebot.costs.position_size). Unlike
+# LIMIT_FIELDS above, these are informational sizing inputs, not
+# protective caps: there's no scenario where delaying an account-size
+# update mid-session protects anyone from themselves, so they always
+# apply immediately regardless of market hours.
+# --------------------------------------------------------------------------
+
+SIZING_FIELDS = {"account_size", "risk_per_trade_pct"}
+
+
+def set_sizing_field(conn: sqlite3.Connection, telegram_user_id: int, field: str, value: float) -> None:
+    if field not in SIZING_FIELDS:
+        raise ValueError(f"unknown sizing field: {field}")
+    conn.execute(f"UPDATE users SET {field} = ? WHERE telegram_user_id = ?", (value, telegram_user_id))
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
 # Watchlist — None means "no override, use the bot default"
 # --------------------------------------------------------------------------
 
@@ -411,6 +449,12 @@ def list_subscribers_for_symbol(
 # --------------------------------------------------------------------------
 
 
+# One-tap emotional state, logged at entry (see keyboards.mood_keyboard) —
+# a fixed vocabulary, not free text, so it can be bucketed reliably. The
+# free-text note is a separate field for whatever doesn't fit these five.
+MOOD_CHOICES = ("calm", "rushed", "fomo", "revenge", "bored")
+
+
 @dataclass(frozen=True)
 class Trade:
     id: str
@@ -419,6 +463,7 @@ class Trade:
     symbol: str
     kind: str | None
     tier: str | None
+    direction: str | None  # "up"/"down", from the alert's own trend — bullish/bearish at display time
     alert_ts_utc: str | None
     taken_at: str
     reaction_seconds: float | None
@@ -430,25 +475,27 @@ class Trade:
     pnl_pct: float | None
     status: str
     emotional_tag: str | None
+    note: str | None
 
 
 _TRADE_COLUMNS = (
-    "id, telegram_user_id, detection_id, symbol, kind, tier, alert_ts_utc, taken_at, "
+    "id, telegram_user_id, detection_id, symbol, kind, tier, direction, alert_ts_utc, taken_at, "
     "reaction_seconds, after_no_trade, contracts, entry_price, exit_price, closed_at, "
-    "pnl_pct, status, emotional_tag"
+    "pnl_pct, status, emotional_tag, note"
 )
 
 
 def _row_to_trade(row) -> Trade:
     (
-        tid, uid, detection_id, symbol, kind, tier, alert_ts_utc, taken_at, reaction_seconds,
-        after_no_trade, contracts, entry_price, exit_price, closed_at, pnl_pct, status, emotional_tag,
+        tid, uid, detection_id, symbol, kind, tier, direction, alert_ts_utc, taken_at, reaction_seconds,
+        after_no_trade, contracts, entry_price, exit_price, closed_at, pnl_pct, status, emotional_tag, note,
     ) = row
     return Trade(
         id=tid, telegram_user_id=uid, detection_id=detection_id, symbol=symbol, kind=kind, tier=tier,
-        alert_ts_utc=alert_ts_utc, taken_at=taken_at, reaction_seconds=reaction_seconds,
+        direction=direction, alert_ts_utc=alert_ts_utc, taken_at=taken_at, reaction_seconds=reaction_seconds,
         after_no_trade=bool(after_no_trade), contracts=contracts, entry_price=entry_price,
         exit_price=exit_price, closed_at=closed_at, pnl_pct=pnl_pct, status=status, emotional_tag=emotional_tag,
+        note=note,
     )
 
 
@@ -478,6 +525,7 @@ def log_took(
     symbol: str,
     kind: str | None = None,
     tier: str | None = None,
+    direction: str | None = None,
     alert_ts_utc: str | None = None,
     taken_at: datetime,
     after_no_trade: bool = False,
@@ -491,15 +539,26 @@ def log_took(
     conn.execute(
         """
         INSERT INTO user_trades
-            (id, telegram_user_id, detection_id, symbol, kind, tier, alert_ts_utc, taken_at,
+            (id, telegram_user_id, detection_id, symbol, kind, tier, direction, alert_ts_utc, taken_at,
              reaction_seconds, after_no_trade, contracts, entry_price, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
         """,
         (
-            trade_id, telegram_user_id, detection_id, symbol, kind, tier, alert_ts_utc,
+            trade_id, telegram_user_id, detection_id, symbol, kind, tier, direction, alert_ts_utc,
             taken_at.isoformat(), reaction_seconds, int(after_no_trade), contracts, entry_price,
         ),
     )
+    conn.commit()
+    return get_trade(conn, trade_id)
+
+
+def set_trade_mood(conn: sqlite3.Connection, trade_id: str, mood: str) -> Trade:
+    """The one-tap emotional state at entry (see keyboards.mood_keyboard) —
+    separate from the free-text note, and restricted to MOOD_CHOICES so it
+    can be bucketed. Last tap wins if pressed more than once."""
+    if mood not in MOOD_CHOICES:
+        raise ValueError(f"unknown mood: {mood!r} (expected one of {MOOD_CHOICES})")
+    conn.execute("UPDATE user_trades SET emotional_tag = ? WHERE id = ?", (mood, trade_id))
     conn.commit()
     return get_trade(conn, trade_id)
 
@@ -528,8 +587,11 @@ def most_recent_open_trade(conn: sqlite3.Connection, telegram_user_id: int) -> T
 
 
 def log_closed(
-    conn: sqlite3.Connection, trade_id: str, *, exit_price: float, closed_at: datetime, emotional_tag: str | None = None
+    conn: sqlite3.Connection, trade_id: str, *, exit_price: float, closed_at: datetime, note: str | None = None
 ) -> Trade:
+    """note is free text, separate from the fixed-vocabulary emotional_tag
+    (set via set_trade_mood at entry, not here) — COALESCE so closing
+    without a note doesn't erase one typed earlier."""
     trade = get_trade(conn, trade_id)
     if trade is None:
         raise ValueError(f"no such trade: {trade_id}")
@@ -538,8 +600,8 @@ def log_closed(
         pnl_pct = (exit_price - trade.entry_price) / trade.entry_price * 100
     conn.execute(
         "UPDATE user_trades SET exit_price = ?, closed_at = ?, pnl_pct = ?, status = 'closed', "
-        "emotional_tag = COALESCE(?, emotional_tag) WHERE id = ?",
-        (exit_price, closed_at.isoformat(), pnl_pct, emotional_tag, trade_id),
+        "note = COALESCE(?, note) WHERE id = ?",
+        (exit_price, closed_at.isoformat(), pnl_pct, note, trade_id),
     )
     conn.commit()
     return get_trade(conn, trade_id)
@@ -557,65 +619,211 @@ def list_trades(conn: sqlite3.Connection, telegram_user_id: int) -> list[Trade]:
 # bucket with fewer closed trades than that reports None, never a rate.
 # --------------------------------------------------------------------------
 
+_DIRECTION_LABELS = {"up": "bullish", "down": "bearish"}
 
-def _win_rate(trades: list[Trade]) -> tuple[float, int] | None:
+# (label, lo_minutes_inclusive, hi_minutes_exclusive_or_None)
+HOLD_TIME_BUCKETS = (
+    ("under 15m", 0, 15),
+    ("15m-1h", 15, 60),
+    ("1h-4h", 60, 240),
+    ("over 4h", 240, None),
+)
+
+
+@dataclass(frozen=True)
+class BucketStats:
+    win_rate: float
+    avg_pnl_pct: float
+    n: int
+
+
+def _bucket_stats(trades: list[Trade]) -> BucketStats | None:
     closed = [t for t in trades if t.status == "closed" and t.pnl_pct is not None]
     if len(closed) < MIN_STAT_SAMPLE:
         return None
     wins = sum(1 for t in closed if t.pnl_pct > 0)
-    return wins / len(closed), len(closed)
+    return BucketStats(
+        win_rate=wins / len(closed),
+        avg_pnl_pct=sum(t.pnl_pct for t in closed) / len(closed),
+        n=len(closed),
+    )
+
+
+def _hold_minutes(trade: Trade) -> float | None:
+    if trade.closed_at is None:
+        return None
+    return (datetime.fromisoformat(trade.closed_at) - datetime.fromisoformat(trade.taken_at)).total_seconds() / 60
+
+
+def _hold_time_bucket_stats(trades: list[Trade]) -> dict[str, BucketStats | None]:
+    result: dict[str, BucketStats | None] = {}
+    for label, lo, hi in HOLD_TIME_BUCKETS:
+        bucket = []
+        for t in trades:
+            minutes = _hold_minutes(t)
+            if minutes is None:
+                continue
+            if minutes >= lo and (hi is None or minutes < hi):
+                bucket.append(t)
+        result[label] = _bucket_stats(bucket)
+    return result
 
 
 def personal_stats(conn: sqlite3.Connection, telegram_user_id: int) -> dict:
     trades = list_trades(conn, telegram_user_id)
-    closed = [t for t in trades if t.status == "closed" and t.pnl_pct is not None]
 
-    by_detector: dict[str, tuple[float, int] | None] = {}
-    for kind in sorted({t.kind for t in trades if t.kind}):
-        by_detector[kind] = _win_rate([t for t in trades if t.kind == kind])
+    by_detector = {kind: _bucket_stats([t for t in trades if t.kind == kind]) for kind in sorted({t.kind for t in trades if t.kind})}
+    by_symbol = {symbol: _bucket_stats([t for t in trades if t.symbol == symbol]) for symbol in sorted({t.symbol for t in trades})}
+    by_direction = {
+        label: _bucket_stats([t for t in trades if t.direction == raw]) for raw, label in _DIRECTION_LABELS.items()
+    }
+    by_hold_time = _hold_time_bucket_stats(trades)
 
-    by_symbol: dict[str, tuple[float, int] | None] = {}
-    for symbol in sorted({t.symbol for t in trades}):
-        by_symbol[symbol] = _win_rate([t for t in trades if t.symbol == symbol])
+    fast = [t for t in trades if t.reaction_seconds is not None and t.reaction_seconds <= 120]
+    slow = [t for t in trades if t.reaction_seconds is not None and t.reaction_seconds > 120]
+    fast_vs_slow = {"within_2min": _bucket_stats(fast), "later": _bucket_stats(slow)}
 
-    fast = [t for t in closed if t.reaction_seconds is not None and t.reaction_seconds <= 120]
-    slow = [t for t in closed if t.reaction_seconds is not None and t.reaction_seconds > 120]
-    fast_vs_slow = {"within_2min": _win_rate(fast), "later": _win_rate(slow)}
+    # The headline number: what taking a trade AFTER the system explicitly
+    # said NO TRADE actually costs, versus a normal entry.
+    after_no_trade = [t for t in trades if t.after_no_trade]
+    normal = [t for t in trades if not t.after_no_trade]
+    no_trade_comparison = {"after_no_trade": _bucket_stats(after_no_trade), "normal": _bucket_stats(normal)}
 
-    after_no_trade = [t for t in closed if t.after_no_trade]
-    normal = [t for t in closed if not t.after_no_trade]
-    no_trade_comparison = {"after_no_trade": _win_rate(after_no_trade), "normal": _win_rate(normal)}
+    pnl_by_tag = {
+        tag: _bucket_stats([t for t in trades if t.emotional_tag == tag])
+        for tag in sorted({t.emotional_tag for t in trades if t.emotional_tag})
+    }
 
-    pnl_by_tag: dict[str, tuple[float, int] | None] = {}
-    for tag in sorted({t.emotional_tag for t in closed if t.emotional_tag}):
-        tagged = [t for t in closed if t.emotional_tag == tag]
-        if len(tagged) < MIN_STAT_SAMPLE:
-            pnl_by_tag[tag] = None
-        else:
-            pnl_by_tag[tag] = (sum(t.pnl_pct for t in tagged) / len(tagged), len(tagged))
-
-    # Adherence: of every alert this person responded to at all (took or
-    # skipped — a real decision, logged), what fraction did they actually
-    # log an outcome for (took -> closed, not left open forever, or
-    # skipped)? A trade opened via /took and never closed isn't adherence,
-    # it's an abandoned log entry.
+    # Logging completeness: of every alert this person responded to at all
+    # (took or skipped — a real decision, logged), what fraction did they
+    # actually log an outcome for (took -> closed, not left open forever,
+    # or skipped)? Distinct from adherence_score below: this measures
+    # follow-through on LOGGING, not discipline in WHAT was taken.
     responded = conn.execute(
         "SELECT COUNT(*) FROM alert_responses WHERE telegram_user_id = ?", (telegram_user_id,)
     ).fetchone()[0]
     dangling = sum(1 for t in trades if t.status == "open")
-    adherence_score = None
+    logging_completeness = None
     if responded >= MIN_STAT_SAMPLE:
-        adherence_score = max(0.0, (responded - dangling) / responded)
+        logging_completeness = max(0.0, (responded - dangling) / responded)
+
+    # Adherence: of every trade actually taken, what fraction came from a
+    # real HIGH alert (detection_id set, tier == "high") that wasn't an
+    # override of an explicit NO TRADE? Everything else — a freeform
+    # trade with no alert behind it, a MEDIUM/LOG signal acted on as if it
+    # were a real setup, or a NO TRADE override — counts as improvised.
+    adherence_score = None
+    if len(trades) >= MIN_STAT_SAMPLE:
+        inside_rules = sum(
+            1 for t in trades if t.detection_id is not None and t.tier == "high" and not t.after_no_trade
+        )
+        adherence_score = inside_rules / len(trades)
 
     return {
-        "overall": _win_rate(trades),
+        "overall": _bucket_stats(trades),
         "by_detector": by_detector,
         "by_symbol": by_symbol,
+        "by_direction": by_direction,
+        "by_hold_time": by_hold_time,
         "fast_vs_slow": fast_vs_slow,
         "no_trade_comparison": no_trade_comparison,
         "pnl_by_tag": pnl_by_tag,
         "adherence_score": adherence_score,
+        "logging_completeness": logging_completeness,
         "total_alerts_responded": responded,
         "open_trades": dangling,
+        "total_trades": len(trades),
+    }
+
+
+# --------------------------------------------------------------------------
+# Monthly recap — the same bucket lenses as personal_stats, scoped to one
+# calendar month and ranked to surface the worst-magnitude leaks. Reuses
+# BucketStats' MIN_STAT_SAMPLE floor per candidate: a month with too few
+# trades in a bucket just doesn't produce a leak from it, never a stat
+# built on 1-2 trades.
+# --------------------------------------------------------------------------
+
+
+def _avg_pnl(trades: list[Trade]) -> float:
+    return sum(t.pnl_pct for t in trades) / len(trades)
+
+
+def _closed_in_month(trades: list[Trade], year: int, month: int) -> list[Trade]:
+    out = []
+    for t in trades:
+        if t.status != "closed" or t.pnl_pct is None or t.closed_at is None:
+            continue
+        closed_at = datetime.fromisoformat(t.closed_at)
+        if closed_at.year == year and closed_at.month == month:
+            out.append(t)
+    return out
+
+
+def _leak_candidates(trades: list[Trade]) -> list[tuple[str, float, int]]:
+    """(label, avg_pnl_pct, n) for every candidate bucket with a real
+    sample — every lens personal_stats() also reports, flattened into one
+    list so the worst-magnitude ones can be ranked against each other."""
+    candidates: list[tuple[str, float, int]] = []
+
+    for tag in sorted({t.emotional_tag for t in trades if t.emotional_tag}):
+        bucket = [t for t in trades if t.emotional_tag == tag]
+        if len(bucket) >= MIN_STAT_SAMPLE:
+            candidates.append((f"'{tag}' trades", _avg_pnl(bucket), len(bucket)))
+
+    after_nt = [t for t in trades if t.after_no_trade]
+    if len(after_nt) >= MIN_STAT_SAMPLE:
+        candidates.append(("trades taken after a NO TRADE", _avg_pnl(after_nt), len(after_nt)))
+
+    slow = [t for t in trades if t.reaction_seconds is not None and t.reaction_seconds > 120]
+    if len(slow) >= MIN_STAT_SAMPLE:
+        candidates.append(("entries taken more than 2min after the alert", _avg_pnl(slow), len(slow)))
+
+    for label, lo, hi in HOLD_TIME_BUCKETS:
+        bucket = [t for t in trades if (m := _hold_minutes(t)) is not None and m >= lo and (hi is None or m < hi)]
+        if len(bucket) >= MIN_STAT_SAMPLE:
+            candidates.append((f"{label} holds", _avg_pnl(bucket), len(bucket)))
+
+    for kind in sorted({t.kind for t in trades if t.kind}):
+        bucket = [t for t in trades if t.kind == kind]
+        if len(bucket) >= MIN_STAT_SAMPLE:
+            candidates.append((f"{kind} setups", _avg_pnl(bucket), len(bucket)))
+
+    for symbol in sorted({t.symbol for t in trades}):
+        bucket = [t for t in trades if t.symbol == symbol]
+        if len(bucket) >= MIN_STAT_SAMPLE:
+            candidates.append((f"{symbol} trades", _avg_pnl(bucket), len(bucket)))
+
+    improvised = [t for t in trades if t.detection_id is None or t.tier != "high" or t.after_no_trade]
+    if len(improvised) >= MIN_STAT_SAMPLE:
+        candidates.append(("improvised trades (outside a HIGH alert, or overriding NO TRADE)", _avg_pnl(improvised), len(improvised)))
+
+    return candidates
+
+
+def monthly_recap(conn: sqlite3.Connection, telegram_user_id: int, year: int, month: int) -> dict | None:
+    """The month's real numbers plus its 3 worst leaks — each leak is a
+    bucket whose average P/L came in below the month's own overall
+    average, ranked by how far below. None if there aren't enough closed
+    trades this month to say anything real (never forces 3 leaks out of
+    2 trades)."""
+    trades = _closed_in_month(list_trades(conn, telegram_user_id), year, month)
+    if len(trades) < MIN_STAT_SAMPLE:
+        return None
+
+    overall_avg = _avg_pnl(trades)
+    candidates = _leak_candidates(trades)
+    worse_than_average = [(label, avg, n) for label, avg, n in candidates if avg < overall_avg]
+    leaks = sorted(worse_than_average, key=lambda c: c[1])[:3]
+
+    return {
+        "year": year,
+        "month": month,
+        "trade_count": len(trades),
+        "win_rate": sum(1 for t in trades if t.pnl_pct > 0) / len(trades),
+        "overall_avg_pnl_pct": overall_avg,
+        "leaks": [
+            {"label": label, "avg_pnl_pct": avg, "n": n, "gap_pct": avg - overall_avg} for label, avg, n in leaks
+        ],
     }
 

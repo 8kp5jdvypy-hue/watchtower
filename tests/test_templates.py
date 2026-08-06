@@ -315,6 +315,40 @@ def test_render_system_notice_golden():
     )
 
 
+def _position_size(**overrides):
+    from tradebot.costs import PositionSize
+
+    fields = dict(max_contracts=5, dollars_at_risk=1000.0, risk_budget=1000.0, exceeds_limit=False)
+    fields.update(overrides)
+    return PositionSize(**fields)
+
+
+def test_render_position_size_golden_within_budget():
+    when = datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)
+    text = templates.render_position_size(_position_size(), when)
+    assert text == (
+        "<b>Position size</b>\n"
+        "\n"
+        "Max contracts: 5\n"
+        "At risk: $1,000.00 (budget $1,000.00)\n"
+        "\n"
+        "<i>12:05 ET · Not advice.</i>"
+    )
+
+
+def test_render_position_size_golden_exceeds_limit():
+    when = datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)
+    size = _position_size(max_contracts=0, dollars_at_risk=0.0, exceeds_limit=True)
+    text = templates.render_position_size(size, when)
+    assert text == (
+        "<b>Position size</b>\n"
+        "\n"
+        "position exceeds your risk limit — skip.\n"
+        "\n"
+        "<i>12:05 ET · Not advice.</i>"
+    )
+
+
 def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
     when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
     tier_perf = TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30)
@@ -325,6 +359,8 @@ def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
         templates.render_morning_briefing(tier_perf, when),
         templates.render_heartbeat(date(2026, 7, 23), timedelta(hours=1), {}, {}, [], [], None, when),
         templates.render_system_notice("halt requested", when),
+        templates.render_position_size(_position_size(), when),
+        templates.render_position_size(_position_size(exceeds_limit=True), when),
     ]
     for text in messages:
         assert "!" not in text

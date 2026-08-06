@@ -53,6 +53,16 @@ def watchlist_keyboard(all_symbols: list[str], selected: set[str]) -> dict:
     return _kb(rows)
 
 
+_MOOD_LABELS = (("calm", "Calm"), ("rushed", "Rushed"), ("fomo", "FOMO"), ("revenge", "Revenge"), ("bored", "Bored"))
+
+
+def mood_keyboard(trade_id: str) -> dict:
+    """One tap, optional — see tradebot.telegram_bot.db.MOOD_CHOICES. Two
+    rows so it doesn't get cramped on a phone-width keyboard."""
+    buttons = [(label, f"mood:{trade_id}:{value}") for value, label in _MOOD_LABELS]
+    return _kb([buttons[:3], buttons[3:]])
+
+
 def tiers_keyboard(portal_url: str | None) -> dict | None:
     if not portal_url:
         return None

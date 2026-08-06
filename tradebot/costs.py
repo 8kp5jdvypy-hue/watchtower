@@ -306,3 +306,42 @@ def select_contract(
         breakeven=breakeven, no_trade=None, expiry=expiry, dte=dte,
         similar_setups_sample=sample, insufficient_sample=False,
     )
+
+
+# --------------------------------------------------------------------------
+# Position sizing — tied to the SAME entry_mid select_contract() already
+# computed (long-minus-short for a vertical, exactly what Breakeven's math
+# assumes as the worst case), not a separate estimate. Per-user, since it
+# depends on an account size and risk tolerance nothing in this module
+# knows about — see tradebot.telegram_bot.delivery for where a real
+# per-subscriber account_size/risk_per_trade_pct feeds in.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PositionSize:
+    max_contracts: int
+    dollars_at_risk: float  # max_contracts worth of full-premium loss, real dollars
+    risk_budget: float  # account_size * risk_per_trade_pct / 100
+    exceeds_limit: bool  # True: even ONE contract's full loss would breach risk_budget
+
+
+def position_size(entry_mid: float, account_size: float, risk_per_trade_pct: float) -> PositionSize:
+    """Max contracts such that a full loss of premium never exceeds the
+    user's own configured risk budget. Options are quoted per share but
+    settle in 100-share (per-contract) multiples, so a full loss of
+    premium on N contracts costs entry_mid * 100 * N real dollars — the
+    same total-loss-of-debit worst case Breakeven's own math assumes.
+    Never suggests a size that breaches the budget: if even one
+    contract's full loss exceeds it, max_contracts is 0 and
+    exceeds_limit is True — the caller prints "position exceeds your
+    risk limit — skip", not a rounded-down-to-zero number."""
+    risk_budget = account_size * risk_per_trade_pct / 100
+    loss_per_contract = entry_mid * 100
+    if loss_per_contract <= 0:
+        return PositionSize(max_contracts=0, dollars_at_risk=0.0, risk_budget=risk_budget, exceeds_limit=True)
+    contracts = int(risk_budget // loss_per_contract)
+    return PositionSize(
+        max_contracts=contracts, dollars_at_risk=contracts * loss_per_contract,
+        risk_budget=risk_budget, exceeds_limit=contracts < 1,
+    )

@@ -84,3 +84,82 @@ def test_one_failed_dm_does_not_block_the_others():
 
     hook(_cluster(), "text")  # must not raise
     assert [c for c, _, _ in client.sent] == [2]
+
+
+# ---------------------------------------------------------------------- #
+# Position sizing — a personal follow-up DM, never part of the shared
+# alert text (see tradebot.rendering.templates.render_position_size).
+# ---------------------------------------------------------------------- #
+
+
+def test_sends_a_position_size_followup_when_sizing_is_configured():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_sizing_field(conn, 1, "account_size", 50_000)
+    db.set_sizing_field(conn, 1, "risk_per_trade_pct", 2.0)  # $1,000 budget
+    client = FakeClient()
+    hook = make_subscriber_hook(client, conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(), "<b>alert text</b>", 2.00)  # $2.00 entry mid -> $200/contract -> 5 contracts
+
+    assert len(client.sent) == 2
+    alert_call, sizing_call = client.sent
+    assert alert_call[1] == "<b>alert text</b>"
+    assert "Max contracts: 5" in sizing_call[1]
+    assert "$" in sizing_call[1]
+
+
+def test_position_size_math_matches_the_configured_budget():
+    """$10,000 account, 1% risk = $100 budget; $2.00 entry mid = $200/contract
+    full-loss — that's under a full contract, so this should be the
+    'exceeds your risk limit' case, not a rounded-down suggestion."""
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_sizing_field(conn, 1, "account_size", 10_000)
+    db.set_sizing_field(conn, 1, "risk_per_trade_pct", 1.0)
+    client = FakeClient()
+    hook = make_subscriber_hook(client, conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(), "text", 2.00)
+
+    _, sizing_text, _ = client.sent[1]
+    assert "position exceeds your risk limit — skip." in sizing_text
+
+
+def test_position_size_suggests_a_real_contract_count_within_budget():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_sizing_field(conn, 1, "account_size", 50_000)
+    db.set_sizing_field(conn, 1, "risk_per_trade_pct", 2.0)  # $1,000 budget
+    client = FakeClient()
+    hook = make_subscriber_hook(client, conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(), "text", 2.00)  # $200/contract -> 5 contracts, $1,000 at risk
+
+    _, sizing_text, _ = client.sent[1]
+    assert "Max contracts: 5" in sizing_text
+    assert "$1,000.00" in sizing_text
+
+
+def test_no_position_size_followup_when_sizing_is_not_configured():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)  # account_size/risk_per_trade_pct left unset
+    client = FakeClient()
+    hook = make_subscriber_hook(client, conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(), "text", 2.00)
+    assert len(client.sent) == 1  # just the alert, no sizing follow-up
+
+
+def test_no_position_size_followup_on_a_no_trade_alert():
+    """entry_mid is None on a NO TRADE — nothing to size, even for a
+    subscriber who has sizing configured."""
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_sizing_field(conn, 1, "account_size", 10_000)
+    db.set_sizing_field(conn, 1, "risk_per_trade_pct", 1.0)
+    client = FakeClient()
+    hook = make_subscriber_hook(client, conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(), "text", None)
+    assert len(client.sent) == 1

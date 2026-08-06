@@ -305,6 +305,20 @@ def test_callback_edits_the_message_when_the_handler_asks_to():
     assert client.edited == [(1, 42, "new text", None)]
 
 
+def test_callback_send_text_carries_its_keyboard():
+    """The mood prompt after /took (see tradebot.telegram_bot.callbacks)
+    is a follow-up message with its own keyboard, not an edit to the
+    original alert — send_keyboard must actually reach send_message."""
+    keyboard = {"inline_keyboard": [[{"text": "Calm", "callback_data": "mood:t1:calm"}]]}
+
+    def sends_a_followup(ctx):
+        return CallbackReply(toast="ok", send_text="How were you feeling?", send_keyboard=keyboard)
+
+    d, client = _build(callback_handlers={"took": sends_a_followup})
+    d.process_updates_once([_callback_update("took:abc123")])
+    assert client.sent == [(1, "How were you feeling?", keyboard)]
+
+
 # ---------------------------------------------------------------------- #
 # Channel posts — no `from` field at all. This is the exact bug report:
 # commands typed into the channel got no response.

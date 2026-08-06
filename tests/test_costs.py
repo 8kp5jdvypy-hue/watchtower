@@ -11,6 +11,7 @@ from tradebot.costs import (
     IV_RANK_THRESHOLD,
     MIN_SIMILAR_SETUPS_SAMPLE,
     pick_expiry,
+    position_size,
     select_contract,
 )
 from tradebot.journal import HistoricalPerformance
@@ -327,3 +328,52 @@ def test_default_hold_matches_the_alert_budgets_cooldown_not_an_arbitrary_hour()
     from tradebot.alerts import AlertBudget
     assert DEFAULT_HOLD_MINUTES == AlertBudget.cooldown_minutes
     assert DEFAULT_HOURS_HELD == pytest.approx(DEFAULT_HOLD_MINUTES / 60)
+
+
+# ---------------------------------------------------------------------- #
+# position_size() — tied to the SAME entry_mid select_contract() already
+# computes, not a separate estimate. Options settle in 100-share
+# (per-contract) multiples, so the dollar math always uses entry_mid*100.
+# ---------------------------------------------------------------------- #
+
+
+def test_position_size_suggests_the_real_contract_count_within_budget():
+    # $50,000 * 2% = $1,000 budget; $2.00 entry mid -> $200/contract -> 5 contracts
+    size = position_size(entry_mid=2.00, account_size=50_000, risk_per_trade_pct=2.0)
+    assert size.max_contracts == 5
+    assert size.dollars_at_risk == pytest.approx(1_000.0)
+    assert size.risk_budget == pytest.approx(1_000.0)
+    assert size.exceeds_limit is False
+
+
+def test_position_size_rounds_down_never_up():
+    # $1,000 budget / $300 per contract = 3.33 -> must floor to 3, never round to 3.33 or 4
+    size = position_size(entry_mid=3.00, account_size=50_000, risk_per_trade_pct=2.0)
+    assert size.max_contracts == 3
+    assert size.dollars_at_risk == pytest.approx(900.0)
+
+
+def test_position_size_exceeds_limit_when_even_one_contract_breaches_the_budget():
+    # $100 budget, $200/contract — not even one contract fits
+    size = position_size(entry_mid=2.00, account_size=10_000, risk_per_trade_pct=1.0)
+    assert size.max_contracts == 0
+    assert size.exceeds_limit is True
+    assert size.dollars_at_risk == 0.0
+
+
+def test_position_size_never_suggests_a_size_that_breaches_the_budget():
+    """Property check across a range of premiums/budgets: dollars_at_risk
+    must never exceed risk_budget, and exceeds_limit must be set exactly
+    when max_contracts is 0."""
+    for entry_mid in (0.10, 0.55, 1.00, 2.37, 5.00, 12.34):
+        for account_size in (1_000, 5_000, 25_000, 100_000):
+            for risk_pct in (0.25, 1.0, 2.0, 5.0):
+                size = position_size(entry_mid, account_size, risk_pct)
+                assert size.dollars_at_risk <= size.risk_budget + 1e-9
+                assert size.exceeds_limit == (size.max_contracts == 0)
+
+
+def test_position_size_zero_or_negative_premium_exceeds_limit_never_divides_by_zero():
+    size = position_size(entry_mid=0.0, account_size=50_000, risk_per_trade_pct=2.0)
+    assert size.exceeds_limit is True
+    assert size.max_contracts == 0

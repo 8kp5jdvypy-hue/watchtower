@@ -9,6 +9,7 @@ import pytest
 
 from tradebot.detectors import Detection
 from tradebot.journal import (
+    CLOSE_MARK_OFFSET_MIN,
     MIN_HISTORY_SAMPLE,
     backfill_marks,
     cluster_id,
@@ -17,6 +18,7 @@ from tradebot.journal import (
     hour_performance,
     iv_rank,
     pending_contract_backfills,
+    pending_contract_close_backfills,
     record_contract_forward_mid,
     record_contract_selection,
     record_iv_sample,
@@ -43,6 +45,29 @@ def test_write_cluster_round_trips(tmp_path):
     conn.commit()
     row = conn.execute("SELECT symbol, tier, score, code_version FROM detections").fetchone()
     assert row == (SYMBOL, "high", 4.0, "abc123")
+
+
+def test_write_cluster_stores_primary_kind_and_freezes_symbol_class_at_write_time(tmp_path):
+    """symbol_class (deep/thin, see tradebot.config.liquidity_class) is
+    derived and frozen here, not looked up later — a historical row keeps
+    reporting what was true when the alert fired even if the watchlist's
+    classification changes in the future."""
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session="2026-06-15", symbol="AAPL", ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="level_break,rvol_spike", headlines="h", score=4.0, close=101.0, atr14=1.5,
+        trend="up", detections=[_detection()], code_version_str="abc123", primary_kind="rvol_spike",
+    )
+    write_cluster(
+        conn, session="2026-06-15", symbol="BE", ts_utc="2026-06-15T14:05:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=5.0, atr14=0.3,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc123", primary_kind="gap",
+    )
+    conn.commit()
+    rows = dict(conn.execute("SELECT symbol, symbol_class FROM detections").fetchall())
+    assert rows == {"AAPL": "deep", "BE": "thin"}
+    primary_kind = conn.execute("SELECT primary_kind FROM detections WHERE symbol = 'AAPL'").fetchone()[0]
+    assert primary_kind == "rvol_spike"  # the primary, not the full multi-kind list
 
 
 def test_sub_threshold_detections_are_still_written_as_log_tier(tmp_path):
@@ -73,6 +98,23 @@ def test_rewriting_the_same_cluster_upserts_instead_of_duplicating(tmp_path):
     assert id1 == id2
     rows = conn.execute("SELECT headlines, score FROM detections").fetchall()
     assert rows == [("v2", 5.0)]
+
+
+def test_set_news_driven_records_kind_and_severity(tmp_path):
+    from tradebot.journal import set_news_driven
+
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+    )
+    conn.commit()
+    set_news_driven(conn, detection_id, True, kind="earnings", severity="suppress")
+    row = conn.execute(
+        "SELECT news_driven, event_kind, event_severity FROM detections WHERE id = ?", (detection_id,)
+    ).fetchone()
+    assert row == (1, "earnings", "suppress")
 
 
 def test_cluster_id_is_deterministic():
@@ -117,9 +159,13 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
 
     assert 15 in marks and 30 in marks
     assert 60 not in marks  # session doesn't extend that far — must not fabricate a price
+    assert CLOSE_MARK_OFFSET_MIN in marks  # the close mark is unconditional, regardless of offsets_min
+    assert marks[CLOSE_MARK_OFFSET_MIN] == 107  # the session's real last bar close (100 + 7)
 
 
-def test_backfill_marks_default_offsets_include_5min(tmp_path):
+def test_backfill_marks_default_offsets_are_15_30_60_and_close(tmp_path):
+    """15m/30m/60m/close is the fixed, non-curated outcome checkpoint set
+    — every published alert gets exactly these, automatically."""
     cache_dir = tmp_path / "cache"
     rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)  # 09:30 ET
     bars = [_bar_row(rth_open + timedelta(minutes=5 * i), 100 + i) for i in range(8)]
@@ -137,8 +183,8 @@ def test_backfill_marks_default_offsets_include_5min(tmp_path):
     backfill_marks(conn, SESSION, cache_dir=cache_dir)  # default offsets, no override
     marks = dict(conn.execute("SELECT offset_min, price FROM marks").fetchall())
 
-    assert 5 in marks
-    assert marks[5] == 100  # first bar's own close — matches the ts_utc=rth_open convention above
+    assert set(marks) == {15, 30, CLOSE_MARK_OFFSET_MIN}  # 60 isn't reached, 5 is no longer a checkpoint
+    assert marks[15] == 102  # first bar closing at/after rth_open + 15m
 
 
 def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0):
@@ -146,6 +192,7 @@ def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, scor
         conn, session="2026-06-15", symbol=SYMBOL, ts_utc=ts_utc,
         kinds=kind, headlines="h", score=score, close=close, atr14=1.0,
         trend=trend, detections=[_detection(kind=kind)], code_version_str="abc",
+        primary_kind=kind,
     )
     conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, price_at_30))
     conn.commit()
@@ -201,6 +248,27 @@ def test_historical_performance_filters_by_kind_and_trend_and_excludes_self(tmp_
 
     result = historical_performance(conn, kind="gap", trend="up", exclude_id=matching_ids[0], lookback=20)
     assert result.sample_size == 5  # 6 matching, minus the excluded one
+
+
+def test_historical_performance_matches_primary_kind_exactly_not_as_a_kinds_substring(tmp_path):
+    """Regression: the old filter was `d.kinds LIKE '%kind%'` against the
+    full multi-detector kinds string, so a cluster where 'gap' fired as a
+    SECONDARY detector (not the primary/headline one) would still count
+    as a 'gap' setup. Real primary_kind must be an exact match instead."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i in range(MIN_HISTORY_SAMPLE):
+        detection_id = write_cluster(
+            conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap,level_break", headlines="h", score=4.0, close=100.0, atr14=1.0,
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+            primary_kind="level_break",  # gap fired too, but wasn't primary
+        )
+        conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 105))
+    conn.commit()
+    assert historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent") is None
+    result = historical_performance(conn, kind="level_break", trend="up", exclude_id="nonexistent")
+    assert result is not None and result.sample_size == MIN_HISTORY_SAMPLE
 
 
 def test_historical_performance_excludes_news_driven_rows_from_the_sample(tmp_path):
@@ -324,7 +392,7 @@ def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp
         detection_id = write_cluster(
             conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
             kinds="gap", headlines="h", score=4.0, close=close, atr14=atr14,
-            trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, mark))
     conn.commit()
@@ -341,7 +409,7 @@ def test_historical_performance_avg_return_atr_is_none_when_no_row_has_atr14(tmp
         detection_id = write_cluster(
             conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
             kinds="gap", headlines="h", score=4.0, close=100.0, atr14=None,
-            trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 105))
     conn.commit()
@@ -383,21 +451,35 @@ def test_record_iv_sample_upserts_one_row_per_symbol_per_session(tmp_path):
 def test_contract_selection_round_trips_and_forward_mid_backfill(tmp_path):
     conn = connect(tmp_path / "journal.db")
     entry_ts = datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        conn, session="2026-07-23", symbol="GOOGL", ts_utc=entry_ts.isoformat(),
+        kinds="level_break", headlines="h", score=10.0, close=366.0, atr14=1.5,
+        trend="down", detections=[_detection(kind="level_break")], code_version_str="abc", primary_kind="level_break",
+    )
+    conn.commit()
     record_contract_selection(
-        conn, "det1", symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
+        conn, detection_id, symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
         delta=-0.47, entry_mid=4.20, entry_ts=entry_ts,
     )
-    row = conn.execute("SELECT symbol, right, strike, dte, delta, entry_mid FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()
+    row = conn.execute("SELECT symbol, right, strike, dte, delta, entry_mid FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()
     assert row == ("GOOGL", "put", 365.0, 13, -0.47, 4.20)
 
     pending = pending_contract_backfills(conn, entry_ts + timedelta(minutes=31), offset_min=30)
-    assert pending == [("det1", "GOOGL", "put", 365.0, "2026-08-14")]
+    assert pending == [(detection_id, "GOOGL", "put", 365.0, "2026-08-14", 0, None)]
 
-    record_contract_forward_mid(conn, "det1", 30, 4.05)
+    record_contract_forward_mid(conn, detection_id, 30, 4.05)
     still_pending = pending_contract_backfills(conn, entry_ts + timedelta(minutes=31), offset_min=30)
     assert still_pending == []
-    mid_30 = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()[0]
+    mid_30 = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
     assert mid_30 == 4.05
+
+    # close mid: due once the session has ended, not at a fixed offset
+    close_pending = pending_contract_close_backfills(conn, date(2026, 7, 23))
+    assert close_pending == [(detection_id, "GOOGL", "put", 365.0, "2026-08-14", 0, None)]
+    record_contract_forward_mid(conn, detection_id, CLOSE_MARK_OFFSET_MIN, 3.90)
+    assert pending_contract_close_backfills(conn, date(2026, 7, 23)) == []
+    mid_close = conn.execute("SELECT mid_close FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
+    assert mid_close == 3.90
 
 
 def test_record_contract_selection_is_idempotent_on_rerun(tmp_path):

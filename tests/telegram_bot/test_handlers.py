@@ -141,6 +141,47 @@ def test_me_reports_not_enough_data_for_a_fresh_user():
     assert "not enough" in reply.text.lower()
 
 
+def test_me_shows_the_headline_no_trade_comparison_and_new_dimensions():
+    users_conn, journal_conn = _setup()
+    for i, symbol in enumerate(["TSLA", "AAPL", "SPY", "QQQ", "NVDA"]):
+        detection_id = _write_high_alert(journal_conn, symbol=symbol, session=NOW.date().isoformat())
+        handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "5.00"]))
+        trade = db.list_trades(users_conn, 1)[-1]
+        db.log_closed(users_conn, trade.id, exit_price=5.50, closed_at=NOW)
+    reply = handlers.handle_me(_ctx(users_conn, journal_conn))
+    assert "After a NO TRADE gate" in reply.text
+    assert "By direction:" in reply.text
+    assert "By hold time:" in reply.text
+    assert "Adherence:" in reply.text
+    assert "Logging completeness:" in reply.text
+
+
+def test_me_recap_reports_not_enough_data():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_me(_ctx(users_conn, journal_conn, args=["recap"]))
+    assert "not enough" in reply.text.lower()
+
+
+def test_me_recap_shows_leaks_for_the_current_month():
+    users_conn, journal_conn = _setup()
+    for i in range(db.MIN_STAT_SAMPLE):
+        detection_id = _write_high_alert(journal_conn, symbol="TSLA", session=NOW.date().isoformat())
+        handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "5.00"]))
+        trade = db.list_trades(users_conn, 1)[-1]
+        db.set_trade_mood(users_conn, trade.id, "calm")
+        db.log_closed(users_conn, trade.id, exit_price=5.50, closed_at=NOW)
+    for i in range(db.MIN_STAT_SAMPLE):
+        detection_id = _write_high_alert(journal_conn, symbol="AAPL", session=NOW.date().isoformat())
+        handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "5.00"]))
+        trade = db.list_trades(users_conn, 1)[-1]
+        db.set_trade_mood(users_conn, trade.id, "revenge")
+        db.log_closed(users_conn, trade.id, exit_price=4.50, closed_at=NOW)
+    reply = handlers.handle_me(_ctx(users_conn, journal_conn, args=["recap"]))
+    assert f"Recap — {NOW.year:04d}-{NOW.month:02d}" in reply.text
+    assert "revenge" in reply.text.lower()
+    assert "'calm'" not in reply.text.lower()  # calm beat the month's average, not a leak
+
+
 # ---------------------------------------------------------------------- #
 # /took
 # ---------------------------------------------------------------------- #
@@ -165,6 +206,16 @@ def test_took_rejects_an_unknown_alert_id():
     assert "don't recognize" in reply.text.lower()
 
 
+def test_took_auto_fills_direction_and_offers_a_mood_keyboard():
+    users_conn, journal_conn = _setup()
+    detection_id = _write_high_alert(journal_conn)  # trend="up" per _write_high_alert
+    reply = handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "2", "5.10"]))
+    assert reply.keyboard is not None
+    trade = db.list_trades(users_conn, 1)[0]
+    assert trade.direction == "up"
+    assert trade.kind == "gap"  # primary_kind fallback (first of "gap,level_break")
+
+
 # ---------------------------------------------------------------------- #
 # /closed
 # ---------------------------------------------------------------------- #
@@ -177,7 +228,7 @@ def test_closed_computes_pnl_on_the_most_recent_open_trade():
     reply = handlers.handle_closed(_ctx(users_conn, journal_conn, args=["11.00", "confident"]))
     assert "+10.00%" in reply.text
     trade = db.list_trades(users_conn, 1)[0]
-    assert trade.status == "closed" and trade.emotional_tag == "confident"
+    assert trade.status == "closed" and trade.note == "confident"  # trailing /closed text is a free-text note
 
 
 def test_closed_with_no_open_trade_gives_a_usage_hint():
@@ -212,6 +263,29 @@ def test_limits_increase_mid_session_is_queued_with_an_explanation():
     assert "queued" in reply.text.lower()
     assert "for exactly this moment" in reply.text.lower()
     assert db.get_user(users_conn, 1).max_trades_per_day == 5  # unchanged until next session
+
+
+def test_limits_account_and_risk_apply_immediately_even_mid_session():
+    """account/risk are sizing inputs, not protective caps — no queueing,
+    unlike trades/loss/size above, even with the market open."""
+    users_conn, journal_conn = _setup()
+    r1 = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["account", "10000"], market_open=True))
+    assert "effective immediately" in r1.text.lower()
+    r2 = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["risk", "1.5"], market_open=True))
+    assert "effective immediately" in r2.text.lower()
+    user = db.get_user(users_conn, 1)
+    assert user.account_size == 10_000
+    assert user.risk_per_trade_pct == 1.5
+
+
+def test_limits_shows_position_sizing_section():
+    users_conn, journal_conn = _setup()
+    handlers.handle_limits(_ctx(users_conn, journal_conn, args=["account", "10000"]))
+    handlers.handle_limits(_ctx(users_conn, journal_conn, args=["risk", "1"]))
+    reply = handlers.handle_limits(_ctx(users_conn, journal_conn))
+    assert "Position sizing" in reply.text
+    assert "$10,000.00" in reply.text
+    assert "1.00%" in reply.text
 
 
 # ---------------------------------------------------------------------- #
@@ -317,6 +391,21 @@ def test_export_delivers_a_csv_document():
     filename, content = reply.document
     assert filename.endswith(".csv")
     assert b"TSLA" in content
+
+
+def test_export_includes_direction_and_note_columns():
+    """Data is theirs — every field a trade can carry, including the new
+    direction/note columns, must round-trip into the CSV."""
+    users_conn, journal_conn = _setup()
+    detection_id = _write_high_alert(journal_conn)
+    handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "10.00"]))
+    handlers.handle_closed(_ctx(users_conn, journal_conn, args=["11.00", "took", "half", "size"]))
+    reply = handlers.handle_export(_ctx(users_conn, journal_conn))
+    _, content = reply.document
+    header = content.decode().splitlines()[0]
+    assert "direction" in header and "note" in header
+    assert b"up" in content
+    assert b"took half size" in content
 
 
 # ---------------------------------------------------------------------- #

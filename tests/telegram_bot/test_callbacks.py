@@ -70,6 +70,50 @@ def test_took_button_unknown_alert():
     assert r.show_alert is True
 
 
+def test_took_button_auto_fills_direction_and_prompts_for_mood():
+    """Full alert context, auto-filled — nothing typed. The mood prompt is
+    a separate follow-up message (send_text/send_keyboard), not an edit
+    to the alert itself, so the alert's own formatting is never touched."""
+    users_conn, journal_conn = _setup()
+    detection_id = _write_alert(journal_conn)
+    r = callbacks.handle_took_button(_ctx(users_conn, journal_conn, detection_id))
+    assert r.send_text is not None
+    assert r.send_keyboard is not None
+    trade = db.list_trades(users_conn, 1)[0]
+    assert trade.direction == "up"  # from the alert's own trend, not typed
+    assert trade.kind == "gap"  # primary_kind, not the full "gap,level_break" list
+
+
+def test_mood_button_sets_the_emotional_tag():
+    users_conn, journal_conn = _setup()
+    detection_id = _write_alert(journal_conn)
+    callbacks.handle_took_button(_ctx(users_conn, journal_conn, detection_id))
+    trade = db.list_trades(users_conn, 1)[0]
+
+    r = callbacks.handle_mood_button(_ctx(users_conn, journal_conn, f"{trade.id}:rushed"))
+    assert "logged" in r.toast.lower()
+    assert r.edit_keyboard is None  # the one-shot prompt's keyboard is removed after a tap
+    updated = db.get_trade(users_conn, trade.id)
+    assert updated.emotional_tag == "rushed"
+
+
+def test_mood_button_rejects_an_unrecognized_mood():
+    users_conn, journal_conn = _setup()
+    detection_id = _write_alert(journal_conn)
+    callbacks.handle_took_button(_ctx(users_conn, journal_conn, detection_id))
+    trade = db.list_trades(users_conn, 1)[0]
+
+    r = callbacks.handle_mood_button(_ctx(users_conn, journal_conn, f"{trade.id}:ecstatic"))
+    assert r.show_alert is True
+    assert db.get_trade(users_conn, trade.id).emotional_tag is None
+
+
+def test_mood_button_unknown_trade():
+    users_conn, journal_conn = _setup()
+    r = callbacks.handle_mood_button(_ctx(users_conn, journal_conn, "nonexistent:calm"))
+    assert r.show_alert is True
+
+
 def test_skip_button_records_a_response_without_creating_a_trade():
     users_conn, journal_conn = _setup()
     detection_id = _write_alert(journal_conn)

@@ -57,12 +57,15 @@ from tradebot.detectors import (
     tier_for_score,
 )
 from tradebot.journal import (
+    CLOSE_MARK_OFFSET_MIN,
+    OUTCOME_OFFSETS_MIN,
     backfill_marks,
     code_version,
     connect,
     historical_performance,
     iv_rank,
     pending_contract_backfills,
+    pending_contract_close_backfills,
     record_contract_forward_mid,
     record_contract_selection,
     record_iv_sample,
@@ -224,12 +227,16 @@ def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
     subscriber_hook=None, now=None,
 ) -> None:
-    """subscriber_hook(cluster, rendered_text), if given, is called right
-    after a HIGH alert is sent to the ops channel/console — it's how the
-    live per-user DM fan-out (tradebot.telegram_bot.delivery) plugs in
-    without this module needing to know anything about Telegram users.
-    None (the default) preserves the exact prior behavior — no fan-out,
-    used by replay and by every existing test.
+    """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
+    called right after a HIGH alert is sent to the ops channel/console —
+    it's how the live per-user DM fan-out (tradebot.telegram_bot.delivery)
+    plugs in without this module needing to know anything about Telegram
+    users. entry_mid is the real per-contract debit select_contract()
+    computed (None on a NO TRADE), passed through so delivery.py can size
+    a position per-subscriber without this module knowing account sizes
+    or risk tolerances either. None (the default) preserves the exact
+    prior behavior — no fan-out, used by replay and by every existing
+    test.
 
     now: real wall-clock time, tz-aware, for the guard's quote-staleness
     check. Only run_live() passes this — a replayed historical quote is
@@ -258,6 +265,7 @@ def process_new_bar(
         trend=result["trend"],
         detections=result["detections"],
         code_version_str=version,
+        primary_kind=result["primary_kind"],
     )
     tier = tier_for_score(result["score"]).value
     raw_tier_is_high = tier == "high"
@@ -271,7 +279,7 @@ def process_new_bar(
     event_window = active_event_window(conn, symbol, result["ts"])
     news_driven = event_window is not None
     if news_driven:
-        set_news_driven(conn, detection_id, True)
+        set_news_driven(conn, detection_id, True, kind=event_window.kind, severity=event_window.severity)
 
     # HIGH-only blackout action — suppress or downgrade, stating why.
     # MEDIUM/LOG are already batched, so there's no immediate-publish race
@@ -345,6 +353,7 @@ def process_new_bar(
             )
             set_no_trade(conn, detection_id, not selection.is_tradable)
 
+            entry_mid = None  # stays None on a NO TRADE — nothing to size a position against
             if selection.breakeven is not None:
                 primary_contract = selection.breakeven.legs[0].contract
                 if primary_contract.implied_volatility is not None:
@@ -377,7 +386,7 @@ def process_new_bar(
             conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
             if subscriber_hook is not None:
                 try:
-                    subscriber_hook(cluster, text)
+                    subscriber_hook(cluster, text, entry_mid)
                 except Exception:
                     stats.errors.append(f"{symbol}: subscriber fan-out failed — {traceback.format_exc()}")
         else:
@@ -427,6 +436,75 @@ def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None
         return
     tier_perf = tier_performance(conn).get("log")
     alerter.send(templates.render_log_summary(summary, tier_perf, when))
+
+
+# --------------------------------------------------------------------------
+# Contract forward-mid backfill — live only (see journal.py's schema
+# comment: no cached historical options data to replay against). Fills in
+# what select_contract() couldn't know at entry time: what the SAME
+# contract is actually worth 15/30/60m later, and at the session close.
+# Automatic and unconditional, exactly like backfill_marks() for the
+# underlying — never gated on whether the contract gained or lost value.
+# --------------------------------------------------------------------------
+
+
+def _contract_mid(chain, right: str, strike: float) -> float | None:
+    for c in chain.contracts:
+        if c.right == right and c.strike == strike:
+            return (c.bid + c.ask) / 2
+    return None  # contract not found in today's chain — never fabricated
+
+
+def _forward_mid(md, symbol: str, right: str, strike: float, expiry: str, is_vertical: bool, short_strike: float | None) -> float | None:
+    """The long leg's mid, minus the short leg's mid for a vertical — the
+    same formula runner.py used to compute entry_mid, so a forward mid is
+    comparable to it. None (not fetched) if either leg's contract can't
+    be found in the current chain, rather than reporting a partial mid."""
+    try:
+        chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
+    except Exception:
+        return None
+    long_mid = _contract_mid(chain, right, strike)
+    if long_mid is None:
+        return None
+    if not is_vertical:
+        return long_mid
+    short_mid = _contract_mid(chain, right, short_strike)
+    if short_mid is None:
+        return None
+    return long_mid - short_mid
+
+
+def backfill_pending_contract_mids(conn, md, now: datetime) -> None:
+    """Called once per live-loop iteration: for each of the 15/30/60m
+    checkpoints, fetch and record the forward mid for every selection
+    that's now old enough but doesn't have it yet. A single vendor
+    hiccup on one contract must never stop the others from backfilling —
+    see the per-selection try/except."""
+    for offset_min in OUTCOME_OFFSETS_MIN:
+        for detection_id, symbol, right, strike, expiry, is_vertical, short_strike in pending_contract_backfills(conn, now, offset_min):
+            try:
+                mid = _forward_mid(md, symbol, right, strike, expiry, bool(is_vertical), short_strike)
+                if mid is not None:
+                    record_contract_forward_mid(conn, detection_id, offset_min, mid)
+            except Exception:
+                logger.error("contract forward-mid backfill failed: detection_id=%s offset_min=%s", detection_id, offset_min, exc_info=True)
+
+
+def backfill_pending_contract_close_mids(conn, md, session_date: date) -> None:
+    """Called once at the end of a live session: the close-mid equivalent
+    of backfill_pending_contract_mids, using the same best-effort, never-
+    fabricated fetch. Options typically stop trading close to the
+    session's own close, so this is 'as close to the real close as
+    practically fetchable', the same honest limitation session close
+    prices for the underlying don't have."""
+    for detection_id, symbol, right, strike, expiry, is_vertical, short_strike in pending_contract_close_backfills(conn, session_date):
+        try:
+            mid = _forward_mid(md, symbol, right, strike, expiry, bool(is_vertical), short_strike)
+            if mid is not None:
+                record_contract_forward_mid(conn, detection_id, CLOSE_MARK_OFFSET_MIN, mid)
+        except Exception:
+            logger.error("contract close-mid backfill failed: detection_id=%s", detection_id, exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -625,6 +703,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                     pass
                 continue
 
+        backfill_pending_contract_mids(conn, md, loop_start)
         bot_liveness.write_heartbeat(HEARTBEAT_FILE, loop_start)
         elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
         time.sleep(max(0.0, BAR_MINUTES * 60 - elapsed))
@@ -632,6 +711,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     end_time = datetime.now(timezone.utc)
     send_log_summary(budget, alerter, conn, end_time)
     backfill_marks(conn, session_date)
+    backfill_pending_contract_close_mids(conn, md, session_date)
     heartbeat = templates.render_heartbeat(
         session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,

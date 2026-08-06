@@ -294,3 +294,22 @@ def render_system_notice(text: str, when: datetime) -> str:
     """Operational notices (halt, stale data, cap reached, errors) — no
     tier emoji (these aren't trading signals), just a short bold line."""
     return f"<b>System</b>\n{html.escape(text)}\n\n{_footer(when)}"
+
+
+def render_position_size(size, when: datetime) -> str:
+    """A per-user follow-up sent alongside a HIGH alert (see
+    tradebot.telegram_bot.delivery) — sizing depends on account_size and
+    risk_per_trade_pct, which only exist per-subscriber, so this is never
+    part of the shared alert render. Duck-typed on a costs.PositionSize-
+    shaped object (max_contracts, dollars_at_risk, risk_budget,
+    exceeds_limit), same convention as _render_contract's `selection`.
+    States the dollar loss, not just the percentage — that's the number
+    that actually deters."""
+    if size.exceeds_limit:
+        body = "position exceeds your risk limit — skip."
+    else:
+        body = (
+            f"Max contracts: {qty(size.max_contracts)}\n"
+            f"At risk: {money(size.dollars_at_risk)} (budget {money(size.risk_budget)})"
+        )
+    return f"<b>Position size</b>\n\n{body}\n\n{_footer(when)}"

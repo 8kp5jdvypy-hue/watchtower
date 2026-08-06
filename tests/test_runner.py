@@ -16,6 +16,7 @@ from tradebot.detectors import DailyAnchors, Detection
 from tradebot.events import add_event_window
 from tradebot.marketdata import Bar, Quote
 from tradebot.journal import connect as journal_connect
+from tradebot.journal import write_cluster
 import tradebot.runner as runner_mod
 from tradebot.detectors import atr as compute_atr
 from tradebot.runner import HeartbeatStats, evaluate_bar, is_halted_bar, is_stale, process_new_bar, session_bounds
@@ -126,13 +127,14 @@ def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_tex
     calls = []
     process_new_bar(
         conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
-        subscriber_hook=lambda cluster, text: calls.append((cluster, text)),
+        subscriber_hook=lambda cluster, text, entry_mid: calls.append((cluster, text, entry_mid)),
     )
 
     assert len(calls) == 1
-    cluster, text = calls[0]
+    cluster, text, entry_mid = calls[0]
     assert cluster.symbol == "TSLA" and cluster.tier == "high"
     assert "TSLA" in text
+    assert entry_mid is None  # this fixture's chain_fn always raises NotImplementedError -> NO TRADE
 
 
 def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_the_alert(monkeypatch):
@@ -149,7 +151,7 @@ def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_t
     def chain_fn(symbol, expiry):
         raise NotImplementedError
 
-    def broken_hook(cluster, text):
+    def broken_hook(cluster, text, entry_mid):
         raise RuntimeError("simulated fan-out failure")
 
     process_new_bar(  # must not raise
@@ -279,6 +281,44 @@ def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
 
     iv_row = conn.execute("SELECT iv FROM iv_history WHERE symbol = ?", ("TSLA",)).fetchone()
     assert iv_row == (0.35,)
+
+
+def test_process_new_bar_passes_the_real_entry_mid_to_the_subscriber_hook(monkeypatch):
+    """The position-size calculator (tradebot.costs.position_size, wired
+    up in tradebot.telegram_bot.delivery) is tied to this SAME entry_mid,
+    not a separately re-derived one — confirm it actually reaches the
+    subscriber_hook call, not just the journal."""
+    from tradebot.marketdata import OptionChain, OptionContract
+
+    anchors, bar, result = _high_tier_fixture()
+    result = {**result, "trend": "up"}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    contract = OptionContract(
+        symbol="TSLA_TEST_CALL", expiry=date(2026, 7, 31), strike=100.0, right="call",
+        bid=2.00, ask=2.05, last=2.02, delta=0.50, theta=-0.10, open_interest=1000,
+        implied_volatility=0.35, day_volume=500,
+    )
+
+    def chain_fn(symbol, expiry):
+        if expiry != date(2026, 7, 31):
+            return OptionChain(symbol=symbol, expiry=expiry, contracts=[])
+        return OptionChain(symbol=symbol, expiry=expiry, contracts=[contract])
+
+    calls = []
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+        subscriber_hook=lambda cluster, text, entry_mid: calls.append(entry_mid),
+    )
+
+    assert calls == [pytest.approx((2.00 + 2.05) / 2)]  # the long leg's own bid/ask mid, single-leg (no short)
 
 
 def test_process_new_bar_blackouts_a_contract_when_a_real_earnings_event_falls_before_expiry(monkeypatch):
@@ -470,3 +510,189 @@ def test_process_new_bar_tags_but_does_not_reroute_non_high_tiers_inside_an_even
     assert row[0] is None  # normal medium routing (queued, not suppressed) — untouched by the event window
     assert row[1] == "medium"
     assert row[2] == 1  # tagged news-driven regardless of tier
+
+
+def test_process_new_bar_journals_the_primary_kind_and_symbol_class(monkeypatch):
+    """Full alert context, not just the multi-detector kinds string —
+    primary_kind and symbol_class must be real, queryable columns so any
+    stat can be recomputed later without guessing."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    row = conn.execute("SELECT primary_kind, symbol_class FROM detections").fetchone()
+    assert row == ("gap", "deep")  # TSLA is in config.DEEP_LIQUIDITY_SYMBOLS
+
+
+def test_process_new_bar_records_which_event_kind_and_severity_applied(monkeypatch):
+    """set_news_driven's kind/severity snapshot (see journal.py) must
+    reflect the ACTUAL window that fired, not just a bare boolean."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    add_event_window(
+        conn, symbol="TSLA", kind="8-K", start_utc=result["ts"] - timedelta(minutes=5),
+        end_utc=result["ts"] + timedelta(minutes=5), severity="suppress", source="test", detail="material event",
+    )
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    row = conn.execute("SELECT event_kind, event_severity FROM detections").fetchone()
+    assert row == ("8-K", "suppress")
+
+
+# -------------------------------------------------------------------- #
+# Contract forward-mid backfill — live only, see runner.py's module
+# comment on backfill_pending_contract_mids/_close_mids.
+# -------------------------------------------------------------------- #
+
+
+def _fake_chain(*contracts):
+    from tradebot.marketdata import OptionChain
+
+    return OptionChain(symbol="X", expiry=date(2026, 8, 14), contracts=list(contracts))
+
+
+def _fake_contract(right, strike, bid, ask):
+    from tradebot.marketdata import OptionContract
+
+    return OptionContract(
+        symbol="X", expiry=date(2026, 8, 14), strike=strike, right=right,
+        bid=bid, ask=ask, last=(bid + ask) / 2, delta=None, theta=None, open_interest=100,
+    )
+
+
+def test_contract_mid_finds_the_matching_contract_by_right_and_strike():
+    chain = _fake_chain(_fake_contract("put", 365.0, 4.00, 4.10), _fake_contract("put", 360.0, 2.00, 2.10))
+    assert runner_mod._contract_mid(chain, "put", 365.0) == pytest.approx(4.05)
+
+
+def test_contract_mid_returns_none_when_not_found_rather_than_fabricating():
+    chain = _fake_chain(_fake_contract("put", 360.0, 2.00, 2.10))
+    assert runner_mod._contract_mid(chain, "put", 365.0) is None
+
+
+def test_forward_mid_single_leg_is_just_the_contracts_own_mid():
+    md = {"GOOGL": type("MD", (), {"chain": staticmethod(lambda s, expiry: _fake_chain(_fake_contract("put", 365.0, 4.00, 4.10)))})()}
+    mid = runner_mod._forward_mid(md, "GOOGL", "put", 365.0, "2026-08-14", is_vertical=False, short_strike=None)
+    assert mid == pytest.approx(4.05)
+
+
+def test_forward_mid_vertical_is_long_minus_short_same_as_entry_mid_formula():
+    chain = _fake_chain(_fake_contract("call", 100.0, 2.00, 2.10), _fake_contract("call", 105.0, 0.50, 0.60))
+    md = {"TSLA": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+    mid = runner_mod._forward_mid(md, "TSLA", "call", 100.0, "2026-08-14", is_vertical=True, short_strike=105.0)
+    assert mid == pytest.approx(2.05 - 0.55)
+
+
+def test_forward_mid_none_when_the_short_leg_is_missing_from_the_chain():
+    chain = _fake_chain(_fake_contract("call", 100.0, 2.00, 2.10))  # short leg absent
+    md = {"TSLA": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+    mid = runner_mod._forward_mid(md, "TSLA", "call", 100.0, "2026-08-14", is_vertical=True, short_strike=105.0)
+    assert mid is None
+
+
+def test_forward_mid_none_when_the_chain_fetch_raises():
+    def _raise(s, expiry):
+        raise RuntimeError("vendor hiccup")
+
+    md = {"TSLA": type("MD", (), {"chain": staticmethod(_raise)})()}
+    mid = runner_mod._forward_mid(md, "TSLA", "put", 365.0, "2026-08-14", is_vertical=False, short_strike=None)
+    assert mid is None
+
+
+def _write_minimal_detection(conn, entry_ts, symbol="GOOGL"):
+    """A real detections row for contract_selections' FK-shaped join
+    (pending_contract_close_backfills) — the specific score/kind values
+    don't matter to these backfill tests, only that the row exists."""
+    return write_cluster(
+        conn, session=entry_ts.date().isoformat(), symbol=symbol, ts_utc=entry_ts.isoformat(),
+        kinds="level_break", headlines="h", score=10.0, close=100.0, atr14=1.0,
+        trend="up", detections=[Detection(symbol, "level_break", entry_ts, 10.0, "h", {})],
+        code_version_str="v1", primary_kind="level_break",
+    )
+
+
+def test_backfill_pending_contract_mids_writes_a_real_fetched_mid(tmp_path):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+    detection_id = _write_minimal_detection(conn, entry_ts)
+    record_contract_selection(
+        conn, detection_id, symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
+        delta=-0.47, entry_mid=4.20, entry_ts=entry_ts,
+    )
+    chain = _fake_chain(_fake_contract("put", 365.0, 3.90, 4.00))
+    md = {"GOOGL": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+
+    runner_mod.backfill_pending_contract_mids(conn, md, entry_ts + timedelta(minutes=31))
+
+    mid_30 = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
+    assert mid_30 == pytest.approx(3.95)
+
+
+def test_backfill_pending_contract_mids_one_failure_does_not_block_another(tmp_path):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+    ok_id = _write_minimal_detection(conn, entry_ts, symbol="GOOGL")
+    broken_id = _write_minimal_detection(conn, entry_ts, symbol="TSLA")
+    record_contract_selection(
+        conn, ok_id, symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
+        delta=-0.47, entry_mid=4.20, entry_ts=entry_ts,
+    )
+    record_contract_selection(
+        conn, broken_id, symbol="TSLA", right="call", strike=100.0, expiry=date(2026, 8, 14), dte=13,
+        delta=0.50, entry_mid=2.00, entry_ts=entry_ts,
+    )
+
+    def _raise(s, expiry):
+        raise RuntimeError("vendor hiccup")
+
+    chain = _fake_chain(_fake_contract("put", 365.0, 3.90, 4.00))
+    md = {
+        "GOOGL": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})(),
+        "TSLA": type("MD", (), {"chain": staticmethod(_raise)})(),
+    }
+
+    runner_mod.backfill_pending_contract_mids(conn, md, entry_ts + timedelta(minutes=31))
+
+    ok_mid = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (ok_id,)).fetchone()[0]
+    broken_mid = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (broken_id,)).fetchone()[0]
+    assert ok_mid == pytest.approx(3.95)
+    assert broken_mid is None  # never fabricated, and didn't stop the other from backfilling
+
+
+def test_backfill_pending_contract_close_mids_uses_the_close_sentinel(tmp_path):
+    from tradebot.journal import CLOSE_MARK_OFFSET_MIN, record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+    detection_id = _write_minimal_detection(conn, entry_ts)
+    record_contract_selection(
+        conn, detection_id, symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
+        delta=-0.47, entry_mid=4.20, entry_ts=entry_ts,
+    )
+    chain = _fake_chain(_fake_contract("put", 365.0, 3.50, 3.60))
+    md = {"GOOGL": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+
+    runner_mod.backfill_pending_contract_close_mids(conn, md, date(2026, 7, 23))
+
+    mid_close = conn.execute("SELECT mid_close FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
+    assert mid_close == pytest.approx(3.55)

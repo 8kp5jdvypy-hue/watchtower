@@ -32,8 +32,15 @@ def _parse_float(raw: str) -> float | None:
 def _fmt_bucket(bucket) -> str:
     if bucket is None:
         return "not enough samples yet"
-    rate, n = bucket
-    return f"{pct(rate * 100)} (n={qty(n)})"
+    sign = "+" if bucket.avg_pnl_pct >= 0 else ""
+    return f"{pct(bucket.win_rate * 100)} win, {sign}{bucket.avg_pnl_pct:.2f}% avg (n={qty(bucket.n)})"
+
+
+def _fmt_risk_pct(value: float | None) -> str:
+    """Unlike fields.pct (always signed — meaningful for a directional
+    P/L move), a configured risk-per-trade % is a magnitude, not a signed
+    change — a leading '+' would read as "gained 1%", not "risking 1%"."""
+    return f"{value:.2f}%" if value is not None else "not set"
 
 
 # -------------------------------------------------------------------- #
@@ -231,13 +238,59 @@ def handle_performance(ctx: HandlerContext) -> Reply:
 # -------------------------------------------------------------------- #
 
 
+def _fmt_recap_leak(leak: dict) -> str:
+    sign = "+" if leak["avg_pnl_pct"] >= 0 else ""
+    return f"  {html.escape(leak['label'])}: {sign}{leak['avg_pnl_pct']:.2f}% avg (n={qty(leak['n'])}, {leak['gap_pct']:.2f}pp below your month)"
+
+
+def _handle_me_recap(ctx: HandlerContext) -> Reply:
+    """/me recap [YYYY-MM] — the monthly digest: real numbers plus the 3
+    biggest leaks, stated plainly. Defaults to the current calendar month
+    to date."""
+    if len(ctx.args) > 1 and "-" in ctx.args[1]:
+        try:
+            year, month = (int(p) for p in ctx.args[1].split("-", 1))
+        except ValueError:
+            return Reply(text="Usage: /me recap [YYYY-MM]")
+    else:
+        year, month = ctx.now.year, ctx.now.month
+
+    recap = db.monthly_recap(ctx.users_conn, ctx.user.telegram_user_id, year, month)
+    if recap is None:
+        return Reply(text=f"Not enough closed trades in {year:04d}-{month:02d} yet (need {db.MIN_STAT_SAMPLE}+) for a real recap.")
+
+    sign = "+" if recap["overall_avg_pnl_pct"] >= 0 else ""
+    lines = [
+        f"<b>Recap — {year:04d}-{month:02d}</b>", "",
+        f"{qty(recap['trade_count'])} closed trades · {pct(recap['win_rate'] * 100)} win rate · "
+        f"{sign}{recap['overall_avg_pnl_pct']:.2f}% avg",
+    ]
+    if recap["leaks"]:
+        lines.append("")
+        lines.append("Your biggest leaks this month:")
+        for leak in recap["leaks"]:
+            lines.append(_fmt_recap_leak(leak))
+    else:
+        lines.append("")
+        lines.append("No bucket underperformed your own average enough to call out — nothing stands out as a leak this month.")
+    return Reply(text="\n".join(lines))
+
+
 def handle_me(ctx: HandlerContext) -> Reply:
+    if ctx.args and ctx.args[0].lower() == "recap":
+        return _handle_me_recap(ctx)
+
     stats = db.personal_stats(ctx.users_conn, ctx.user.telegram_user_id)
     if stats["overall"] is None:
         return Reply(text=f"Not enough closed trades yet (need {db.MIN_STAT_SAMPLE}+) — log outcomes with /took and /closed to build this out.")
 
     lines = ["<b>Your stats</b>", "", f"Overall: {_fmt_bucket(stats['overall'])}", ""]
 
+    # The headline number: what overriding an explicit NO TRADE actually costs.
+    lines.append("After a NO TRADE gate: " + _fmt_bucket(stats["no_trade_comparison"]["after_no_trade"]))
+    lines.append("Normal entries: " + _fmt_bucket(stats["no_trade_comparison"]["normal"]))
+
+    lines.append("")
     lines.append("By detector:")
     for kind, val in stats["by_detector"].items():
         lines.append(f"  {html.escape(kind)}: {_fmt_bucket(val)}")
@@ -246,29 +299,42 @@ def handle_me(ctx: HandlerContext) -> Reply:
     for symbol, val in stats["by_symbol"].items():
         lines.append(f"  {html.escape(symbol)}: {_fmt_bucket(val)}")
 
-    lines.append("")
-    lines.append(f"Taken within 2min: {_fmt_bucket(stats['fast_vs_slow']['within_2min'])}")
-    lines.append(f"Taken later: {_fmt_bucket(stats['fast_vs_slow']['later'])}")
+    lines.append("By direction:")
+    for direction, val in stats["by_direction"].items():
+        lines.append(f"  {html.escape(direction)}: {_fmt_bucket(val)}")
+
+    lines.append("By hold time:")
+    for bucket_label, val in stats["by_hold_time"].items():
+        lines.append(f"  {html.escape(bucket_label)}: {_fmt_bucket(val)}")
 
     lines.append("")
-    lines.append(f"After a NO TRADE gate: {_fmt_bucket(stats['no_trade_comparison']['after_no_trade'])}")
-    lines.append(f"Normal entries: {_fmt_bucket(stats['no_trade_comparison']['normal'])}")
+    lines.append("Taken within 2min (the chase test):")
+    lines.append(f"  within 2min: {_fmt_bucket(stats['fast_vs_slow']['within_2min'])}")
+    lines.append(f"  later: {_fmt_bucket(stats['fast_vs_slow']['later'])}")
 
     if stats["pnl_by_tag"]:
         lines.append("")
-        lines.append("P/L by tag:")
+        lines.append("By mood at entry:")
         for tag, val in stats["pnl_by_tag"].items():
-            tag_text = (f"{pct(val[0])} avg (n={qty(val[1])})") if val else "not enough samples yet"
-            lines.append(f"  {html.escape(tag)}: {tag_text}")
+            lines.append(f"  {html.escape(tag)}: {_fmt_bucket(val)}")
 
     if stats["adherence_score"] is not None:
         lines.append("")
         lines.append(
-            f"Adherence: {pct(stats['adherence_score'] * 100)} of alerts you responded to were logged "
-            f"through to a real outcome (n={qty(stats['total_alerts_responded'])})"
+            f"Adherence: {pct(stats['adherence_score'] * 100)} of your trades came from a HIGH alert, "
+            f"inside the rules, not improvised (n={qty(stats['total_trades'])})"
+        )
+
+    if stats["logging_completeness"] is not None:
+        lines.append(
+            f"Logging completeness: {pct(stats['logging_completeness'] * 100)} of alerts you responded to "
+            f"were logged through to a real outcome (n={qty(stats['total_alerts_responded'])})"
         )
         if stats["open_trades"]:
             lines.append(f"({qty(stats['open_trades'])} still open — /closed to wrap them up)")
+
+    lines.append("")
+    lines.append("/me recap — this month's 3 biggest leaks · /export — your journal as CSV")
 
     return Reply(text="\n".join(lines))
 
@@ -280,22 +346,25 @@ def handle_me(ctx: HandlerContext) -> Reply:
 
 def _resolve_detection(ctx: HandlerContext, alert_id: str):
     return ctx.journal_conn.execute(
-        "SELECT id, symbol, kinds, tier, ts_utc, close, no_trade FROM detections WHERE id = ? OR id LIKE ?",
+        "SELECT id, symbol, kinds, tier, ts_utc, close, no_trade, primary_kind, trend "
+        "FROM detections WHERE id = ? OR id LIKE ?",
         (alert_id, f"{alert_id}%"),
     ).fetchone()
 
 
 def log_took(ctx: HandlerContext, detection_id: str, symbol: str, kind: str, tier: str, alert_ts_utc: str,
-             after_no_trade: bool, contracts: float | None, entry_price: float | None) -> db.Trade | str:
+             after_no_trade: bool, contracts: float | None, entry_price: float | None,
+             direction: str | None = None) -> db.Trade | str:
     """Shared by the typed /took handler and the "I took this" button —
     returns the Trade on success, or a short reason string if one already
-    exists for this alert."""
+    exists for this alert. Every field here is auto-filled from the
+    alert's own journaled context — nothing the user has to re-type."""
     existing = db.get_open_trade_for_alert(ctx.users_conn, ctx.user.telegram_user_id, detection_id)
     if existing is not None:
         return f"already logged as taken ({ts(datetime.fromisoformat(existing.taken_at))})"
     trade = db.log_took(
         ctx.users_conn, ctx.user.telegram_user_id, detection_id=detection_id, symbol=symbol, kind=kind,
-        tier=tier, alert_ts_utc=alert_ts_utc, taken_at=ctx.now, after_no_trade=after_no_trade,
+        tier=tier, direction=direction, alert_ts_utc=alert_ts_utc, taken_at=ctx.now, after_no_trade=after_no_trade,
         contracts=contracts, entry_price=entry_price,
     )
     if not db.has_responded(ctx.users_conn, ctx.user.telegram_user_id, detection_id):
@@ -310,15 +379,22 @@ def handle_took(ctx: HandlerContext) -> Reply:
     row = _resolve_detection(ctx, alert_id)
     if row is None:
         return Reply(text=f"I don't recognize alert id {html.escape(alert_id)} — check the short id in the alert's footer.")
-    detection_id, symbol, kinds, tier, alert_ts_utc, close, no_trade = row
+    detection_id, symbol, kinds, tier, alert_ts_utc, close, no_trade, primary_kind, trend = row
     contracts = _parse_float(ctx.args[1]) if len(ctx.args) > 1 else None
     entry = _parse_float(ctx.args[2]) if len(ctx.args) > 2 else close
 
-    result = log_took(ctx, detection_id, symbol, kinds.split(",")[0], tier, alert_ts_utc, bool(no_trade), contracts, entry)
+    result = log_took(
+        ctx, detection_id, symbol, primary_kind or kinds.split(",")[0], tier, alert_ts_utc,
+        bool(no_trade), contracts, entry, direction=trend,
+    )
     if isinstance(result, str):
         return Reply(text=f"{result.capitalize()}. Use /closed to log the exit.")
     extra = f" · {qty(contracts)} contracts" if contracts else ""
-    return Reply(text=f"Logged: {symbol} · entry {money(entry) if entry else '—'}{extra}. /closed {result.id[:8]} when you're out.")
+    text = (
+        f"Logged: {symbol} · entry {money(entry) if entry else '—'}{extra}. /closed {result.id[:8]} when you're out.\n"
+        "How were you feeling on this one? (optional)"
+    )
+    return Reply(text=text, keyboard=keyboards.mood_keyboard(result.id))
 
 
 # -------------------------------------------------------------------- #
@@ -340,8 +416,8 @@ def handle_closed(ctx: HandlerContext) -> Reply:
     if not ctx.args:
         open_trade = db.most_recent_open_trade(ctx.users_conn, ctx.user.telegram_user_id)
         if open_trade is None:
-            return Reply(text="No open trade to close. Usage: /closed [trade_id] <exit price> [tag]")
-        return Reply(text=f"Usage: /closed <exit price> [tag] — closes your open {open_trade.symbol} from {ts(datetime.fromisoformat(open_trade.taken_at))}.")
+            return Reply(text="No open trade to close. Usage: /closed [trade_id] <exit price> [note]")
+        return Reply(text=f"Usage: /closed <exit price> [note] — closes your open {open_trade.symbol} from {ts(datetime.fromisoformat(open_trade.taken_at))}.")
 
     first = ctx.args[0]
     maybe_price = _parse_float(first)
@@ -350,22 +426,22 @@ def handle_closed(ctx: HandlerContext) -> Reply:
         if trade is None:
             return Reply(text="No open trade to close.")
         exit_price = maybe_price
-        tag = " ".join(ctx.args[1:]) or None
+        note = " ".join(ctx.args[1:]) or None
     else:
         trade = db.get_trade(ctx.users_conn, first) or _find_open_trade_by_prefix(ctx, first)
         if trade is None or trade.telegram_user_id != ctx.user.telegram_user_id:
             return Reply(text=f"I don't recognize trade id {html.escape(first)}.")
         if len(ctx.args) < 2:
-            return Reply(text="Usage: /closed <trade_id> <exit price> [tag]")
+            return Reply(text="Usage: /closed <trade_id> <exit price> [note]")
         exit_price = _parse_float(ctx.args[1])
         if exit_price is None:
             return Reply(text=f"Couldn't read {html.escape(ctx.args[1])} as a price.")
-        tag = " ".join(ctx.args[2:]) or None
+        note = " ".join(ctx.args[2:]) or None
 
     if trade.status == "closed":
         return Reply(text="That trade's already closed.")
 
-    closed = db.log_closed(ctx.users_conn, trade.id, exit_price=exit_price, closed_at=ctx.now, emotional_tag=tag)
+    closed = db.log_closed(ctx.users_conn, trade.id, exit_price=exit_price, closed_at=ctx.now, note=note)
     sign = "+" if (closed.pnl_pct or 0) >= 0 else ""
     pnl_text = f"{sign}{closed.pnl_pct:.2f}%" if closed.pnl_pct is not None else "n/a (no entry price on file)"
     return Reply(text=f"Closed {closed.symbol}: {pnl_text} (entry {money(closed.entry_price) if closed.entry_price else '—'} → exit {money(exit_price)}).")
@@ -379,6 +455,8 @@ LIMIT_ALIASES = {
     "trades": "max_trades_per_day", "max_trades_per_day": "max_trades_per_day",
     "loss": "max_daily_loss", "max_daily_loss": "max_daily_loss",
     "size": "max_position_size", "max_position_size": "max_position_size",
+    "account": "account_size", "account_size": "account_size",
+    "risk": "risk_per_trade_pct", "risk_per_trade_pct": "risk_per_trade_pct",
 }
 
 
@@ -393,6 +471,10 @@ def handle_limits(ctx: HandlerContext) -> Reply:
             f"Max trades/day: {user.max_trades_per_day if user.max_trades_per_day is not None else 'not set'}",
             f"Max daily loss: {money(user.max_daily_loss) if user.max_daily_loss is not None else 'not set'}",
             f"Max position size: {user.max_position_size if user.max_position_size is not None else 'not set'}",
+            "",
+            "<b>Position sizing</b> (shown on every HIGH alert once both are set)",
+            f"Account size: {money(user.account_size) if user.account_size is not None else 'not set'}",
+            f"Risk per trade: {_fmt_risk_pct(user.risk_per_trade_pct)}",
         ]
         if user.pending_limits:
             lines.append("")
@@ -401,17 +483,24 @@ def handle_limits(ctx: HandlerContext) -> Reply:
                 lines.append(f"  {p['field']} → {p['value']}")
         lines.append("")
         lines.append("Set with: /limits trades 3   /limits loss 200   /limits size 5")
+        lines.append("Sizing: /limits account 10000   /limits risk 1")
         return Reply(text="\n".join(lines))
 
     if len(ctx.args) < 2:
-        return Reply(text="Usage: /limits <trades|loss|size> <value>")
+        return Reply(text="Usage: /limits <trades|loss|size|account|risk> <value>")
 
     field = LIMIT_ALIASES.get(ctx.args[0].lower())
     if field is None:
-        return Reply(text="Unknown limit — use trades, loss, or size.")
+        return Reply(text="Unknown limit — use trades, loss, size, account, or risk.")
     value = _parse_float(ctx.args[1])
     if value is None or value <= 0:
         return Reply(text=f"Couldn't read {html.escape(ctx.args[1])} as a positive number.")
+
+    if field in db.SIZING_FIELDS:
+        db.set_sizing_field(ctx.users_conn, ctx.user.telegram_user_id, field, value)
+        if field == "account_size":
+            return Reply(text=f"Done — account size is now {money(value)}, effective immediately.")
+        return Reply(text=f"Done — risk per trade is now {_fmt_risk_pct(value)}, effective immediately.")
 
     market_open = ctx.app.market_is_open_fn(ctx.now)
     result = db.apply_limit_change(ctx.users_conn, ctx.user.telegram_user_id, field, value, now=ctx.now, market_is_open=market_open)
@@ -504,8 +593,8 @@ def handle_tiers(ctx: HandlerContext) -> Reply:
 # -------------------------------------------------------------------- #
 
 _EXPORT_COLUMNS = [
-    "id", "symbol", "kind", "tier", "alert_ts_utc", "taken_at", "reaction_seconds", "after_no_trade",
-    "contracts", "entry_price", "exit_price", "closed_at", "pnl_pct", "status", "emotional_tag",
+    "id", "symbol", "kind", "tier", "direction", "alert_ts_utc", "taken_at", "reaction_seconds", "after_no_trade",
+    "contracts", "entry_price", "exit_price", "closed_at", "pnl_pct", "status", "emotional_tag", "note",
 ]
 
 
@@ -548,15 +637,15 @@ def handle_help(ctx: HandlerContext) -> Reply:
         "<b>Account</b>",
         "/status — bot & your state",
         "/performance — real track record",
-        "/me — your personal stats",
+        "/me — your personal stats (or /me recap for this month's biggest leaks)",
         "",
         "<b>Journaling</b>",
         "/took &lt;alert_id&gt; — log a trade (or tap the alert's button)",
-        "/closed &lt;exit price&gt; — log an exit",
-        "/export — your journal as CSV",
+        "/closed &lt;exit price&gt; [note] — log an exit",
+        "/export — your journal as CSV, yours to keep",
         "",
         "<b>Controls</b>",
-        "/limits — daily loss/trade caps",
+        "/limits — daily loss/trade caps, plus account size &amp; risk per trade for position sizing",
         "/pause, /resume — mute/unmute alerts",
         "/watchlist — your symbols",
         "/halt — emergency stop",

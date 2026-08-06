@@ -382,7 +382,10 @@ class Dispatcher:
             except Exception:
                 logger.exception("failed to edit message after callback")
         if result.send_text is not None and chat_id is not None:
-            self._reply(chat_id, result.send_text)
+            try:
+                self.client.send_message(chat_id, result.send_text, result.send_keyboard)
+            except Exception:
+                logger.exception("failed to send follow-up message after callback")
 
     def _answer_callback(self, cq_id: str, text: str | None, show_alert: bool) -> None:
         try:

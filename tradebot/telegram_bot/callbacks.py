@@ -26,11 +26,33 @@ def handle_took_button(ctx) -> CallbackReply:
     row = _resolve_detection(ctx, ctx.arg)
     if row is None:
         return CallbackReply(toast="Can't find that alert anymore.", show_alert=True)
-    detection_id, symbol, kinds, tier, alert_ts_utc, close, no_trade = row
-    result = log_took(ctx, detection_id, symbol, kinds.split(",")[0], tier, alert_ts_utc, bool(no_trade), None, close)
+    detection_id, symbol, kinds, tier, alert_ts_utc, close, no_trade, primary_kind, trend = row
+    result = log_took(
+        ctx, detection_id, symbol, primary_kind or kinds.split(",")[0], tier, alert_ts_utc,
+        bool(no_trade), None, close, direction=trend,
+    )
     if isinstance(result, str):
         return CallbackReply(toast=f"Already logged ({result}).", show_alert=False)
-    return CallbackReply(toast="Logged as taken.")
+    return CallbackReply(
+        toast="Logged as taken.",
+        send_text="How were you feeling on this one? (optional)",
+        send_keyboard=keyboards.mood_keyboard(result.id),
+    )
+
+
+def handle_mood_button(ctx) -> CallbackReply:
+    """The optional one-tap mood prompt sent right after /took (or the "I
+    took this" button). ctx.arg is "trade_id:mood" — the only callback in
+    this module carrying two pieces of data, so it's parsed here rather
+    than by the dispatcher's single-partition prefix routing."""
+    trade_id, _, mood = ctx.arg.partition(":")
+    trade = db.get_trade(ctx.users_conn, trade_id)
+    if trade is None or trade.telegram_user_id != ctx.user.telegram_user_id:
+        return CallbackReply(toast="Can't find that trade anymore.", show_alert=True)
+    if mood not in db.MOOD_CHOICES:
+        return CallbackReply(toast="Unrecognized option.", show_alert=True)
+    db.set_trade_mood(ctx.users_conn, trade_id, mood)
+    return CallbackReply(toast="Logged.", edit_text=f"Logged: {mood}.", edit_keyboard=None)
 
 
 def handle_skip_button(ctx) -> CallbackReply:
@@ -148,6 +170,7 @@ def handle_watchlist_button(ctx) -> CallbackReply:
 
 CALLBACK_HANDLERS = {
     "took": handle_took_button,
+    "mood": handle_mood_button,
     "skip": handle_skip_button,
     "whynt": handle_whynt_button,
     "ack_risk": handle_ack_risk_button,
