@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from tradebot.detectors import Detection
+from tradebot.events import add_event_window
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import set_no_trade, write_cluster
 from tradebot.telegram_bot import db, handlers
@@ -266,12 +267,18 @@ def test_watchlist_paid_tier_gets_an_editable_keyboard():
 def test_events_says_nothing_loaded_rather_than_fabricating():
     users_conn, journal_conn = _setup()
     reply = handlers.handle_events(_ctx(users_conn, journal_conn))
-    assert "no events loaded" in reply.text.lower()
+    assert "no known earnings, macro, or filing events" in reply.text.lower()
 
 
 def test_events_lists_what_was_actually_loaded():
+    """/events reads the real event_windows table (tradebot.events), the
+    same source as runner.py's pre-open card — not the old, always-empty
+    telegram_bot.db events table."""
     users_conn, journal_conn = _setup()
-    db.add_event(users_conn, NOW.date(), "earnings", "before the open", symbol="TSLA")
+    add_event_window(
+        journal_conn, symbol="TSLA", kind="earnings", start_utc=NOW, end_utc=NOW + timedelta(hours=1),
+        severity="downgrade", source="test", detail="before the open",
+    )
     reply = handlers.handle_events(_ctx(users_conn, journal_conn))
     assert "TSLA" in reply.text and "before the open" in reply.text
 

@@ -6,14 +6,14 @@ copies that could drift.
 Never writes to the journal. Never reports a stat built on fewer than
 MIN_HISTORY_SAMPLE data points — same discipline as tradebot.journal.
 
-The "news-driven vs clean-technical" split is a heuristic, not a real
-news feed (this project has no news/earnings vendor — see CLAUDE.md's
-"no vendor SDK outside its own adapter module"): a cluster whose kinds
-include "gap" is treated as news/overnight-driven (gap is the one
-detector that specifically captures an overnight discontinuity);
-everything else is "clean technical" (an intraday level/range/volume
-signal with no implied catalyst). This is stated explicitly wherever the
-split is shown, so it never reads as more authoritative than it is.
+The "news-driven vs clean-technical" split uses the real detections.
+news_driven column — set by runner.py from tradebot.events' actual EDGAR
+filing, earnings, and FOMC/CPI/NFP/EIA event windows (see that module's
+docstring), not a kind-name heuristic. If the edge lives in only one
+bucket, this is how that finding surfaces: a cluster overlapping a known
+event went through this same detector/scoring pipeline, but its
+continuation stats don't share the same mechanism as an intraday
+technical signal, so they're never blended into one number.
 """
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class TrackRecord:
 def _signed_returns(conn: sqlite3.Connection, tier: str, offset_min: int) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT d.ts_utc, d.close, d.trend, d.kinds, m.price
+        SELECT d.ts_utc, d.close, d.trend, d.news_driven, m.price
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
         WHERE d.tier = ?
@@ -59,10 +59,10 @@ def _signed_returns(conn: sqlite3.Connection, tier: str, offset_min: int) -> lis
         (offset_min, tier),
     ).fetchall()
     out = []
-    for ts_utc, close, trend, kinds, price in rows:
+    for ts_utc, close, trend, news_driven, price in rows:
         r = (price - close) / close * 100
         signed = r if trend == "up" else -r
-        out.append({"ts_utc": ts_utc, "return_pct": signed, "kinds": kinds})
+        out.append({"ts_utc": ts_utc, "return_pct": signed, "news_driven": bool(news_driven)})
     return out
 
 
@@ -110,8 +110,8 @@ def track_record(conn: sqlite3.Connection, tier: str = "high", offset_min: int =
     if len(returns) < MIN_HISTORY_SAMPLE:
         return None
 
-    news = [r for r in returns if "gap" in r["kinds"].split(",")]
-    technical = [r for r in returns if "gap" not in r["kinds"].split(",")]
+    news = [r for r in returns if r["news_driven"]]
+    technical = [r for r in returns if not r["news_driven"]]
 
     total_alerts = conn.execute(
         "SELECT COUNT(*) FROM detections WHERE tier = ? AND alerted = 1", (tier,)
@@ -132,7 +132,7 @@ def track_record(conn: sqlite3.Connection, tier: str = "high", offset_min: int =
         avg_return_pct=sum(r["return_pct"] for r in returns) / len(returns),
         max_drawdown_pct=_max_drawdown_pct(returns),
         longest_losing_streak=_longest_losing_streak(returns),
-        news_driven=_slice_stats("news-driven (gap)", news),
+        news_driven=_slice_stats("news-driven", news),
         clean_technical=_slice_stats("clean technical", technical),
         total_alerts=total_alerts,
         total_no_trade=no_trade_count,

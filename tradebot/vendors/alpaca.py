@@ -15,6 +15,7 @@ from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed, OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
+    OptionBarsRequest,
     OptionChainRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
@@ -193,6 +194,30 @@ def fetch_option_chain(symbol: str, expiry: date) -> MDOptionChain:
                 delta=float(greeks.delta) if greeks and greeks.delta is not None else None,
                 theta=float(greeks.theta) if greeks and greeks.theta is not None else None,
                 open_interest=int(meta.open_interest) if meta.open_interest is not None else 0,
+                implied_volatility=float(snap.implied_volatility) if snap.implied_volatility is not None else None,
             )
         )
     return MDOptionChain(symbol=symbol, expiry=expiry, contracts=contracts)
+
+
+def fetch_option_day_volume(occ_symbol: str, session_date: date) -> int | None:
+    """Real cumulative contract volume for session_date, via a dedicated
+    1-day bar request — the chain snapshot endpoint only carries the size
+    of the single latest trade, not a day total, so this is a second call
+    made only for the one contract actually being considered, not the
+    whole chain. Returns None (never 0) on any failure or missing bar —
+    None means "couldn't check," 0 means "checked, no volume traded,"
+    and costs.py treats those differently."""
+    option_client = _option_client()
+    start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    try:
+        bar_set = _with_backoff(lambda: option_client.get_option_bars(
+            OptionBarsRequest(symbol_or_symbols=occ_symbol, timeframe=TimeFrame.Day, start=start, end=end)
+        ))
+    except APIError:
+        return None
+    bars = bar_set.data.get(occ_symbol) if hasattr(bar_set, "data") else None
+    if not bars:
+        return None
+    return int(bars[-1].volume)

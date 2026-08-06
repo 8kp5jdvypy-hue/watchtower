@@ -98,6 +98,13 @@ class Decision(str, Enum):
     SUPPRESS_COOLDOWN = "cooldown_active"
     QUEUED_FOR_DIGEST = "queued_for_hourly_digest"
     QUEUED_FOR_EOD = "queued_for_eod_summary"
+    # Set directly by runner.py, never returned by AlertBudget.evaluate()
+    # itself — a HIGH cluster inside a "suppress" severity event window
+    # (tradebot.events) never reaches evaluate() at all, so it never
+    # touches the daily cap or per-kind cooldown. See CLAUDE.md-adjacent
+    # rule in tradebot.events: news is suppression/context, never a
+    # reason to burn budget on an alert nobody will see.
+    SUPPRESS_NEWS_BLACKOUT = "news_blackout"
 
 
 @dataclass

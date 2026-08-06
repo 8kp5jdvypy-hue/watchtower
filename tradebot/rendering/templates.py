@@ -57,22 +57,63 @@ def _footer(when: datetime, short_id: str | None = None) -> str:
     return "<i>" + " · ".join(html.escape(p) for p in parts) + "</i>"
 
 
-def _render_contract(breakeven) -> str:
-    """"none tradable" is a real, checked answer, not missing data — it
-    does not get fields.dash's em-dash treatment."""
-    if breakeven is None:
-        return "none tradable"
-    contract = breakeven.contract
+# Kestrel never collapses these into one "no tradable contract" line —
+# they're different failures and a reader needs to know which one:
+# a liquidity problem says nothing about whether the trade idea is any
+# good, but a breakeven that exceeds the typical move says the idea may
+# be fine and the options market just isn't offering a way to play it
+# profitably at this size.
+NO_TRADE_LABELS = {
+    "no_liquid_strike": "no liquid strike",
+    "breakeven_exceeds_typical_move": "breakeven exceeds typical move",
+    "earnings_blackout": "earnings blackout",
+}
+
+
+def _render_leg(contract) -> str:
     side = "C" if contract.right == "call" else "P"
-    expiry = f"{contract.expiry.month}/{contract.expiry.day}"
-    return f"{money(contract.strike)}{side} {expiry} · BE {pct(breakeven.pct * 100)}"
+    return f"{money(contract.strike)}{side}"
+
+
+def _render_contract(selection) -> str:
+    """"none tradable" is a real, checked answer, not missing data — it
+    does not get fields.dash's em-dash treatment. Never shows a contract
+    without its breakeven in ATR beside it."""
+    if selection is None or not selection.is_tradable:
+        reason = NO_TRADE_LABELS.get(selection.no_trade.reason, selection.no_trade.detail) if selection and selection.no_trade else "none tradable"
+        return f"none tradable — {reason}" if selection and selection.no_trade else "none tradable"
+
+    be = selection.breakeven
+    expiry = f"{selection.expiry.month}/{selection.expiry.day}"
+    if be.is_vertical:
+        long_c, short_c = be.legs[0].contract, be.legs[1].contract
+        legs = f"Long {_render_leg(long_c)} / Short {_render_leg(short_c)}"
+    else:
+        legs = _render_leg(be.contract)
+    line = f"{legs} {expiry} · BE {pct(be.pct * 100)} ({atr(be.atr_units)})"
+    if selection.insufficient_sample:
+        line += " · insufficient sample"
+    return line
 
 
 def _render_similar(history) -> str:
     return f"{history.continuation_rate * 100:.0f}% cont. (n={qty(history.sample_size)})"
 
 
-def render_high_alert(cluster, anchors, quote, breakeven, history) -> str:
+NEWS_DRIVEN_SIMILAR_TEXT = "continuation stats do not apply"
+
+
+def _render_similar_row(history, news_driven: bool) -> str:
+    """continuation stats are built on technical-setup history and don't
+    transfer to an event-driven move — see tradebot.events module
+    docstring. A news-driven alert always gets the override, even if a
+    (contaminated) history sample happens to exist for it."""
+    if news_driven:
+        return NEWS_DRIVEN_SIMILAR_TEXT
+    return dash(history, _render_similar)
+
+
+def render_high_alert(cluster, anchors, quote, selection, history, news_driven: bool = False) -> str:
     """The single-ticker, full-detail HIGH alert. Fixed field order,
     every time: headline -> rationale -> stats block -> tag line ->
     footer.
@@ -80,7 +121,13 @@ def render_high_alert(cluster, anchors, quote, breakeven, history) -> str:
     `cluster.primary_headline` is the highest-scoring constituent
     detection's own headline — the rationale is that one sentence, not
     every trigger chained together (the full kind list is the tag line
-    instead).
+    instead). `selection` is a costs.ContractSelection — never shown
+    without its breakeven in ATR beside it (see _render_contract), and
+    the two NO TRADE causes print differently, never collapsed into one.
+    `news_driven`: this cluster overlaps a known event window (earnings,
+    an EDGAR filing, a macro print) — see tradebot.events. Replaces the
+    Similar Setups line rather than showing a technical base rate that
+    doesn't apply.
     """
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
     bias = BIAS_LABEL.get(cluster.trend, "NEUTRAL")
@@ -95,8 +142,8 @@ def render_high_alert(cluster, anchors, quote, breakeven, history) -> str:
         ("Session", f"{money(anchors.prior_low)}–{money(anchors.prior_high)}"),
         ("Score", atr(cluster.score)),
         ("ATR(14)", dash(cluster.atr14, lambda v: f"{v:.2f}")),
-        ("Similar", dash(history, _render_similar)),
-        ("Contract", _render_contract(breakeven)),
+        ("Similar", _render_similar_row(history, news_driven)),
+        ("Contract", _render_contract(selection)),
     ]
 
     when = datetime.fromisoformat(cluster.ts_utc)
@@ -161,6 +208,51 @@ def render_morning_briefing(tier_perf, when: datetime) -> str:
     if tier_perf is not None:
         lines.append("")
         lines.append(f"<i>Current HIGH track record: {_render_similar(tier_perf)}</i>")
+    lines.append("")
+    lines.append(_footer(when))
+    return "\n".join(lines)
+
+
+# Event-window kind -> the human label it gets on the pre-open card / /events
+# — a reader shouldn't have to know EDGAR's form codes or this project's
+# internal event kind strings (see tradebot.events).
+EVENT_KIND_LABELS = {
+    "8-K": "8-K filing",
+    "13D": "13D filing",
+    "13G": "13G filing",
+    "form4": "Form 4",
+    "earnings": "earnings",
+    "eia": "EIA petroleum status report",
+    "fomc": "FOMC",
+    "cpi": "CPI",
+    "nfp": "NFP",
+}
+EVENT_SEVERITY_LABELS = {"suppress": "blackout", "downgrade": "downgrade", "context": "context"}
+
+
+def _render_event_row(event) -> str:
+    who = html.escape(event.symbol) if event.symbol else "Market-wide"
+    kind_label = html.escape(EVENT_KIND_LABELS.get(event.kind, event.kind))
+    severity_label = html.escape(EVENT_SEVERITY_LABELS.get(event.severity, event.severity))
+    line = f"{who} — {kind_label} ({severity_label})"
+    if event.detail:
+        line += f" · {html.escape(event.detail)}"
+    return line
+
+
+def render_pre_open_card(events: list, session_date, when: datetime) -> str:
+    """Today's known earnings, macro prints, and filing-driven blackout
+    windows, sent once before the alerting loop starts. Context, not a
+    trade signal — no tier emoji. See tradebot.events module docstring:
+    news is suppression and context, never an alert source, and this is
+    the one place a day's events are all shown together rather than
+    scattered across individual alert suppressions."""
+    lines = [f"<b>Pre-Open — {html.escape(str(session_date))}</b>", ""]
+    if not events:
+        lines.append("No known earnings, macro, or filing events today.")
+    else:
+        for event in events:
+            lines.append(_render_event_row(event))
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)

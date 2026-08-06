@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from tradebot.alerts import Cluster
-from tradebot.costs import Breakeven
+from tradebot.costs import Breakeven, ContractSelection, Leg
 from tradebot.detectors import DailyAnchors
 from tradebot.rendering import templates
 from tradebot.journal import HistoricalPerformance, TierPerformance
@@ -27,12 +27,16 @@ def _quote() -> Quote:
     return Quote(symbol="GOOGL", ts=datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc), bid=365.98, ask=366.02, last=366.00)
 
 
-def _breakeven() -> Breakeven:
+def _selection() -> ContractSelection:
     contract = OptionContract(
         symbol="GOOGL260814P00365000", expiry=date(2026, 8, 14), strike=365.0, right="put",
         bid=4.15, ask=4.25, last=4.20, delta=-0.47, theta=-0.35, open_interest=3412,
     )
-    return Breakeven(pct=0.029, atr_units=2.9, contract=contract)
+    breakeven = Breakeven(pct=0.029, atr_units=2.9, legs=(Leg(contract, "long"),), is_vertical=False)
+    return ContractSelection(
+        breakeven=breakeven, no_trade=None, expiry=date(2026, 8, 14), dte=13,
+        similar_setups_sample=60, insufficient_sample=False,
+    )
 
 
 def _history() -> HistoricalPerformance:
@@ -105,8 +109,8 @@ def test_render_high_alert_has_no_exclamation_marks():
 
 
 def test_render_high_alert_shows_a_tradable_contract():
-    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), _breakeven(), _history())
-    assert "Contract     $365.00P 8/14 · BE +2.90%" in text
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), _selection(), _history())
+    assert "Contract     $365.00P 8/14 · BE +2.90% (2.90 ATR)" in text
 
 
 def test_render_high_alert_never_omits_a_row_when_breakeven_and_history_are_none():
@@ -130,6 +134,22 @@ def test_render_high_alert_humanizes_detector_kinds_on_the_tag_line():
     text = templates.render_high_alert(_cluster(kinds="vwap_break,rvol_spike"), _anchors(), _quote(), None, None)
     assert "VWAP break · volume spike" in text
     assert "vwap_break" not in text and "rvol_spike" not in text
+
+
+def test_render_high_alert_news_driven_replaces_similar_setups_line():
+    """Continuation stats are built on technical-setup history and don't
+    transfer to an event-driven move — see tradebot.events module
+    docstring. news_driven=True must override the Similar row even though
+    a (real) history sample was passed in."""
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history(), news_driven=True)
+    assert "Similar      continuation stats do not apply" in text
+    assert "35% cont." not in text  # the (contaminated) sample must not leak through
+
+
+def test_render_high_alert_shows_real_similar_setups_when_not_news_driven():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history(), news_driven=False)
+    assert "35% cont." in text
+    assert "continuation stats do not apply" not in text
 
 
 def test_render_digest_golden():
@@ -202,6 +222,51 @@ def test_render_morning_briefing_omits_track_record_line_on_an_empty_journal():
     assert "Current HIGH track record" not in text
 
 
+def _event_window(**overrides):
+    from tradebot.events import EventWindow
+
+    fields = dict(
+        id=1, symbol="TSLA", kind="earnings", start_utc=datetime(2026, 7, 23, 10, 0, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc), severity="downgrade",
+        source="test", detail="after the close",
+    )
+    fields.update(overrides)
+    return EventWindow(**fields)
+
+
+def test_render_pre_open_card_golden_with_events():
+    when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    events = [
+        _event_window(id=1, symbol="TSLA", kind="earnings", severity="downgrade", detail="after the close"),
+        _event_window(id=2, symbol=None, kind="fomc", severity="suppress", detail=None),
+        _event_window(id=3, symbol="GOOGL", kind="form4", severity="context", detail="routine Form 4"),
+    ]
+    text = templates.render_pre_open_card(events, date(2026, 7, 23), when)
+    assert text == (
+        "<b>Pre-Open — 2026-07-23</b>\n"
+        "\n"
+        "TSLA — earnings (downgrade) · after the close\n"
+        "Market-wide — FOMC (blackout)\n"
+        "GOOGL — Form 4 (context) · routine Form 4\n"
+        "\n"
+        "<i>09:00 ET · Not advice.</i>"
+    )
+
+
+def test_render_pre_open_card_says_no_known_events_rather_than_omitting_the_body():
+    when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    text = templates.render_pre_open_card([], date(2026, 7, 23), when)
+    assert "No known earnings, macro, or filing events today." in text
+
+
+def test_render_pre_open_card_escapes_and_never_exclaims():
+    when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    events = [_event_window(detail="<script>alert(1)</script>")]
+    text = templates.render_pre_open_card(events, date(2026, 7, 23), when)
+    assert "<script>" not in text
+    assert "!" not in text
+
+
 def test_render_heartbeat_golden():
     tier_perf = {"high": TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30)}
     when = datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc)
@@ -254,7 +319,7 @@ def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
     when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
     tier_perf = TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30)
     messages = [
-        templates.render_high_alert(_cluster(), _anchors(), _quote(), _breakeven(), _history()),
+        templates.render_high_alert(_cluster(), _anchors(), _quote(), _selection(), _history()),
         templates.render_digest("Medium Digest", "medium", [_cluster(tier="medium")], tier_perf, when),
         templates.render_log_summary([_cluster(tier="log")], tier_perf, when),
         templates.render_morning_briefing(tier_perf, when),

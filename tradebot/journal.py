@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS detections (
     code_version TEXT,
     alerted INTEGER DEFAULT 0,
     suppress_reason TEXT,
-    no_trade INTEGER
+    no_trade INTEGER,
+    news_driven INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -54,6 +55,49 @@ CREATE TABLE IF NOT EXISTS marks (
     price REAL NOT NULL,
     PRIMARY KEY (detection_id, offset_min)
 );
+
+CREATE TABLE IF NOT EXISTS iv_history (
+    symbol TEXT NOT NULL,
+    session TEXT NOT NULL,
+    iv REAL NOT NULL,
+    PRIMARY KEY (symbol, session)
+);
+
+CREATE TABLE IF NOT EXISTS contract_selections (
+    detection_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    right TEXT NOT NULL,
+    strike REAL NOT NULL,
+    expiry TEXT NOT NULL,
+    dte INTEGER NOT NULL,
+    delta REAL,
+    is_vertical INTEGER NOT NULL DEFAULT 0,
+    short_strike REAL,
+    short_delta REAL,
+    entry_mid REAL NOT NULL,
+    entry_ts_utc TEXT NOT NULL,
+    mid_15m REAL,
+    mid_30m REAL,
+    mid_60m REAL
+);
+
+CREATE TABLE IF NOT EXISTS event_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT,
+    kind TEXT NOT NULL,
+    start_utc TEXT NOT NULL,
+    end_utc TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    source TEXT NOT NULL,
+    detail TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_event_windows_symbol_time ON event_windows(symbol, start_utc, end_utc);
+-- COALESCE so a market-wide row (symbol IS NULL) still dedupes against
+-- itself on repeated ingestion runs — SQL UNIQUE treats NULL != NULL,
+-- which would otherwise let every macro-calendar refresh insert a copy.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
+    ON event_windows(COALESCE(symbol, ''), kind, start_utc, source);
 """
 
 
@@ -72,6 +116,11 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     # to track "alert fired but no tradable contract" for /performance.
     try:
         conn.execute("ALTER TABLE detections ADD COLUMN no_trade INTEGER")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    try:
+        conn.execute("ALTER TABLE detections ADD COLUMN news_driven INTEGER")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # column already exists
@@ -150,6 +199,19 @@ def set_no_trade(conn: sqlite3.Connection, detection_id: str, no_trade: bool) ->
     conn.execute("UPDATE detections SET no_trade = ? WHERE id = ?", (int(no_trade), detection_id))
 
 
+def set_news_driven(conn: sqlite3.Connection, detection_id: str, news_driven: bool) -> None:
+    """Records whether this cluster overlaps a known event window (EDGAR
+    filing, earnings, FOMC/CPI/NFP/EIA — see tradebot.events), set by
+    runner.py right after journal_write_cluster() for every tier, not
+    just HIGH. NULL (never called) means 'no events data to check
+    against', not 'confirmed clean technical' — same NULL-means-unknown
+    discipline as set_no_trade(). Used by historical_performance() to
+    exclude event-driven history from the technical continuation sample,
+    and by /performance to report news-driven vs clean-technical
+    separately."""
+    conn.execute("UPDATE detections SET news_driven = ? WHERE id = ?", (int(news_driven), detection_id))
+
+
 def _all_bars_for_session(cache_dir: Path, symbol: str, session_date: date):
     md = ReplayMarketData(cache_dir, symbol, session_date)
     while md.advance():
@@ -208,6 +270,13 @@ class HistoricalPerformance:
     continuation_rate: float  # fraction that moved further in the alert's direction by offset_min
     avg_return_pct: float  # signed average return at offset_min
     offset_min: int
+    # Same average move, but normalized by each historical row's OWN
+    # atr14 (real per-instance data from the detections table) rather
+    # than the current decision's atr14 — a %-move average can't be
+    # converted to "typical ATR units" after the fact without each
+    # instance's own scale. None only when every row in the sample is
+    # missing atr14 (never fabricated by borrowing today's ATR instead).
+    avg_return_atr: float | None = None
 
 
 def historical_performance(
@@ -222,13 +291,20 @@ def historical_performance(
     direction actually played out, using real backfilled forward prices —
     a base rate from the journal's own history, not a prediction. Returns
     None if there isn't at least MIN_HISTORY_SAMPLE of them yet; never
-    reports a stat built on too few data points to mean anything."""
+    reports a stat built on too few data points to mean anything.
+
+    Excludes news-driven history (news_driven=1) from the sample: these
+    stats are continuation rates for TECHNICAL setups, and an event-driven
+    move (earnings, an 8-K, a macro print) doesn't share that mechanism —
+    mixing it into the sample would let event noise masquerade as a
+    technical base rate. See tradebot.events module docstring."""
     rows = conn.execute(
         """
-        SELECT d.close, m.price
+        SELECT d.close, m.price, d.atr14
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
         WHERE d.kinds LIKE ? AND d.trend = ? AND d.id != ?
+              AND (d.news_driven IS NULL OR d.news_driven = 0)
         ORDER BY d.ts_utc DESC
         LIMIT ?
         """,
@@ -237,16 +313,21 @@ def historical_performance(
     if len(rows) < MIN_HISTORY_SAMPLE:
         return None
 
-    returns = [(price - close) / close for close, price in rows]
+    returns = [(price - close) / close for close, price, _atr14 in rows]
     if trend == "up":
         continued = sum(1 for r in returns if r > 0)
     else:
         continued = sum(1 for r in returns if r < 0)
+
+    atr_normalized = [abs(price - close) / atr14 for close, price, atr14 in rows if atr14]
+    avg_return_atr = sum(atr_normalized) / len(atr_normalized) if atr_normalized else None
+
     return HistoricalPerformance(
         sample_size=len(returns),
         continuation_rate=continued / len(returns),
         avg_return_pct=sum(returns) / len(returns) * 100,
         offset_min=offset_min,
+        avg_return_atr=avg_return_atr,
     )
 
 
@@ -365,3 +446,113 @@ def hour_performance(
             offset_min=offset_min,
         )
     return result
+
+
+# --------------------------------------------------------------------------
+# IV history — a local, real-data cache so IV rank becomes computable over
+# time without ever fabricating one. One sample per symbol per session
+# (upserted, so re-running a session is idempotent, same as write_cluster).
+# --------------------------------------------------------------------------
+
+
+def record_iv_sample(conn: sqlite3.Connection, symbol: str, session: date, iv: float) -> None:
+    conn.execute(
+        "INSERT INTO iv_history (symbol, session, iv) VALUES (?, ?, ?) "
+        "ON CONFLICT(symbol, session) DO UPDATE SET iv = excluded.iv",
+        (symbol, session.isoformat(), iv),
+    )
+    conn.commit()
+
+
+def iv_rank(conn: sqlite3.Connection, symbol: str, current_iv: float, lookback_sessions: int = 252) -> tuple[float | None, int]:
+    """Standard IV Rank: where current_iv sits between the lowest and
+    highest IV over the trailing lookback_sessions, as a 0-100 percentile
+    of that RANGE (not a percentile of days below it — that's IV
+    Percentile, a different, commonly-confused metric). Returns
+    (None, sample_size) rather than a rank computed on a degenerate
+    (min == max) or empty window — never fabricated, never divided by
+    zero."""
+    rows = conn.execute(
+        "SELECT iv FROM iv_history WHERE symbol = ? ORDER BY session DESC LIMIT ?",
+        (symbol, lookback_sessions),
+    ).fetchall()
+    sample = len(rows)
+    if sample == 0:
+        return None, 0
+    ivs = [r[0] for r in rows]
+    lo, hi = min(ivs), max(ivs)
+    if hi == lo:
+        return None, sample
+    rank = (current_iv - lo) / (hi - lo) * 100
+    return max(0.0, min(100.0, rank)), sample
+
+
+# --------------------------------------------------------------------------
+# Contract selections — what select_contract() actually chose, so it can
+# be checked against reality later. strike/DTE/delta/entry mid up front;
+# forward mids at +15/30/60m are backfilled once they're knowable (live
+# only — see costs.select_contract and marketdata.ReplayMarketData.chain,
+# there's no cached historical options data to replay against).
+# --------------------------------------------------------------------------
+
+
+def record_contract_selection(
+    conn: sqlite3.Connection,
+    detection_id: str,
+    *,
+    symbol: str,
+    right: str,
+    strike: float,
+    expiry: date,
+    dte: int,
+    delta: float | None,
+    entry_mid: float,
+    entry_ts: datetime,
+    is_vertical: bool = False,
+    short_strike: float | None = None,
+    short_delta: float | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO contract_selections
+            (detection_id, symbol, right, strike, expiry, dte, delta, is_vertical,
+             short_strike, short_delta, entry_mid, entry_ts_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(detection_id) DO UPDATE SET
+            symbol=excluded.symbol, right=excluded.right, strike=excluded.strike,
+            expiry=excluded.expiry, dte=excluded.dte, delta=excluded.delta,
+            is_vertical=excluded.is_vertical, short_strike=excluded.short_strike,
+            short_delta=excluded.short_delta, entry_mid=excluded.entry_mid,
+            entry_ts_utc=excluded.entry_ts_utc
+        """,
+        (
+            detection_id, symbol, right, strike, expiry.isoformat(), dte, delta, int(is_vertical),
+            short_strike, short_delta, entry_mid, entry_ts.isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def record_contract_forward_mid(conn: sqlite3.Connection, detection_id: str, offset_min: int, mid: float) -> None:
+    column = {15: "mid_15m", 30: "mid_30m", 60: "mid_60m"}.get(offset_min)
+    if column is None:
+        raise ValueError(f"unsupported contract forward-mid offset: {offset_min} (only 15/30/60 are journaled)")
+    conn.execute(f"UPDATE contract_selections SET {column} = ? WHERE detection_id = ?", (mid, detection_id))
+    conn.commit()
+
+
+def pending_contract_backfills(conn: sqlite3.Connection, older_than: datetime, offset_min: int) -> list[tuple]:
+    """Selections whose entry is at least offset_min old but don't have
+    that forward mid recorded yet — what a live backfill loop should
+    still go fetch. Returns (detection_id, symbol, right, strike, expiry)
+    rows."""
+    column = {15: "mid_15m", 30: "mid_30m", 60: "mid_60m"}.get(offset_min)
+    if column is None:
+        raise ValueError(f"unsupported contract forward-mid offset: {offset_min}")
+    cutoff = (older_than - timedelta(minutes=offset_min)).isoformat()
+    rows = conn.execute(
+        f"SELECT detection_id, symbol, right, strike, expiry FROM contract_selections "
+        f"WHERE entry_ts_utc <= ? AND {column} IS NULL",
+        (cutoff,),
+    ).fetchall()
+    return rows

@@ -15,7 +15,9 @@ import html
 import io
 from datetime import datetime
 
+from tradebot.events import events_for_date
 from tradebot.rendering.fields import money, pct, qty, ts
+from tradebot.rendering.templates import render_pre_open_card
 from tradebot.telegram_bot import db, keyboards, performance
 from tradebot.telegram_bot.context import HandlerContext, Reply
 
@@ -210,7 +212,7 @@ def handle_performance(ctx: HandlerContext) -> Reply:
         f"Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
         f"Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)} (equal-weighted, back-to-back — not real compounded P/L)",
         "",
-        f"News-driven (gap): {tr.news_driven and pct(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
+        f"News-driven: {tr.news_driven and pct(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
         f"Clean technical: {tr.clean_technical and pct(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
         "",
     ]
@@ -466,18 +468,14 @@ def handle_watchlist(ctx: HandlerContext) -> Reply:
 
 
 def handle_events(ctx: HandlerContext) -> Reply:
+    """Same content and rendering as the pre-open card runner.py sends at
+    session start (tradebot.events.events_for_date over the real
+    event_windows table) — one query path, not two copies that could
+    drift, same discipline as /performance (see
+    tradebot.telegram_bot.performance's module docstring)."""
     session_date = ctx.app.session_date_fn(ctx.now)
-    events = db.list_events_for_date(ctx.users_conn, session_date)
-    if not events:
-        return Reply(
-            text=f"No events loaded for {session_date.isoformat()}. (No live earnings/macro feed wired in yet — "
-            "this means 'nothing loaded', not 'nothing happening'.)"
-        )
-    lines = [f"<b>Events — {session_date.isoformat()}</b>", ""]
-    for e in events:
-        prefix = f"{html.escape(e['symbol'])} — " if e["symbol"] else ""
-        lines.append(f"{prefix}{html.escape(e['kind'])}: {html.escape(e['note'])}")
-    return Reply(text="\n".join(lines))
+    events = events_for_date(ctx.journal_conn, session_date)
+    return Reply(text=render_pre_open_card(events, session_date, ctx.now))
 
 
 # -------------------------------------------------------------------- #

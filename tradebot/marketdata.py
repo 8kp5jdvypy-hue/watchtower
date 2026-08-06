@@ -39,6 +39,12 @@ class OptionContract:
     delta: float | None
     theta: float | None
     open_interest: int
+    implied_volatility: float | None = None
+    # Real cumulative day volume for this one contract — NOT populated by
+    # a chain fetch (the snapshot endpoint used for the rest of the chain
+    # doesn't carry it; see vendors.alpaca.fetch_option_day_volume). None
+    # means "not looked up," not "zero" — costs.py treats them differently.
+    day_volume: int | None = None
 
 
 @dataclass(frozen=True)

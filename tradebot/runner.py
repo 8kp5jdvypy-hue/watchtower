@@ -40,7 +40,8 @@ from tradebot.alerts import (
     TelegramAlerter,
 )
 from tradebot.config import WATCHLIST
-from tradebot.costs import breakeven_move
+from tradebot.costs import select_contract
+from tradebot.events import active_event_window, events_for_date, has_earnings_before
 from tradebot.rendering import templates
 from tradebot.guard import validate_alert_data
 from tradebot import metrics
@@ -55,9 +56,24 @@ from tradebot.detectors import (
     score_cluster,
     tier_for_score,
 )
-from tradebot.journal import backfill_marks, code_version, connect, historical_performance, set_no_trade, tier_performance
+from tradebot.journal import (
+    backfill_marks,
+    code_version,
+    connect,
+    historical_performance,
+    iv_rank,
+    pending_contract_backfills,
+    record_contract_forward_mid,
+    record_contract_selection,
+    record_iv_sample,
+    set_news_driven,
+    set_no_trade,
+    tier_performance,
+)
 from tradebot.journal import write_cluster as journal_write_cluster
 from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData
+
+SIMILAR_SETUPS_LOOKBACK = 200  # deep enough to realistically reach costs.MIN_SIMILAR_SETUPS_SAMPLE (50)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO_ROOT / "data" / "cache"
@@ -244,6 +260,34 @@ def process_new_bar(
         code_version_str=version,
     )
     tier = tier_for_score(result["score"]).value
+    raw_tier_is_high = tier == "high"
+
+    # News/macro tagging — see tradebot.events module docstring: news is
+    # suppression and context, never an alert source. Any overlapping
+    # event window, regardless of severity or tier, marks this cluster
+    # news-driven: continuation stats don't transfer to event-driven
+    # moves, so a reader (and historical_performance()'s own sample pool)
+    # needs to know this one doesn't count as a clean technical setup.
+    event_window = active_event_window(conn, symbol, result["ts"])
+    news_driven = event_window is not None
+    if news_driven:
+        set_news_driven(conn, detection_id, True)
+
+    # HIGH-only blackout action — suppress or downgrade, stating why.
+    # MEDIUM/LOG are already batched, so there's no immediate-publish race
+    # for a blackout window to protect against; they're tagged above but
+    # not rerouted. The journal's own `tier` column (written above by
+    # journal_write_cluster) always reflects the true score-based tier —
+    # what changes below is only the tier used to route/publish this
+    # alert, which is exactly what "downgrade" and "suppress" mean.
+    if raw_tier_is_high and news_driven and event_window.severity == "downgrade":
+        logger.info(
+            "HIGH alert downgraded to MEDIUM by event window: symbol=%s kind=%s detail=%s source=%s",
+            symbol, event_window.kind, event_window.detail, event_window.source,
+        )
+        metrics.increment("event_window_downgrade", kind=event_window.kind)
+        tier = "medium"
+
     cluster = Cluster(
         id=detection_id,
         ts_utc=result["ts"].isoformat(),
@@ -260,7 +304,15 @@ def process_new_bar(
         code_version=version,
     )
 
-    decision = budget.evaluate(cluster)
+    if raw_tier_is_high and news_driven and event_window.severity == "suppress":
+        decision = Decision.SUPPRESS_NEWS_BLACKOUT
+        logger.info(
+            "HIGH alert suppressed by event window: symbol=%s kind=%s detail=%s source=%s",
+            symbol, event_window.kind, event_window.detail, event_window.source,
+        )
+        metrics.increment("event_window_suppression", kind=event_window.kind)
+    else:
+        decision = budget.evaluate(cluster)
     stats.record_cluster(tier, decision)
 
     if decision in (Decision.SEND, Decision.CAP_REACHED_NOTICE):
@@ -269,16 +321,58 @@ def process_new_bar(
             cluster, anchors, quote, bars=bars, now=now, primary_detection=result["primary_detection"],
         )
         if guard_reason is None:
-            try:
-                chain = chain_fn(symbol)
-            except NotImplementedError:
-                chain = None
-            breakeven = breakeven_move(chain, spot=result["close"], atr14=result["atr14"])
-            set_no_trade(conn, detection_id, breakeven is None)
-            history = historical_performance(
-                conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id
+            similar_setups = historical_performance(
+                conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id,
+                lookback=SIMILAR_SETUPS_LOOKBACK,
             )
-            text = templates.render_high_alert(cluster, anchors, quote, breakeven, history)
+
+            def bound_chain_fn(expiry, _sym=symbol):
+                try:
+                    return chain_fn(_sym, expiry)
+                except NotImplementedError:
+                    return None
+
+            def bound_iv_rank_fn(current_iv, _sym=symbol):
+                return iv_rank(conn, _sym, current_iv)
+
+            def bound_earnings_check_fn(expiry, _sym=symbol):
+                return has_earnings_before(conn, _sym, session_date, expiry)
+
+            selection = select_contract(
+                bound_chain_fn, symbol, spot=result["close"], direction=result["trend"], atr14=result["atr14"],
+                similar_setups=similar_setups, today=session_date,
+                iv_rank_fn=bound_iv_rank_fn, earnings_check_fn=bound_earnings_check_fn,
+            )
+            set_no_trade(conn, detection_id, not selection.is_tradable)
+
+            if selection.breakeven is not None:
+                primary_contract = selection.breakeven.legs[0].contract
+                if primary_contract.implied_volatility is not None:
+                    record_iv_sample(conn, symbol, session_date, primary_contract.implied_volatility)
+                short_leg = selection.breakeven.legs[1].contract if selection.breakeven.is_vertical else None
+                entry_mid = (primary_contract.bid + primary_contract.ask) / 2
+                if short_leg is not None:
+                    entry_mid -= (short_leg.bid + short_leg.ask) / 2
+                record_contract_selection(
+                    conn, detection_id, symbol=symbol, right=primary_contract.right, strike=primary_contract.strike,
+                    expiry=selection.expiry, dte=selection.dte, delta=primary_contract.delta, entry_mid=entry_mid,
+                    entry_ts=result["ts"], is_vertical=selection.breakeven.is_vertical,
+                    short_strike=short_leg.strike if short_leg else None,
+                    short_delta=short_leg.delta if short_leg else None,
+                )
+                logger.info(
+                    "contract selected: symbol=%s right=%s strike=%s expiry=%s dte=%s delta=%s vertical=%s insufficient_sample=%s",
+                    symbol, primary_contract.right, primary_contract.strike, selection.expiry, selection.dte,
+                    primary_contract.delta, selection.breakeven.is_vertical, selection.insufficient_sample,
+                )
+            else:
+                logger.info(
+                    "NO TRADE: symbol=%s reason=%s detail=%s expiry=%s",
+                    symbol, selection.no_trade.reason if selection.no_trade else "unknown",
+                    selection.no_trade.detail if selection.no_trade else "", selection.expiry,
+                )
+
+            text = templates.render_high_alert(cluster, anchors, quote, selection, similar_setups, news_driven=news_driven)
             alerter.send(text)
             conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
             if subscriber_hook is not None:
@@ -311,8 +405,11 @@ def process_new_bar(
                 conn.execute(
                     "UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id)
                 )
-    elif decision in (Decision.SUPPRESS_CAP, Decision.SUPPRESS_COOLDOWN):
-        conn.execute("UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id))
+    elif decision in (Decision.SUPPRESS_CAP, Decision.SUPPRESS_COOLDOWN, Decision.SUPPRESS_NEWS_BLACKOUT):
+        reason = decision.value
+        if decision == Decision.SUPPRESS_NEWS_BLACKOUT:
+            reason = f"{decision.value}:{event_window.kind}:{event_window.detail or event_window.source}"
+        conn.execute("UPDATE detections SET suppress_reason=? WHERE id=?", (reason, detection_id))
     conn.commit()
 
 
@@ -348,6 +445,7 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
 
     try:
         alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), clock["t"]))
+        alerter.send(templates.render_pre_open_card(events_for_date(conn, session_date), session_date, clock["t"]))
     except Exception:
         stats.errors.append(traceback.format_exc())
 
@@ -366,8 +464,8 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
         # around the last close purely so the alert has something to show.
         return Quote(symbol=symbol, ts=last.ts, bid=last.close - 0.02, ask=last.close + 0.02, last=last.close)
 
-    def chain_fn(symbol: str):
-        return md[symbol].chain(symbol, expiry=session_date)  # always raises — no chain in replay
+    def chain_fn(symbol: str, expiry: date):
+        return md[symbol].chain(symbol, expiry=expiry)  # always raises — no chain in replay
 
     halted = False
     while not halted:
@@ -449,6 +547,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
 
     try:
         alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now))
+        alerter.send(templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now))
     except Exception:
         stats.errors.append(traceback.format_exc())
 
@@ -510,7 +609,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                 process_new_bar(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
-                    lambda s, _sym=symbol: md[_sym].chain(s, expiry=session_date),
+                    lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
                     stats, subscriber_hook, now=loop_start,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start)

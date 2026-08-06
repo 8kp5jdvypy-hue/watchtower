@@ -15,6 +15,11 @@ from tradebot.journal import (
     connect,
     historical_performance,
     hour_performance,
+    iv_rank,
+    pending_contract_backfills,
+    record_contract_forward_mid,
+    record_contract_selection,
+    record_iv_sample,
     tier_performance,
     write_cluster,
 )
@@ -198,6 +203,33 @@ def test_historical_performance_filters_by_kind_and_trend_and_excludes_self(tmp_
     assert result.sample_size == 5  # 6 matching, minus the excluded one
 
 
+def test_historical_performance_excludes_news_driven_rows_from_the_sample(tmp_path):
+    """Continuation stats are built on technical-setup history and don't
+    transfer to an event-driven move — see tradebot.events module
+    docstring. A news_driven=1 row must never contaminate another
+    detection's Similar Setups sample, even though it otherwise matches
+    kind/trend."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # 5 clean-technical, continuing up-trend gaps
+    for i, mark in enumerate([105, 102, 101, 103, 104]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+    # A 6th, news-driven row that reversed hard — must not pull the sample down
+    news_id = _write_cluster_with_mark(
+        conn, kind="gap", trend="up", close=100.0, price_at_30=50,
+        ts_utc=(base + timedelta(minutes=100)).isoformat(),
+    )
+    conn.execute("UPDATE detections SET news_driven=1 WHERE id=?", (news_id,))
+    conn.commit()
+
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent", lookback=20)
+    assert result.sample_size == 5  # the news-driven row is excluded, not just down-weighted
+    assert result.continuation_rate == pytest.approx(1.0)  # all 5 clean rows continued
+
+
 def test_tier_performance_groups_by_tier_and_computes_real_stats(tmp_path):
     conn = connect(tmp_path / "journal.db")
     base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
@@ -280,3 +312,100 @@ def test_hour_performance_tier_none_includes_all_non_log_tiers(tmp_path):
     combined = hour_performance(conn, tier=None)
     assert scoped[14].sample_size == 5
     assert combined[14].sample_size == 8
+
+
+def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # each row's own atr14 differs — avg_return_atr must use each row's own,
+    # not a single borrowed value, to be a real "typical move in ATR" figure
+    rows = [(100.0, 102.0, 2.0), (100.0, 101.0, 0.5), (100.0, 103.0, 1.0), (100.0, 104.0, 4.0), (100.0, 99.0, 1.0)]
+    for i, (close, mark, atr14) in enumerate(rows):
+        detection_id = write_cluster(
+            conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="h", score=4.0, close=close, atr14=atr14,
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+        )
+        conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, mark))
+    conn.commit()
+
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent")
+    expected = sum(abs(m - c) / a for c, m, a in rows) / len(rows)
+    assert result.avg_return_atr == pytest.approx(expected)
+
+
+def test_historical_performance_avg_return_atr_is_none_when_no_row_has_atr14(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i in range(MIN_HISTORY_SAMPLE):
+        detection_id = write_cluster(
+            conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="h", score=4.0, close=100.0, atr14=None,
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+        )
+        conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 105))
+    conn.commit()
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent")
+    assert result.avg_return_atr is None
+
+
+def test_iv_rank_computes_a_real_rank_once_enough_history_exists(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    for i, iv in enumerate([0.20, 0.30, 0.40, 0.50, 0.60]):
+        record_iv_sample(conn, "GOOGL", date(2026, 6, 10 + i), iv)
+    rank, sample = iv_rank(conn, "GOOGL", current_iv=0.55)
+    assert sample == 5
+    assert rank == pytest.approx((0.55 - 0.20) / (0.60 - 0.20) * 100)
+
+
+def test_iv_rank_none_with_no_history():
+    conn = connect(":memory:")
+    rank, sample = iv_rank(conn, "GOOGL", current_iv=0.30)
+    assert rank is None and sample == 0
+
+
+def test_iv_rank_none_on_a_degenerate_range_never_divides_by_zero(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    for i in range(5):
+        record_iv_sample(conn, "GOOGL", date(2026, 6, 10 + i), 0.30)  # identical every day
+    rank, sample = iv_rank(conn, "GOOGL", current_iv=0.30)
+    assert rank is None and sample == 5
+
+
+def test_record_iv_sample_upserts_one_row_per_symbol_per_session(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    record_iv_sample(conn, "GOOGL", date(2026, 6, 10), 0.30)
+    record_iv_sample(conn, "GOOGL", date(2026, 6, 10), 0.35)  # same day, re-run
+    rows = conn.execute("SELECT iv FROM iv_history WHERE symbol = ? AND session = ?", ("GOOGL", "2026-06-10")).fetchall()
+    assert rows == [(0.35,)]
+
+
+def test_contract_selection_round_trips_and_forward_mid_backfill(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    entry_ts = datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)
+    record_contract_selection(
+        conn, "det1", symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13,
+        delta=-0.47, entry_mid=4.20, entry_ts=entry_ts,
+    )
+    row = conn.execute("SELECT symbol, right, strike, dte, delta, entry_mid FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()
+    assert row == ("GOOGL", "put", 365.0, 13, -0.47, 4.20)
+
+    pending = pending_contract_backfills(conn, entry_ts + timedelta(minutes=31), offset_min=30)
+    assert pending == [("det1", "GOOGL", "put", 365.0, "2026-08-14")]
+
+    record_contract_forward_mid(conn, "det1", 30, 4.05)
+    still_pending = pending_contract_backfills(conn, entry_ts + timedelta(minutes=31), offset_min=30)
+    assert still_pending == []
+    mid_30 = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()[0]
+    assert mid_30 == 4.05
+
+
+def test_record_contract_selection_is_idempotent_on_rerun(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    entry_ts = datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)
+    record_contract_selection(conn, "det1", symbol="GOOGL", right="put", strike=365.0, expiry=date(2026, 8, 14), dte=13, delta=-0.47, entry_mid=4.20, entry_ts=entry_ts)
+    record_contract_selection(conn, "det1", symbol="GOOGL", right="put", strike=370.0, expiry=date(2026, 8, 14), dte=13, delta=-0.30, entry_mid=6.00, entry_ts=entry_ts)
+    count = conn.execute("SELECT COUNT(*) FROM contract_selections").fetchone()[0]
+    assert count == 1
+    strike = conn.execute("SELECT strike FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()[0]
+    assert strike == 370.0

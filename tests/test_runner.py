@@ -13,6 +13,7 @@ import pytest
 
 from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
 from tradebot.detectors import DailyAnchors, Detection
+from tradebot.events import add_event_window
 from tradebot.marketdata import Bar, Quote
 from tradebot.journal import connect as journal_connect
 import tradebot.runner as runner_mod
@@ -100,7 +101,7 @@ def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(mon
     def quote_fn(symbol):
         return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
 
-    def chain_fn(symbol):
+    def chain_fn(symbol, expiry):
         raise NotImplementedError
 
     process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
@@ -119,7 +120,7 @@ def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_tex
     def quote_fn(symbol):
         return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
 
-    def chain_fn(symbol):
+    def chain_fn(symbol, expiry):
         raise NotImplementedError
 
     calls = []
@@ -145,7 +146,7 @@ def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_t
     def quote_fn(symbol):
         return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
 
-    def chain_fn(symbol):
+    def chain_fn(symbol, expiry):
         raise NotImplementedError
 
     def broken_hook(cluster, text):
@@ -220,7 +221,7 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
         # crossed quote — bid > ask — must trip the guard
         return Quote(symbol=symbol, ts=bar.ts, bid=101.0, ask=100.0, last=100.2)
 
-    def chain_fn(symbol):
+    def chain_fn(symbol, expiry):
         raise NotImplementedError
 
     with caplog.at_level("ERROR", logger="watchtower.runner"):
@@ -233,3 +234,239 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     assert row[1].startswith("data_integrity_failed: crossed_quote")
 
     assert metrics_mod.read_all(metrics_path) == {"validator_rejection{rule=crossed_quote}": 1}
+
+
+def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
+    """End-to-end: a real chain_fn produces a real ContractSelection that
+    reaches templates.render_high_alert and gets journaled — not a
+    None-chain stub like the other process_new_bar tests above."""
+    from tradebot.marketdata import OptionChain, OptionContract
+
+    anchors, bar, result = _high_tier_fixture()
+    result = {**result, "trend": "up"}  # bullish -> calls
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    # 100.2 spot, target delta 0.40-0.55 -> the 100-strike call at delta 0.50
+    contract = OptionContract(
+        symbol="TSLA_TEST_CALL", expiry=date(2026, 7, 31), strike=100.0, right="call",
+        bid=2.00, ask=2.05, last=2.02, delta=0.50, theta=-0.10, open_interest=1000,
+        implied_volatility=0.35, day_volume=500,
+    )
+
+    def chain_fn(symbol, expiry):
+        if expiry != date(2026, 7, 31):
+            return OptionChain(symbol=symbol, expiry=expiry, contracts=[])
+        return OptionChain(symbol=symbol, expiry=expiry, contracts=[contract])
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
+
+    detection_id = conn.execute("SELECT id FROM detections").fetchone()[0]
+    row = conn.execute(
+        "SELECT symbol, right, strike, dte, delta, is_vertical FROM contract_selections WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == ("TSLA", "call", 100.0, 8, 0.50, 0)
+
+    no_trade_flag = conn.execute("SELECT no_trade FROM detections WHERE id = ?", (detection_id,)).fetchone()[0]
+    assert no_trade_flag == 0  # a contract WAS selected
+
+    iv_row = conn.execute("SELECT iv FROM iv_history WHERE symbol = ?", ("TSLA",)).fetchone()
+    assert iv_row == (0.35,)
+
+
+def test_process_new_bar_blackouts_a_contract_when_a_real_earnings_event_falls_before_expiry(monkeypatch):
+    """End-to-end: runner.py's bound_earnings_check_fn now reads the real
+    event_windows table (tradebot.events.has_earnings_before) instead of
+    the old, always-empty telegram_bot.db events table — confirm the
+    wiring actually blocks a trade, not just that has_earnings_before()
+    works correctly in isolation."""
+    from tradebot.marketdata import OptionChain, OptionContract
+
+    anchors, bar, result = _high_tier_fixture()
+    result = {**result, "trend": "up"}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    # earnings between today (2026-07-23) and the expiry the fixture below
+    # will pick (2026-07-31, same DTE math as the test above)
+    add_event_window(
+        conn, symbol="TSLA", kind="earnings", start_utc=datetime(2026, 7, 28, 13, 30, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 7, 28, 20, 0, tzinfo=timezone.utc), severity="suppress", source="nasdaq_earnings",
+    )
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    contract = OptionContract(
+        symbol="TSLA_TEST_CALL", expiry=date(2026, 7, 31), strike=100.0, right="call",
+        bid=2.00, ask=2.05, last=2.02, delta=0.50, theta=-0.10, open_interest=1000,
+        implied_volatility=0.35, day_volume=500,
+    )
+
+    def chain_fn(symbol, expiry):
+        if expiry != date(2026, 7, 31):
+            return OptionChain(symbol=symbol, expiry=expiry, contracts=[])
+        return OptionChain(symbol=symbol, expiry=expiry, contracts=[contract])
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
+
+    detection_id = conn.execute("SELECT id FROM detections").fetchone()[0]
+    no_trade_flag = conn.execute("SELECT no_trade FROM detections WHERE id = ?", (detection_id,)).fetchone()[0]
+    assert no_trade_flag == 1
+    assert conn.execute("SELECT COUNT(*) FROM contract_selections").fetchone()[0] == 0
+
+
+def _no_op_chain_fn(symbol, expiry):
+    raise NotImplementedError
+
+
+def _flat_quote_fn(bar):
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+    return quote_fn
+
+
+def test_process_new_bar_suppresses_high_alert_inside_a_suppress_severity_event_window(monkeypatch):
+    """News as suppression, not an alert source: a HIGH cluster whose bar
+    close falls inside a 'suppress' severity event window must never be
+    sent, and the journal must say why — see tradebot.events module
+    docstring."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    add_event_window(
+        conn, symbol="TSLA", kind="8-K", start_utc=result["ts"] - timedelta(minutes=5),
+        end_utc=result["ts"] + timedelta(minutes=5), severity="suppress", source="test", detail="material event",
+    )
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    row = conn.execute("SELECT alerted, suppress_reason, tier, news_driven FROM detections").fetchone()
+    assert row[0] == 0  # never alerted
+    assert row[1] == "news_blackout:8-K:material event"
+    assert row[2] == "high"  # the journal's ground-truth tier is score-based and unaffected
+    assert row[3] == 1
+    assert stats.suppression_counts["news_blackout"] == 1
+
+
+def test_process_new_bar_downgrades_high_alert_inside_a_downgrade_severity_event_window(monkeypatch):
+    """A 'downgrade' severity window still gets a look — just batched into
+    the medium digest instead of pushed immediately as HIGH."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    add_event_window(
+        conn, symbol="TSLA", kind="earnings", start_utc=result["ts"] - timedelta(minutes=5),
+        end_utc=result["ts"] + timedelta(minutes=5), severity="downgrade", source="test", detail="earnings day",
+    )
+    clock = {"t": bar.ts}
+    budget = AlertBudget(now=lambda: clock["t"])
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    row = conn.execute("SELECT alerted, suppress_reason, tier, news_driven FROM detections").fetchone()
+    assert row[0] == 0  # not alerted immediately — queued for the medium digest instead
+    assert row[1] is None  # queued, not suppressed
+    assert row[2] == "high"  # ground-truth journal tier still reflects the real score
+    assert row[3] == 1
+    assert stats.tier_counts["medium"] == 1  # routed as medium from here on
+    assert "high" not in stats.tier_counts
+
+    # Prove it actually landed in the medium queue (not lost, not sent as
+    # high) by crossing an hour boundary and popping the digest.
+    clock["t"] = clock["t"] + timedelta(hours=1)
+    digest = budget.pop_medium_digest_if_due()
+    assert digest is not None and len(digest) == 1
+    assert digest[0].symbol == "TSLA" and digest[0].tier == "medium"
+
+
+def test_process_new_bar_event_window_suppression_does_not_burn_cap_or_cooldown(monkeypatch):
+    """A blackout-suppressed HIGH alert must never reach AlertBudget.evaluate()
+    at all — otherwise it would silently consume the daily HIGH cap or start
+    the per-(symbol, kind) cooldown for an alert nobody ever saw, blocking a
+    later, legitimate alert of the same kind."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+
+    conn = journal_connect(":memory:")
+    add_event_window(
+        conn, symbol="TSLA", kind="8-K", start_utc=result["ts"] - timedelta(minutes=5),
+        end_utc=result["ts"] + timedelta(minutes=5), severity="suppress", source="test", detail="material event",
+    )
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    # A second bar, same symbol/kind, at the SAME budget "now" — if the
+    # first (suppressed) alert had wrongly started the cooldown, this one
+    # would see zero elapsed time and get suppressed too. Its bar close is
+    # past the event window's end (which runs to result["ts"] + 5min), so
+    # only the cooldown could stop it.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=10), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    result2 = {**result, "ts": result["ts"] + timedelta(minutes=10)}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result2)
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
+        _flat_quote_fn(bar2), _no_op_chain_fn, stats,
+    )
+
+    rows = conn.execute("SELECT alerted, suppress_reason FROM detections ORDER BY ts_utc").fetchall()
+    assert len(rows) == 2
+    assert rows[0] == (0, "news_blackout:8-K:material event")
+    assert rows[1] == (1, None)  # sent normally — cooldown was never started by the blackout
+
+
+def test_process_new_bar_tags_but_does_not_reroute_non_high_tiers_inside_an_event_window(monkeypatch):
+    """Suppress/downgrade ROUTING only applies to HIGH — MEDIUM/LOG are
+    already batched, so there's no immediate-publish race for a blackout
+    window to protect against. But news_driven TAGGING applies to every
+    tier: a medium-tier cluster overlapping a known event is still not a
+    clean technical setup, and historical_performance() excludes it from
+    the sample pool regardless of tier. See tradebot.events module
+    docstring."""
+    anchors, bar, result = _high_tier_fixture()
+    medium_result = {**result, "score": 3.0}  # below HIGH threshold
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: medium_result)
+
+    conn = journal_connect(":memory:")
+    add_event_window(
+        conn, symbol="TSLA", kind="8-K", start_utc=medium_result["ts"] - timedelta(minutes=5),
+        end_utc=medium_result["ts"] + timedelta(minutes=5), severity="suppress", source="test", detail="material event",
+    )
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    row = conn.execute("SELECT suppress_reason, tier, news_driven FROM detections").fetchone()
+    assert row[0] is None  # normal medium routing (queued, not suppressed) — untouched by the event window
+    assert row[1] == "medium"
+    assert row[2] == 1  # tagged news-driven regardless of tier

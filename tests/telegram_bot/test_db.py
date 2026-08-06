@@ -210,9 +210,3 @@ def test_personal_stats_reports_once_min_sample_is_met():
     assert n == db.MIN_STAT_SAMPLE and win_rate == 1.0
 
 
-def test_events_reports_nothing_loaded_rather_than_fabricating():
-    conn = _conn()
-    assert db.list_events_for_date(conn, date(2026, 7, 23)) == []
-    db.add_event(conn, date(2026, 7, 23), "earnings", "before the open", symbol="TSLA")
-    events = db.list_events_for_date(conn, date(2026, 7, 23))
-    assert events == [{"symbol": "TSLA", "kind": "earnings", "note": "before the open"}]

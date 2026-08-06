@@ -83,14 +83,6 @@ CREATE TABLE IF NOT EXISTS alert_responses (
     response TEXT NOT NULL,
     ts_utc TEXT NOT NULL
 );
-
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_date TEXT NOT NULL,
-    symbol TEXT,
-    kind TEXT NOT NULL,
-    note TEXT NOT NULL
-);
 """
 
 
@@ -627,24 +619,3 @@ def personal_stats(conn: sqlite3.Connection, telegram_user_id: int) -> dict:
         "open_trades": dangling,
     }
 
-
-# --------------------------------------------------------------------------
-# Events (earnings / macro calendar) — empty until someone populates it;
-# /events reports "nothing loaded" rather than fabricating a calendar.
-# --------------------------------------------------------------------------
-
-
-def add_event(conn: sqlite3.Connection, event_date: date, kind: str, note: str, symbol: str | None = None) -> None:
-    conn.execute(
-        "INSERT INTO events (event_date, symbol, kind, note) VALUES (?, ?, ?, ?)",
-        (event_date.isoformat(), symbol, kind, note),
-    )
-    conn.commit()
-
-
-def list_events_for_date(conn: sqlite3.Connection, event_date: date) -> list[dict]:
-    rows = conn.execute(
-        "SELECT symbol, kind, note FROM events WHERE event_date = ? ORDER BY symbol IS NULL, symbol",
-        (event_date.isoformat(),),
-    ).fetchall()
-    return [{"symbol": s, "kind": k, "note": n} for s, k, n in rows]
