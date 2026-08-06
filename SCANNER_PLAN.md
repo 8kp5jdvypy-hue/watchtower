@@ -75,6 +75,36 @@ and `scripts/hour_report.py` exist to keep tracking it as an
 alert — so the question can be revisited once there's enough data for a
 train/test split to actually agree with itself.
 
+## Before/after: did the detector changes actually help?
+
+Checked 2026-08-05, after adding `vwap_break`, `round_number_break`, and
+20-day swing high/low to `level_break` (see git commit `22d5f57`).
+Method: checked out the pre-change code (`git worktree`, commit `a5feff0`
+— 4 detectors, `TIER_HIGH=3.0`) into an isolated directory pointed at the
+exact same 143 cached sessions, ran its own replay into a separate
+journal, and compared HIGH-tier outcomes against current code on the
+same original 6-symbol watchlist (both use the same edge-triggering fix
+for `level_break`/`rvol_spike`, which predates the first commit, so it
+isn't a factor in this comparison).
+
+| | n | Continued | Avg return | (+30min) |
+|---|---|---|---|---|
+| BEFORE (4 detectors, `TIER_HIGH=3.0`) | 349 | 49.9% | -0.03% | |
+| AFTER (6 detectors, `TIER_HIGH=3.4`), same 6 symbols | 260 | 51.2% | +0.07% | |
+| AFTER, all 11 symbols (current production) | 395 | 50.6% | +0.06% | |
+
+Consistent across +15/+30/+60min: AFTER beat BEFORE on both continuation
+rate and average return at every horizon (z-scores 0.32-0.63) — but none
+of those individual differences clear the ~1.96 threshold for
+statistical significance at this sample size. Watchlist expansion
+(6→11 symbols) was roughly neutral for accuracy (50.6% vs. 51.2%): more
+coverage without diluting quality.
+
+**Honest conclusion: directionally favorable and consistent, not yet
+statistically proven.** "Not worse, plausibly a little better, needs
+more data to be sure" — not "improved." Worth re-running this same
+before/after comparison periodically as more sessions accumulate.
+
 ## Alert format
 
 Plain text with emojis, not HTML/Markdown — renders cleanly in both
