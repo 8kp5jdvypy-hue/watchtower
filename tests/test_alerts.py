@@ -1,4 +1,7 @@
-"""Tests for tradebot.alerts — format_alert() and the AlertBudget logic.
+"""Tests for tradebot.alerts — AlertBudget decision logic and
+TelegramAlerter delivery. Message rendering itself is covered by
+tests/test_templates.py (golden-file tests) — this module is only
+WHETHER/WHEN to send and HOW to deliver.
 
 AlertBudget takes an injectable clock, so these tests never sleep or
 depend on real time.
@@ -6,28 +9,12 @@ depend on real time.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock, patch
 
-from tradebot.alerts import AlertBudget, Cluster, Decision, format_alert
-from tradebot.costs import Breakeven
-from tradebot.detectors import DailyAnchors
-from tradebot.journal import HistoricalPerformance
-from tradebot.marketdata import OptionContract, Quote
+import pytest
+import requests
 
-
-def _anchors() -> DailyAnchors:
-    return DailyAnchors(
-        symbol="TSLA",
-        session_date=datetime(2026, 7, 23).date(),
-        prior_close=425.5,
-        prior_high=427.0,
-        prior_low=424.0,
-        opening_range_high=430.0,
-        opening_range_low=428.0,
-        opening_range_volume=100_000,
-        swing_high=432.0,
-        swing_low=420.0,
-        avg_cum_volume_by_bar={},
-    )
+from tradebot.alerts import AlertBudget, Cluster, Decision, TelegramAlerter
 
 
 class FakeClock:
@@ -49,6 +36,7 @@ def _cluster(symbol="TSLA", kinds="gap", tier="high", score=5.0, cid="abc123") -
         symbol=symbol,
         kinds=kinds,
         headlines="fake headline",
+        primary_headline="fake headline",
         score=score,
         tier=tier,
         close=431.2,
@@ -56,65 +44,6 @@ def _cluster(symbol="TSLA", kinds="gap", tier="high", score=5.0, cid="abc123") -
         trend="up",
         code_version="f665fba",
     )
-
-
-def _breakeven() -> Breakeven:
-    contract = OptionContract(
-        symbol="TSLA260731C00430000", expiry=datetime(2026, 7, 31).date(), strike=430.0,
-        right="call", bid=5.0, ask=5.2, last=5.1, delta=0.5, theta=-0.3, open_interest=1200,
-    )
-    return Breakeven(pct=0.0085, atr_units=1.23, contract=contract)
-
-
-def _history() -> HistoricalPerformance:
-    return HistoricalPerformance(sample_size=20, continuation_rate=0.65, avg_return_pct=0.80, offset_min=30)
-
-
-def test_format_alert_matches_the_scanner_plan_layout():
-    cluster = _cluster(kinds="gap,rvol_spike")
-    quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=431.1, ask=431.3, last=431.22)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
-    lines = text.split("\n")
-    assert lines[0] == "🔴 HIGH — TSLA 📈"
-    assert lines[1] == "gap, rvol_spike"
-    assert lines[2] == ""
-    assert lines[3] == "🎯 BULLISH — favors calls"
-    assert lines[4] == ""
-    assert lines[5] == "fake headline"
-    assert lines[6] == ""
-    assert lines[7] == "📊 Score: 5.00 ATR"
-    assert lines[8] == "💵 Close: $431.20  (ATR14: 3.85)"
-    assert lines[9] == "⚖️ Breakeven (60m): 0.85% (1.23 ATR)"
-    assert lines[10] == "📚 Similar setups: 65% continued (n=20), avg +0.80% at 30m"
-    assert lines[11] == "📐 Range: $428.00-$430.00  |  Prior close: $425.50"
-    assert lines[12] == "💹 Quote: $431.10 / $431.30  (last $431.22)"
-    assert lines[13] == ""
-    assert lines[14] == "🕐 2026-07-23 09:35 ET"
-    assert lines[15] == "🆔 abc123 · vf665fba"
-
-
-def test_format_alert_bearish_trend_favors_puts():
-    cluster = _cluster()
-    cluster = Cluster(**{**cluster.__dict__, "trend": "down"})
-    quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
-    assert "🎯 BEARISH — favors puts" in text
-
-
-def test_format_alert_handles_missing_atr():
-    cluster = _cluster()
-    cluster = Cluster(**{**cluster.__dict__, "atr14": None})
-    quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=_breakeven(), history=_history())
-    assert "(ATR14: n/a)" in text
-
-
-def test_format_alert_shows_no_tradable_contract_when_breakeven_is_none():
-    cluster = _cluster()
-    quote = Quote(symbol="TSLA", ts=datetime(2026, 7, 23, 13, 35, tzinfo=timezone.utc), bid=1, ask=1, last=1)
-    text = format_alert(cluster, anchors=_anchors(), quote=quote, breakeven=None, history=None)
-    assert "⚖️ Breakeven (60m): no tradable contract" in text
-    assert "📚 Similar setups: not enough history yet" in text
 
 
 def test_high_tier_sends_up_to_the_daily_cap_then_notices_once_then_suppresses():
@@ -191,3 +120,85 @@ def test_budget_resets_on_a_new_day():
 
     clock.advance(hours=1)  # crosses midnight UTC
     assert budget.evaluate(_cluster(symbol="TSLA", cid="c")) == Decision.SEND
+
+
+def test_telegram_alerter_retries_on_429_then_succeeds(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    alerter = TelegramAlerter()
+
+    rate_limited = MagicMock(status_code=429)
+    rate_limited.json.return_value = {"parameters": {"retry_after": 0.01}}
+    ok = MagicMock(status_code=200)
+
+    with patch("tradebot.alerts.requests.post", side_effect=[rate_limited, ok]) as mock_post, \
+         patch("tradebot.alerts.time.sleep") as mock_sleep:
+        alerter.send("hello")
+
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once_with(0.01)  # honored Telegram's own retry_after hint
+    ok.raise_for_status.assert_called_once()
+    rate_limited.raise_for_status.assert_not_called()  # never raised on the retryable attempt
+
+
+def test_telegram_alerter_sends_html_parse_mode(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    alerter = TelegramAlerter()
+
+    ok = MagicMock(status_code=200)
+    with patch("tradebot.alerts.requests.post", return_value=ok) as mock_post:
+        alerter.send("<b>hi</b>")
+
+    assert mock_post.call_args.kwargs["json"]["parse_mode"] == "HTML"
+
+
+def test_telegram_alerter_raises_after_max_retries_exhausted(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    alerter = TelegramAlerter()
+
+    rate_limited = MagicMock(status_code=429)
+    rate_limited.json.return_value = {"parameters": {"retry_after": 0.01}}
+    rate_limited.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
+
+    with patch("tradebot.alerts.requests.post", return_value=rate_limited) as mock_post, \
+         patch("tradebot.alerts.time.sleep"):
+        with pytest.raises(requests.exceptions.HTTPError):
+            alerter.send("hello", max_retries=3)
+
+    assert mock_post.call_count == 3
+
+
+def test_telegram_alerter_retries_on_network_timeout_then_succeeds(monkeypatch):
+    """Real failure this caught: a transient ReadTimeout during a live
+    send used to propagate straight up and crash the whole runner."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    alerter = TelegramAlerter()
+
+    ok = MagicMock(status_code=200)
+
+    with patch(
+        "tradebot.alerts.requests.post",
+        side_effect=[requests.exceptions.ReadTimeout("timed out"), ok],
+    ) as mock_post, patch("tradebot.alerts.time.sleep") as mock_sleep:
+        alerter.send("hello")
+
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once()  # backed off before retrying
+    ok.raise_for_status.assert_called_once()
+
+
+def test_telegram_alerter_raises_after_network_timeouts_exhaust_retries(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "fake-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    alerter = TelegramAlerter()
+
+    with patch(
+        "tradebot.alerts.requests.post", side_effect=requests.exceptions.ReadTimeout("timed out")
+    ) as mock_post, patch("tradebot.alerts.time.sleep"):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            alerter.send("hello", max_retries=3)
+
+    assert mock_post.call_count == 3

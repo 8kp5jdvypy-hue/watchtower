@@ -82,9 +82,3 @@ def breakeven_move(
     pct = total_cost / (abs(contract.delta) * 100 * spot)
     atr_units = (pct * spot) / atr14 if atr14 else float("inf")
     return Breakeven(pct=pct, atr_units=atr_units, contract=contract)
-
-
-def format_breakeven(breakeven: Breakeven | None) -> str:
-    if breakeven is None:
-        return "no tradable contract"
-    return f"{breakeven.pct:.2%} ({breakeven.atr_units:.2f} ATR)"

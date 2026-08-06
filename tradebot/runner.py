@@ -32,16 +32,16 @@ import exchange_calendars as ecals
 import requests
 
 from tradebot.alerts import (
-    TREND_EMOJI,
     AlertBudget,
     Cluster,
     ConsoleAlerter,
     Decision,
     TelegramAlerter,
-    format_alert,
 )
 from tradebot.config import WATCHLIST
 from tradebot.costs import breakeven_move
+from tradebot.formatting import templates
+from tradebot.formatting.guard import validate_alert_data
 from tradebot.detectors import (
     DETECTORS,
     Bar,
@@ -121,80 +121,6 @@ class HeartbeatStats:
         if decision != Decision.SEND:
             self.suppression_counts[decision.value] += 1
 
-    def summary_text(self, end_time: datetime, tier_perf: dict | None = None) -> str:
-        uptime = end_time - self.start_time
-        lines = [
-            f"💓 Heartbeat — {self.session_date}",
-            "",
-            f"⏱️ Uptime: {uptime}",
-            f"📊 Detections by tier: {dict(self.tier_counts)}",
-            f"🚫 Suppressions: {dict(self.suppression_counts)}",
-            f"🕳️ Data gaps: {len(self.data_gaps)}",
-        ]
-        lines.extend(f"  - {g}" for g in self.data_gaps)
-        lines.append(f"❗ Errors: {len(self.errors)}")
-        if tier_perf:
-            lines.append("")
-            lines.append(f"📈 Tier track record (+{next(iter(tier_perf.values())).offset_min}m, all-time):")
-            lines.extend(f"  {line}" for line in format_tier_performance_lines(tier_perf))
-        return "\n".join(lines)
-
-
-def format_tier_performance_lines(tier_perf: dict) -> list[str]:
-    """One line per tier: real continuation rate + avg return from
-    journal.tier_performance() — never fabricated, omitted entirely by
-    tier_performance() itself when there isn't enough sample yet."""
-    order = {"high": 0, "medium": 1, "log": 2}
-    lines = []
-    for tier in sorted(tier_perf, key=lambda t: order.get(t, 99)):
-        tp = tier_perf[tier]
-        lines.append(
-            f"{tier.upper()}: {tp.continuation_rate * 100:.1f}% continued "
-            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}%"
-        )
-    return lines
-
-
-def format_morning_briefing(conn) -> str:
-    """Rules grounded in what's actually been tested against this
-    project's own data — not conventional wisdom. Sent once at the start
-    of a run, before the first bar close. See SCANNER_PLAN.md for the
-    validation behind each rule (best-hours and confirmation-delay were
-    both tested and rejected; don't reintroduce them without re-testing)."""
-    lines = [
-        "🌅 Morning Briefing — Rules for Today",
-        "",
-        "1️⃣ Only treat 🔴 HIGH tier as actionable. MEDIUM/LOG are for",
-        "   awareness only — tested, they sit at ~49% continued, ~0% avg",
-        "   return, statistically indistinguishable from a coin flip.",
-        "2️⃣ Act on a HIGH alert when it fires, not a bar later. Waiting",
-        "   for a 'confirmation' bar was tested and made outcomes WORSE",
-        "   (fewer trades, lower win rate) — don't chase the move.",
-        "3️⃣ There is no proven best time of day. An hour-of-day rule was",
-        "   tested with a real train/test split and rejected — the",
-        "   pattern inverted between halves of the data. Trade HIGH",
-        "   alerts whenever they fire, not on a schedule.",
-        "4️⃣ Read 📚 Similar Setups before acting. A low historical",
-        "   continuation rate for that exact kind+direction is a real",
-        "   reason to sit it out, not just decoration.",
-        "5️⃣ Compare Score against ⚖️ Breakeven. If the move needed to",
-        "   profit is bigger than what similar setups typically deliver,",
-        "   skip it — 'no tradable contract' means skip it outright.",
-        "6️⃣ Respect the daily cap and cooldown. They exist to stop",
-        "   overtrading, not to be worked around.",
-    ]
-    tier_perf = tier_performance(conn)
-    if "high" in tier_perf:
-        tp = tier_perf["high"]
-        lines.append("")
-        lines.append(
-            f"📊 Current HIGH-tier track record: {tp.continuation_rate * 100:.1f}% continued "
-            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}% at {tp.offset_min}m"
-        )
-    lines.append("")
-    lines.append("Patterns in this bot's own journaled history, not guarantees. Not financial advice.")
-    return "\n".join(lines)
-
 
 def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | None:
     detections = [d for d in (detector(bars, anchors) for detector in DETECTORS) if d is not None]
@@ -206,12 +132,14 @@ def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | 
         assert d.ts >= expected_close, (
             f"lookahead violation: {d.kind} detection ts={d.ts} precedes bar close={expected_close} for {symbol}"
         )
+    primary = max(detections, key=lambda d: d.score)
     return {
         "ts": expected_close,
         "close": last.close,
         "atr14": atr(bars),
         "kinds": ",".join(d.kind for d in detections),
-        "primary_kind": max(detections, key=lambda d: d.score).kind,
+        "primary_kind": primary.kind,
+        "primary_headline": primary.headline,
         "headlines": "; ".join(d.headline for d in detections),
         "score": score_cluster(detections),
         "trend": "up" if last.close >= anchors.prior_close else "down",
@@ -287,6 +215,7 @@ def process_new_bar(
         symbol=symbol,
         kinds=result["kinds"],
         headlines=result["headlines"],
+        primary_headline=result["primary_headline"],
         score=result["score"],
         tier=tier,
         close=result["close"],
@@ -300,57 +229,55 @@ def process_new_bar(
 
     if decision in (Decision.SEND, Decision.CAP_REACHED_NOTICE):
         quote = quote_fn(symbol)
-        try:
-            chain = chain_fn(symbol)
-        except NotImplementedError:
-            chain = None
-        breakeven = breakeven_move(chain, spot=result["close"], atr14=result["atr14"])
-        history = historical_performance(
-            conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id
-        )
-        alerter.send(format_alert(cluster, anchors, quote, breakeven, history))
-        conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
+        guard_reason = validate_alert_data(cluster, anchors, quote)
+        if guard_reason is None:
+            try:
+                chain = chain_fn(symbol)
+            except NotImplementedError:
+                chain = None
+            breakeven = breakeven_move(chain, spot=result["close"], atr14=result["atr14"])
+            history = historical_performance(
+                conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id
+            )
+            alerter.send(templates.render_high_alert(cluster, anchors, quote, breakeven, history))
+            conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
+        else:
+            stats.errors.append(f"{symbol}: alert suppressed by data guard — {guard_reason}")
+            conn.execute(
+                "UPDATE detections SET suppress_reason=? WHERE id=?",
+                (f"data_integrity_failed: {guard_reason}", detection_id),
+            )
         if decision == Decision.CAP_REACHED_NOTICE:
             alerter.send(
-                f"⚠️ System — daily high-tier alert cap ({budget.max_high_per_day}) reached. "
-                "Suppressing further HIGH alerts today."
+                templates.render_system_notice(
+                    f"Daily high-tier alert cap ({budget.max_high_per_day}) reached. "
+                    "Suppressing further HIGH alerts today.",
+                    result["ts"],
+                )
             )
-            conn.execute(
-                "UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id)
-            )
+            if guard_reason is None:
+                conn.execute(
+                    "UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id)
+                )
     elif decision in (Decision.SUPPRESS_CAP, Decision.SUPPRESS_COOLDOWN):
         conn.execute("UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id))
     conn.commit()
 
 
-def send_medium_digest_if_due(budget: AlertBudget, alerter, conn) -> None:
+def send_medium_digest_if_due(budget: AlertBudget, alerter, conn, when: datetime) -> None:
     digest = budget.pop_medium_digest_if_due()
     if not digest:
         return
-    lines = [f"🟡 Medium Digest — {len(digest)} cluster(s)"]
-    tier_perf = tier_performance(conn)
-    if "medium" in tier_perf:
-        tp = tier_perf["medium"]
-        lines.append(
-            f"📈 Track record: {tp.continuation_rate * 100:.1f}% continued "
-            f"(n={tp.sample_size}), avg {tp.avg_return_pct:+.2f}% at {tp.offset_min}m"
-        )
-    lines.append("")
-    for c in digest:
-        emoji = TREND_EMOJI.get(c.trend, "•")
-        lines.append(f"{emoji} {c.symbol} · {c.kinds} · score {c.score:.2f}")
-        lines.append(f"   {c.headlines}")
-    alerter.send("\n".join(lines))
+    tier_perf = tier_performance(conn).get("medium")
+    alerter.send(templates.render_digest("Medium Digest", "medium", digest, tier_perf, when))
 
 
-def send_log_summary(budget: AlertBudget, alerter) -> None:
+def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None:
     summary = budget.pop_log_summary()
     if not summary:
         return
-    lines = [f"⚪ Log Summary — {len(summary)} sub-threshold detection(s) today", ""]
-    by_symbol = Counter(c.symbol for c in summary)
-    lines += [f"{symbol}: {count}" for symbol, count in by_symbol.most_common()]
-    alerter.send("\n".join(lines))
+    tier_perf = tier_performance(conn).get("log")
+    alerter.send(templates.render_log_summary(summary, tier_perf, when))
 
 
 # --------------------------------------------------------------------------
@@ -367,7 +294,10 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
     budget = AlertBudget(now=lambda: clock["t"])
     stats = HeartbeatStats(start_time=open_ts, session_date=session_date)
 
-    alerter.send(format_morning_briefing(conn))
+    try:
+        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), clock["t"]))
+    except Exception:
+        stats.errors.append(traceback.format_exc())
 
     historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
     history_by_symbol = {
@@ -418,22 +348,32 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], quote_fn, chain_fn, stats,
                 )
-                send_medium_digest_if_due(budget, alerter, conn)
+                send_medium_digest_if_due(budget, alerter, conn, clock["t"])
             except Exception:
                 stats.errors.append(traceback.format_exc())
-                alerter.send(f"❌ Error — {symbol}: exception during evaluation. See logs. Continuing.")
+                try:
+                    alerter.send(
+                        templates.render_system_notice(
+                            f"{symbol}: exception during evaluation. See logs. Continuing.", clock["t"]
+                        )
+                    )
+                except Exception:
+                    pass
                 continue
 
         if HALT_FILE.exists():
-            alerter.send("🛑 System — HALT file present. Stopping replay.")
+            alerter.send(templates.render_system_notice("HALT file present. Stopping replay.", clock["t"]))
             halted = True
         if not any_advanced:
             break
 
-    send_log_summary(budget, alerter)
+    send_log_summary(budget, alerter, conn, clock["t"])
     marks_written = backfill_marks(conn, session_date)
     print(f"backfilled {marks_written} forward-price marks")
-    heartbeat = stats.summary_text(clock["t"], tier_perf=tier_performance(conn))
+    heartbeat = templates.render_heartbeat(
+        session_date, clock["t"] - open_ts, stats.tier_counts, stats.suppression_counts,
+        stats.data_gaps, stats.errors, tier_performance(conn), clock["t"],
+    )
     alerter.send(heartbeat)
     conn.close()
     return stats
@@ -455,7 +395,10 @@ def run_live(alerter) -> HeartbeatStats:
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
     stats = HeartbeatStats(start_time=now, session_date=session_date)
 
-    alerter.send(format_morning_briefing(conn))
+    try:
+        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now))
+    except Exception:
+        stats.errors.append(traceback.format_exc())
 
     historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
     history_by_symbol = {
@@ -476,7 +419,7 @@ def run_live(alerter) -> HeartbeatStats:
         if loop_start >= close_ts:
             break
         if HALT_FILE.exists() or (halt_checker is not None and halt_checker.check()):
-            alerter.send("🛑 System — halt requested. Stopping.")
+            alerter.send(templates.render_system_notice("halt requested. Stopping.", loop_start))
             break
 
         for symbol in WATCHLIST:
@@ -487,8 +430,11 @@ def run_live(alerter) -> HeartbeatStats:
                 if is_stale(bar_close_ts(rth_bars[-1]), loop_start):
                     if not stale_notified:
                         alerter.send(
-                            f"⏳ System — {symbol} data is stale (>{STALENESS_SECONDS}s). "
-                            "Suppressing alerts until fresh."
+                            templates.render_system_notice(
+                                f"{symbol} data is stale (>{STALENESS_SECONDS}s). "
+                                "Suppressing alerts until fresh.",
+                                loop_start,
+                            )
                         )
                         stale_notified = True
                     continue
@@ -515,11 +461,15 @@ def run_live(alerter) -> HeartbeatStats:
                     lambda s, _sym=symbol: md[_sym].chain(s, expiry=session_date),
                     stats,
                 )
-                send_medium_digest_if_due(budget, alerter, conn)
+                send_medium_digest_if_due(budget, alerter, conn, loop_start)
             except Exception:
                 stats.errors.append(traceback.format_exc())
                 try:
-                    alerter.send(f"❌ Error — {symbol}: exception during evaluation. See logs. Continuing.")
+                    alerter.send(
+                        templates.render_system_notice(
+                            f"{symbol}: exception during evaluation. See logs. Continuing.", loop_start
+                        )
+                    )
                 except Exception:
                     pass
                 continue
@@ -527,9 +477,14 @@ def run_live(alerter) -> HeartbeatStats:
         elapsed = (datetime.now(timezone.utc) - loop_start).total_seconds()
         time.sleep(max(0.0, BAR_MINUTES * 60 - elapsed))
 
-    send_log_summary(budget, alerter)
+    end_time = datetime.now(timezone.utc)
+    send_log_summary(budget, alerter, conn, end_time)
     backfill_marks(conn, session_date)
-    alerter.send(stats.summary_text(datetime.now(timezone.utc), tier_perf=tier_performance(conn)))
+    heartbeat = templates.render_heartbeat(
+        session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
+        stats.data_gaps, stats.errors, tier_performance(conn), end_time,
+    )
+    alerter.send(heartbeat)
     conn.close()
     return stats
 

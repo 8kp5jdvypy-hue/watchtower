@@ -1,32 +1,28 @@
-"""Alert formatting, delivery, and budgeting.
+"""Alert delivery and budgeting.
 
-format_alert() produces the layout in SCANNER_PLAN.md's "Alert format"
-section. AlertBudget decides whether a cluster gets pushed now, batched,
-or suppressed — see CLAUDE.md: live alerting is opt-in, default log-only.
+Message rendering lives in tradebot.formatting (templates.py + fields.py)
+— this module only decides WHETHER and WHEN to send (AlertBudget) and
+HOW to deliver (ConsoleAlerter / TelegramAlerter). See CLAUDE.md: live
+alerting is opt-in, default log-only.
 """
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Callable
-from zoneinfo import ZoneInfo
 
 import requests
-
-from tradebot.costs import Breakeven, format_breakeven
-from tradebot.detectors import DailyAnchors
-from tradebot.journal import HistoricalPerformance
-from tradebot.marketdata import Quote
-
-ET = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
 class Cluster:
     """A journaled detection cluster, as needed to render an alert. Field
-    names mirror the journal's detections table."""
+    names mirror the journal's detections table, plus primary_headline —
+    the highest-scoring constituent detection's own headline, used as the
+    alert's one-sentence rationale (not the full semicolon-chained list)."""
 
     id: str
     ts_utc: str
@@ -34,77 +30,13 @@ class Cluster:
     symbol: str
     kinds: str
     headlines: str
+    primary_headline: str
     score: float
     tier: str
     close: float
     atr14: float | None
     trend: str
     code_version: str
-
-
-TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
-TREND_EMOJI = {"up": "📈", "down": "📉"}
-# direction -> (label, favored option side). Mechanical translation of the
-# break direction, not a prediction — pair with the history line below to
-# see how reliable that direction actually is.
-BIAS_TEXT = {"up": ("BULLISH", "calls"), "down": ("BEARISH", "puts")}
-
-
-def format_history(history: HistoricalPerformance | None) -> str:
-    if history is None:
-        return "not enough history yet"
-    pct = history.continuation_rate * 100
-    return (
-        f"{pct:.0f}% continued (n={history.sample_size}), "
-        f"avg {history.avg_return_pct:+.2f}% at {history.offset_min}m"
-    )
-
-
-def format_alert(
-    cluster: Cluster,
-    anchors: DailyAnchors,
-    quote: Quote,
-    breakeven: Breakeven | None,
-    history: HistoricalPerformance | None,
-) -> str:
-    """Render a cluster as the exact layout in SCANNER_PLAN.md.
-
-    `breakeven` is costs.breakeven_move()'s result for a 60-minute hold —
-    pass None when there's no tradable ATM contract; never fabricate one.
-
-    `history` is journal.historical_performance()'s result for this
-    cluster's primary kind + trend — a real base rate from past alerts'
-    backfilled outcomes, not a forecast. Pass None when there isn't
-    enough sample history yet; never fabricate a stat.
-
-    Plain text with emojis, not HTML/Markdown — renders cleanly in both
-    Telegram and ConsoleAlerter's plain stdout without needing parse_mode
-    or escaping."""
-    ts_et = datetime.fromisoformat(cluster.ts_utc).astimezone(ET).strftime("%Y-%m-%d %H:%M")
-    atr_text = f"{cluster.atr14:.2f}" if cluster.atr14 is not None else "n/a"
-    kinds_text = ", ".join(cluster.kinds.split(","))
-    tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
-    trend_emoji = TREND_EMOJI.get(cluster.trend, "")
-    bias_label, option_side = BIAS_TEXT.get(cluster.trend, ("NEUTRAL", "either side"))
-    return (
-        f"{tier_emoji} {cluster.tier.upper()} — {cluster.symbol} {trend_emoji}\n"
-        f"{kinds_text}\n"
-        f"\n"
-        f"🎯 {bias_label} — favors {option_side}\n"
-        f"\n"
-        f"{cluster.headlines}\n"
-        f"\n"
-        f"📊 Score: {cluster.score:.2f} ATR\n"
-        f"💵 Close: ${cluster.close:.2f}  (ATR14: {atr_text})\n"
-        f"⚖️ Breakeven (60m): {format_breakeven(breakeven)}\n"
-        f"📚 Similar setups: {format_history(history)}\n"
-        f"📐 Range: ${anchors.opening_range_low:.2f}-${anchors.opening_range_high:.2f}"
-        f"  |  Prior close: ${anchors.prior_close:.2f}\n"
-        f"💹 Quote: ${quote.bid:.2f} / ${quote.ask:.2f}  (last ${quote.last:.2f})\n"
-        f"\n"
-        f"🕐 {ts_et} ET\n"
-        f"🆔 {cluster.id} · v{cluster.code_version}"
-    )
 
 
 class ConsoleAlerter:
@@ -130,10 +62,33 @@ class TelegramAlerter:
                 "Set them before running with --live."
             )
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, max_retries: int = 5, base_delay: float = 1.0) -> None:
+        """Retries on both a 429 (rate limit — honors Telegram's own
+        retry_after hint) and transient network failures (timeouts,
+        connection errors). A single rate limit or network blip must
+        never crash the runner mid-session — see CLAUDE.md: per-iteration
+        exceptions get logged and the loop continues, but that's only a
+        safety net; routine transient failures shouldn't need it."""
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        resp = requests.post(url, json={"chat_id": self.chat_id, "text": text}, timeout=10)
-        resp.raise_for_status()
+        payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"}
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(url, json=payload, timeout=10)
+            except requests.exceptions.RequestException:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(base_delay * (2**attempt))
+                continue
+
+            if resp.status_code != 429 or attempt == max_retries - 1:
+                resp.raise_for_status()
+                return
+            delay = base_delay * (2**attempt)
+            try:
+                delay = resp.json().get("parameters", {}).get("retry_after", delay)
+            except ValueError:
+                pass
+            time.sleep(delay)
 
 
 class Decision(str, Enum):

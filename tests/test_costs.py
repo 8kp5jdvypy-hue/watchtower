@@ -5,7 +5,7 @@ from datetime import date
 
 import pytest
 
-from tradebot.costs import breakeven_move, format_breakeven
+from tradebot.costs import breakeven_move
 from tradebot.marketdata import OptionChain, OptionContract
 
 SYMBOL = "TSLA"
@@ -57,11 +57,3 @@ def test_breakeven_move_returns_none_rather_than_fabricating_a_missing_delta():
     no_greeks = OptionContract(**{**no_greeks.__dict__, "delta": None})
     chain = OptionChain(symbol=SYMBOL, expiry=EXPIRY, contracts=[no_greeks])
     assert breakeven_move(chain, spot=430.0, atr14=4.0) is None
-
-
-def test_format_breakeven():
-    chain = OptionChain(symbol=SYMBOL, expiry=EXPIRY, contracts=[_contract()])
-    result = breakeven_move(chain, spot=431.0, atr14=4.0)
-    text = format_breakeven(result)
-    assert "%" in text and "ATR" in text
-    assert format_breakeven(None) == "no tradable contract"
