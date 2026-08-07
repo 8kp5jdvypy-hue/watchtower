@@ -17,8 +17,11 @@ from tradebot.journal import (
     historical_performance,
     hour_performance,
     iv_rank,
+    get_contract_outcome,
     pending_contract_backfills,
     pending_contract_close_backfills,
+    pending_contract_day_range_backfills,
+    record_contract_day_range,
     record_contract_forward_mid,
     record_contract_selection,
     record_iv_sample,
@@ -491,3 +494,60 @@ def test_record_contract_selection_is_idempotent_on_rerun(tmp_path):
     assert count == 1
     strike = conn.execute("SELECT strike FROM contract_selections WHERE detection_id = ?", ("det1",)).fetchone()[0]
     assert strike == 370.0
+
+
+# ---------------------------------------------------------------------- #
+# Contract day range — see runner.backfill_contract_day_ranges /
+# templates.render_contract_outcome for how this gets fetched and shown.
+# ---------------------------------------------------------------------- #
+
+
+def test_record_and_fetch_contract_day_range(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        conn, session="2026-04-08", symbol="META", ts_utc=entry_ts.isoformat(),
+        kinds="vwap_break", headlines="h", score=4.37, close=599.82, atr14=1.815,
+        trend="up", detections=[_detection(kind="vwap_break")], code_version_str="abc", primary_kind="vwap_break",
+    )
+    conn.commit()
+    record_contract_selection(
+        conn, detection_id, symbol="META", right="call", strike=600.0, expiry=date(2026, 4, 17), dte=9,
+        delta=0.45, entry_mid=2.96, entry_ts=entry_ts,
+    )
+
+    pending = pending_contract_day_range_backfills(conn, date(2026, 4, 8))
+    assert pending == [(detection_id, "META", "call", 600.0, "2026-04-17")]
+
+    record_contract_day_range(conn, detection_id, 1.43, 3.90)
+    assert pending_contract_day_range_backfills(conn, date(2026, 4, 8)) == []
+
+    outcome = get_contract_outcome(conn, detection_id)
+    assert outcome.day_low == 1.43
+    assert outcome.day_high == 3.90
+    assert outcome.entry_mid == 2.96
+    assert outcome.mid_30m is None  # never fabricated — not backfilled in this test
+
+
+def test_pending_contract_day_range_backfills_excludes_verticals(tmp_path):
+    """A spread's day range isn't the sum of its legs' independent
+    ranges — see the function's own docstring for why this is a
+    deliberate exclusion, not a gap."""
+    conn = connect(tmp_path / "journal.db")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        conn, session="2026-04-08", symbol="META", ts_utc=entry_ts.isoformat(),
+        kinds="vwap_break", headlines="h", score=4.37, close=599.82, atr14=1.815,
+        trend="up", detections=[_detection(kind="vwap_break")], code_version_str="abc", primary_kind="vwap_break",
+    )
+    conn.commit()
+    record_contract_selection(
+        conn, detection_id, symbol="META", right="call", strike=600.0, expiry=date(2026, 4, 17), dte=9,
+        delta=0.45, entry_mid=1.50, entry_ts=entry_ts, is_vertical=True, short_strike=610.0, short_delta=0.20,
+    )
+    assert pending_contract_day_range_backfills(conn, date(2026, 4, 8)) == []
+
+
+def test_get_contract_outcome_returns_none_without_a_selection(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    assert get_contract_outcome(conn, "nonexistent") is None

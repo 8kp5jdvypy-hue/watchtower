@@ -158,7 +158,13 @@ def _single_leg_breakeven(contract, spot: float, atr14, hours_held: float, commi
         return None
     spread_cost = (contract.ask - contract.bid) * 100
     commissions = commissions_per_side * 2  # round trip: open + close
-    theta_per_hour = abs(contract.theta) / 24
+    # theta (like delta) is quoted per SHARE by the vendor, same as bid/ask
+    # above — verified live against a real 1-DTE ATM contract (theta
+    # -1.2143/share matched ~67% of the contract's value decaying in one
+    # day; the un-scaled reading would imply ~0.7%, implausible for
+    # something expiring tomorrow). Must be scaled by 100 for a real
+    # per-contract dollar cost, exactly like spread_cost is.
+    theta_per_hour = abs(contract.theta) * 100 / 24
     total_cost = spread_cost + commissions + theta_per_hour * hours_held
     pct = total_cost / (abs(contract.delta) * 100 * spot)
     atr_units = (pct * spot) / atr14 if atr14 else float("inf")
@@ -179,7 +185,8 @@ def _vertical_breakeven(long_c, short_c, spot: float, atr14, hours_held: float, 
         return None
     spread_cost = ((long_c.ask - long_c.bid) + (short_c.ask - short_c.bid)) * 100
     commissions = commissions_per_side * 2 * 2  # 2 legs, open + close
-    theta_per_hour = abs(long_c.theta - short_c.theta) / 24
+    # Same per-share -> per-contract scaling as _single_leg_breakeven.
+    theta_per_hour = abs(long_c.theta - short_c.theta) * 100 / 24
     total_cost = spread_cost + commissions + theta_per_hour * hours_held
     pct = total_cost / (abs(net_delta) * 100 * spot)
     atr_units = (pct * spot) / atr14 if atr14 else float("inf")

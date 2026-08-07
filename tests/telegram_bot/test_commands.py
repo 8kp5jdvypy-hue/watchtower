@@ -26,7 +26,7 @@ def test_passes_when_identical():
 
 
 def test_fails_when_botfather_is_missing_a_command():
-    live = _as_api_shape(COMMANDS[:-1])  # /halt missing
+    live = _as_api_shape([pair for pair in COMMANDS if pair[0] != "halt"])
     client = _FakeClient(live)
     with pytest.raises(CommandDriftError, match="halt"):
         verify_commands_match_botfather(client)

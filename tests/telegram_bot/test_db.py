@@ -220,6 +220,135 @@ def test_get_or_create_user_clears_telegram_unreachable_on_a_new_update():
     assert db.get_user(conn, 1).is_telegram_unreachable is False
 
 
+# --------------------------------------------------------------------------
+# plan / founding_member — see tradebot.telegram_bot.access. Everyone
+# created right now is, by definition, a beta founding member; there is
+# no "beta ended" cutoff yet for these defaults to distinguish against.
+# --------------------------------------------------------------------------
+
+
+def test_new_users_default_to_the_beta_plan_and_are_founding_members():
+    conn = _conn()
+    user = db.get_or_create_user(conn, 1, 1, "alice")
+    assert user.plan == "beta"
+    assert user.founding_member is True
+    assert user.waitlisted_at is None
+
+
+# --------------------------------------------------------------------------
+# Quiet hours — per-user timezone, enforced at the delivery-eligibility
+# layer (list_subscribers_for_symbol), not just displayed.
+# --------------------------------------------------------------------------
+
+
+def test_is_in_quiet_hours_handles_a_window_spanning_midnight():
+    conn = _conn()
+    db.get_or_create_user(conn, 1, 1, "alice")
+    db.set_timezone(conn, 1, "America/New_York")
+    db.set_quiet_hours(conn, 1, "22:00", "06:00")
+    user = db.get_user(conn, 1)
+
+    # 02:00 UTC = 22:00 America/New_York (EDT, UTC-4) the day before — inside the window
+    assert user.is_in_quiet_hours(datetime(2026, 8, 6, 2, 0, tzinfo=timezone.utc)) is True
+    # 18:00 UTC = 14:00 EDT — well outside the window
+    assert user.is_in_quiet_hours(datetime(2026, 8, 6, 18, 0, tzinfo=timezone.utc)) is False
+
+
+def test_is_in_quiet_hours_false_when_unset():
+    conn = _conn()
+    db.get_or_create_user(conn, 1, 1, "alice")
+    user = db.get_user(conn, 1)
+    assert user.is_in_quiet_hours(datetime.now(timezone.utc)) is False
+
+
+def test_is_in_quiet_hours_fails_open_on_a_bad_timezone():
+    """Never let one corrupted row silently suppress every alert this
+    method's caller (list_subscribers_for_symbol) is about to fan out."""
+    conn = _conn()
+    db.get_or_create_user(conn, 1, 1, "alice")
+    db.set_timezone(conn, 1, "Not/A_Real_Zone")
+    db.set_quiet_hours(conn, 1, "22:00", "06:00")
+    user = db.get_user(conn, 1)
+    assert user.is_in_quiet_hours(datetime.now(timezone.utc)) is False
+
+
+def test_list_subscribers_for_symbol_excludes_a_user_in_their_own_quiet_hours():
+    conn = _conn()
+    now = datetime(2026, 8, 6, 2, 0, tzinfo=timezone.utc)  # 22:00 America/New_York
+    db.get_or_create_user(conn, 1, 1, "night_owl_off")
+    db.mark_onboarded(conn, 1, now)
+    db.set_risk_ack(conn, 1, now)
+    db.set_timezone(conn, 1, "America/New_York")
+    db.set_quiet_hours(conn, 1, "22:00", "06:00")
+
+    db.get_or_create_user(conn, 2, 2, "different_timezone_still_awake")
+    db.mark_onboarded(conn, 2, now)
+    db.set_risk_ack(conn, 2, now)
+    db.set_timezone(conn, 2, "America/Los_Angeles")  # 19:00 there — not quiet
+    db.set_quiet_hours(conn, 2, "22:00", "06:00")
+
+    subs = db.list_subscribers_for_symbol(conn, "TSLA", now.date(), now, default_watchlist=["TSLA"])
+    assert [u.telegram_user_id for u in subs] == [2]
+
+
+# --------------------------------------------------------------------------
+# Capacity + waitlist
+# --------------------------------------------------------------------------
+
+
+def test_count_active_users_counts_onboarded_reachable_users_only():
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "onboarded")
+    db.mark_onboarded(conn, 1, now)
+    db.get_or_create_user(conn, 2, 2, "not_onboarded_yet")
+    db.get_or_create_user(conn, 3, 3, "onboarded_but_gone")
+    db.mark_onboarded(conn, 3, now)
+    db.mark_telegram_unreachable(conn, 3, now)
+
+    assert db.count_active_users(conn) == 1
+
+
+def test_waitlist_position_is_first_come_first_served():
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "first")
+    db.get_or_create_user(conn, 2, 2, "second")
+    db.set_waitlisted(conn, 1, now)
+    db.set_waitlisted(conn, 2, now + timedelta(seconds=1))
+
+    assert db.waitlist_position(conn, 1) == 1
+    assert db.waitlist_position(conn, 2) == 2
+    assert db.waitlist_position(conn, 3) is None  # never waitlisted
+
+
+def test_clear_waitlist_removes_the_state():
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "alice")
+    db.set_waitlisted(conn, 1, now)
+    assert db.get_user(conn, 1).waitlisted_at is not None
+
+    db.clear_waitlist(conn, 1)
+    assert db.get_user(conn, 1).waitlisted_at is None
+    assert db.waitlist_position(conn, 1) is None
+
+
+# --------------------------------------------------------------------------
+# Feedback — /feedback, one tap from anywhere
+# --------------------------------------------------------------------------
+
+
+def test_add_feedback_persists_the_message_and_sender():
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    db.get_or_create_user(conn, 1, 1, "alice")
+    db.add_feedback(conn, 1, "the sizing calculator is great", now)
+
+    row = conn.execute("SELECT telegram_user_id, message FROM feedback").fetchone()
+    assert row == (1, "the sizing calculator is great")
+
+
 def test_log_took_computes_reaction_seconds_and_log_closed_computes_pnl():
     conn = _conn()
     db.get_or_create_user(conn, 1, 1, "a")

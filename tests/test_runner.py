@@ -7,6 +7,7 @@ These tests cover the pieces that are meaningfully testable in isolation.
 """
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -696,3 +697,247 @@ def test_backfill_pending_contract_close_mids_uses_the_close_sentinel(tmp_path):
 
     mid_close = conn.execute("SELECT mid_close FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
     assert mid_close == pytest.approx(3.55)
+
+
+# ---------------------------------------------------------------------- #
+# Contract day-range backfill — see runner.backfill_contract_day_ranges /
+# journal.pending_contract_day_range_backfills.
+# ---------------------------------------------------------------------- #
+
+
+def test_backfill_contract_day_ranges_writes_a_real_fetched_range(tmp_path, monkeypatch):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    detection_id = _write_minimal_detection(conn, entry_ts, symbol="META")
+    record_contract_selection(
+        conn, detection_id, symbol="META", right="call", strike=600.0, expiry=date(2026, 4, 17), dte=9,
+        delta=0.45, entry_mid=2.96, entry_ts=entry_ts,
+    )
+    contract = _fake_contract("call", 600.0, 1.80, 1.90)
+    chain = _fake_chain(contract)
+    md = {"META": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+
+    monkeypatch.setattr(
+        "tradebot.vendors.alpaca.fetch_option_day_range", lambda occ_symbol, session_date: (1.43, 3.90)
+    )
+
+    runner_mod.backfill_contract_day_ranges(conn, md, date(2026, 4, 8))
+
+    row = conn.execute(
+        "SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?", (detection_id,)
+    ).fetchone()
+    assert row == (1.43, 3.90)
+
+
+def test_backfill_contract_day_ranges_skips_verticals(tmp_path, monkeypatch):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    detection_id = _write_minimal_detection(conn, entry_ts, symbol="META")
+    record_contract_selection(
+        conn, detection_id, symbol="META", right="call", strike=600.0, expiry=date(2026, 4, 17), dte=9,
+        delta=0.45, entry_mid=1.50, entry_ts=entry_ts, is_vertical=True, short_strike=610.0, short_delta=0.20,
+    )
+    calls = []
+    monkeypatch.setattr(
+        "tradebot.vendors.alpaca.fetch_option_day_range",
+        lambda occ_symbol, session_date: calls.append(occ_symbol) or (1.0, 2.0),
+    )
+
+    runner_mod.backfill_contract_day_ranges(conn, {}, date(2026, 4, 8))
+
+    assert calls == []  # never even attempted for a vertical
+    row = conn.execute(
+        "SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?", (detection_id,)
+    ).fetchone()
+    assert row == (None, None)
+
+
+def test_backfill_contract_day_ranges_one_failure_does_not_block_another(tmp_path, monkeypatch):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    ok_id = _write_minimal_detection(conn, entry_ts, symbol="META")
+    broken_id = _write_minimal_detection(conn, entry_ts, symbol="TSLA")
+    record_contract_selection(
+        conn, ok_id, symbol="META", right="call", strike=600.0, expiry=date(2026, 4, 17), dte=9,
+        delta=0.45, entry_mid=2.96, entry_ts=entry_ts,
+    )
+    record_contract_selection(
+        conn, broken_id, symbol="TSLA", right="call", strike=100.0, expiry=date(2026, 8, 14), dte=13,
+        delta=0.50, entry_mid=2.00, entry_ts=entry_ts,
+    )
+
+    def _raise(s, expiry):
+        raise RuntimeError("vendor hiccup")
+
+    chain = _fake_chain(_fake_contract("call", 600.0, 1.80, 1.90))
+    md = {
+        "META": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})(),
+        "TSLA": type("MD", (), {"chain": staticmethod(_raise)})(),
+    }
+    monkeypatch.setattr(
+        "tradebot.vendors.alpaca.fetch_option_day_range", lambda occ_symbol, session_date: (1.43, 3.90)
+    )
+
+    runner_mod.backfill_contract_day_ranges(conn, md, date(2026, 4, 8))
+
+    ok_row = conn.execute("SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?", (ok_id,)).fetchone()
+    broken_row = conn.execute("SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?", (broken_id,)).fetchone()
+    assert ok_row == (1.43, 3.90)
+    assert broken_row == (None, None)  # never fabricated, and didn't stop the other
+
+
+# ---------------------------------------------------------------------- #
+# Weekly recap scheduling — see runner.maybe_send_weekly_recap. A cursor
+# file, not a "is today Monday" check, so a skipped day never silently
+# drops a week.
+# ---------------------------------------------------------------------- #
+
+
+class _FakeAlerter:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text, priority=None, alert_id=None):
+        self.sent.append((text, priority))
+
+
+def test_weekly_recap_fires_on_the_first_call_and_covers_the_prior_week(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "weekly_recap_state.json"
+    now = datetime(2026, 8, 3, 13, 30, tzinfo=timezone.utc)  # a Monday
+
+    runner_mod.maybe_send_weekly_recap(conn, alerter, now, state_path=state_path)
+
+    assert len(alerter.sent) == 1
+    assert "Weekly recap" in alerter.sent[0][0]
+    assert "2026-07-27" in alerter.sent[0][0]  # the prior Monday
+    assert state_path.exists()
+
+
+def test_weekly_recap_does_not_resend_within_the_same_week(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "weekly_recap_state.json"
+    monday = datetime(2026, 8, 3, 13, 30, tzinfo=timezone.utc)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, monday, state_path=state_path)
+
+    wednesday = monday + timedelta(days=2)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, wednesday, state_path=state_path)
+
+    assert len(alerter.sent) == 1  # no second send
+
+
+def test_weekly_recap_fires_again_the_following_week(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "weekly_recap_state.json"
+    monday1 = datetime(2026, 8, 3, 13, 30, tzinfo=timezone.utc)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, monday1, state_path=state_path)
+    monday2 = monday1 + timedelta(days=7)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, monday2, state_path=state_path)
+
+    assert len(alerter.sent) == 2
+    assert "2026-07-27" in alerter.sent[0][0]
+    assert "2026-08-03" in alerter.sent[1][0]
+
+
+class _FakeResponse:
+    def __init__(self, result, status_code=200):
+        self._result = result
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise runner_mod.requests.HTTPError(f"{self.status_code}")
+
+    def json(self):
+        return {"ok": True, "result": self._result}
+
+
+def test_pinned_status_first_call_sends_and_pins_then_saves_state(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        if url.endswith("sendMessage"):
+            return _FakeResponse({"message_id": 42})
+        return _FakeResponse({})
+
+    monkeypatch.setattr(runner_mod.requests, "post", fake_post)
+    conn = journal_connect(":memory:")
+    state_path = tmp_path / "pinned_status_state.json"
+
+    runner_mod.maybe_update_pinned_status("tok", 555, conn, datetime(2026, 8, 6, tzinfo=timezone.utc), state_path=state_path)
+
+    methods = [c[0] for c in calls]
+    assert methods == ["sendMessage", "pinChatMessage"]
+    assert calls[1][1]["message_id"] == 42
+    assert calls[1][1]["disable_notification"] is True
+    saved = json.loads(state_path.read_text())
+    assert saved == {"chat_id": 555, "message_id": 42}
+
+
+def test_pinned_status_second_call_edits_in_place_without_repinning(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url.rsplit("/", 1)[-1], json))
+        return _FakeResponse({"message_id": 42})
+
+    monkeypatch.setattr(runner_mod.requests, "post", fake_post)
+    conn = journal_connect(":memory:")
+    state_path = tmp_path / "pinned_status_state.json"
+    state_path.write_text(json.dumps({"chat_id": 555, "message_id": 42}))
+
+    runner_mod.maybe_update_pinned_status("tok", 555, conn, datetime(2026, 8, 6, tzinfo=timezone.utc), state_path=state_path)
+
+    assert [c[0] for c in calls] == ["editMessageText"]
+    assert calls[0][1]["message_id"] == 42
+
+
+def test_pinned_status_recreates_if_the_edit_fails(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        method = url.rsplit("/", 1)[-1]
+        calls.append((method, json))
+        if method == "editMessageText":
+            return _FakeResponse({}, status_code=400)  # e.g. message was deleted/unpinned by hand
+        if method == "sendMessage":
+            return _FakeResponse({"message_id": 99})
+        return _FakeResponse({})
+
+    monkeypatch.setattr(runner_mod.requests, "post", fake_post)
+    conn = journal_connect(":memory:")
+    state_path = tmp_path / "pinned_status_state.json"
+    state_path.write_text(json.dumps({"chat_id": 555, "message_id": 42}))
+
+    runner_mod.maybe_update_pinned_status("tok", 555, conn, datetime(2026, 8, 6, tzinfo=timezone.utc), state_path=state_path)
+
+    assert [c[0] for c in calls] == ["editMessageText", "sendMessage", "pinChatMessage"]
+    assert json.loads(state_path.read_text())["message_id"] == 99
+
+
+def test_weekly_recap_catches_up_correctly_after_a_skipped_run(tmp_path):
+    """The whole reason this is a cursor, not a "is today Monday" check:
+    a holiday or an outage on the actual Monday must not silently drop
+    that week's recap forever."""
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "weekly_recap_state.json"
+    monday1 = datetime(2026, 8, 3, 13, 30, tzinfo=timezone.utc)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, monday1, state_path=state_path)
+
+    # bot was down all of the following week; first run back is a Thursday
+    late_thursday = monday1 + timedelta(days=10)
+    runner_mod.maybe_send_weekly_recap(conn, alerter, late_thursday, state_path=state_path)
+
+    assert len(alerter.sent) == 2
+    assert "2026-08-03" in alerter.sent[1][0]  # covers the week that was missed, up to the following Monday

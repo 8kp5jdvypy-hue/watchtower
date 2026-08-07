@@ -79,6 +79,9 @@ class WorkerCore:
     heartbeat_path: Path | None = None
     is_rth_fn: Callable[[datetime], bool] = field(default=lambda now: False)
     page_chat_id: int | None = None
+    # Overridable so tests never touch the real data/incidents.jsonl —
+    # None means "use tradebot.incidents' own default path."
+    incidents_path: Path | None = None
 
     def __post_init__(self) -> None:
         self._global_bucket = TokenBucket(
@@ -207,6 +210,7 @@ class WorkerCore:
         if not self.is_rth_fn(now):
             return
 
+        from tradebot import incidents
         from tradebot.telegram_bot.heartbeat import read_heartbeat
 
         hb = read_heartbeat(self.heartbeat_path)
@@ -217,11 +221,16 @@ class WorkerCore:
 
         if staleness <= HEARTBEAT_STALE_SECONDS:
             self._paged_at = None  # recovered — a fresh page is allowed if it goes stale again
+            incidents.close_incident("heartbeat_stale", now, path=self.incidents_path)
             return
+
+        minutes = int(staleness // 60)
+        incidents.open_incident(
+            "heartbeat_stale", f"no scanner evaluation in {minutes} minutes during RTH", now, path=self.incidents_path
+        )
         if self._paged_at is not None and (now - self._paged_at).total_seconds() < PAGE_REPEAT_INTERVAL_SECONDS:
             return  # already paged recently — don't spam every loop pass while still stale
 
-        minutes = int(staleness // 60)
         text = f"<b>PAGE</b>\nNo scanner evaluation in {minutes} minutes during RTH. The market data feed or the scanner process may be down."
         result = self.sender(self.page_chat_id, text, None)
         logger.error(

@@ -221,3 +221,27 @@ def fetch_option_day_volume(occ_symbol: str, session_date: date) -> int | None:
     if not bars:
         return None
     return int(bars[-1].volume)
+
+
+def fetch_option_day_range(occ_symbol: str, session_date: date) -> tuple[float, float] | None:
+    """The contract's real low/high across every 5-minute trade bar that
+    session — trade-based (not a bid/ask midpoint), so it reflects actual
+    fills, not a quote nobody traded at. Returns None (never a fabricated
+    range) on any failure, or when the contract had no intraday bars at
+    all that day (illiquid enough that nothing traded) — the same "None
+    means couldn't check" discipline as fetch_option_day_volume."""
+    option_client = _option_client()
+    start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    try:
+        bar_set = _with_backoff(lambda: option_client.get_option_bars(
+            OptionBarsRequest(
+                symbol_or_symbols=occ_symbol, timeframe=TimeFrame(5, TimeFrameUnit.Minute), start=start, end=end
+            )
+        ))
+    except APIError:
+        return None
+    bars = bar_set.data.get(occ_symbol) if hasattr(bar_set, "data") else None
+    if not bars:
+        return None
+    return (min(b.low for b in bars), max(b.high for b in bars))

@@ -17,6 +17,7 @@ runs it live and confirms.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -47,6 +48,7 @@ from tradebot.guard import validate_alert_data
 from tradebot import metrics
 from tradebot.telegram_bot import heartbeat as bot_liveness
 from tradebot.telegram_bot import outbox
+from tradebot.telegram_bot.performance import track_record, weekly_recap
 from tradebot.detectors import (
     DETECTORS,
     Bar,
@@ -67,6 +69,8 @@ from tradebot.journal import (
     iv_rank,
     pending_contract_backfills,
     pending_contract_close_backfills,
+    pending_contract_day_range_backfills,
+    record_contract_day_range,
     record_contract_forward_mid,
     record_contract_selection,
     record_iv_sample,
@@ -83,6 +87,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO_ROOT / "data" / "cache"
 HALT_FILE = REPO_ROOT / "data" / "HALT"
 HEARTBEAT_FILE = REPO_ROOT / "data" / "heartbeat.json"
+WEEKLY_RECAP_STATE_FILE = REPO_ROOT / "data" / "weekly_recap_state.json"
 ET = ZoneInfo("America/New_York")
 STALENESS_SECONDS = 90
 BAR_MINUTES = 5
@@ -440,6 +445,99 @@ def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None
     alerter.send(templates.render_log_summary(summary, tier_perf, when), priority=outbox.PRIORITY_LOG)
 
 
+def _last_recap_week_end(path: Path) -> datetime | None:
+    if not path.exists():
+        return None
+    try:
+        return datetime.fromisoformat(json.loads(path.read_text())["week_end"])
+    except (json.JSONDecodeError, KeyError, OSError, ValueError):
+        return None
+
+
+def _mark_recap_sent(path: Path, week_end: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"week_end": week_end.isoformat()}))
+
+
+def maybe_send_weekly_recap(conn, alerter, now: datetime, state_path: Path | None = None) -> None:
+    """Fires once per calendar week, at the first live session on or
+    after that week's Monday — covers [last week sent, this Monday's
+    midnight UTC). A cursor (not a "is today Monday" check) so a holiday
+    or a day the bot wasn't running never silently drops a week: it just
+    catches up on the next run. See tradebot.rendering.templates.
+    render_weekly_recap — the SAME template runs whether the week was
+    good or bad."""
+    state_path = state_path or WEEKLY_RECAP_STATE_FILE
+    session_date = now.astimezone(ET).date()
+    this_monday = session_date - timedelta(days=session_date.weekday())
+    week_end = datetime.combine(this_monday, datetime.min.time(), tzinfo=timezone.utc)
+
+    last_sent = _last_recap_week_end(state_path)
+    if last_sent is not None and last_sent >= week_end:
+        return  # already covered up through this week
+
+    week_start = last_sent if last_sent is not None else week_end - timedelta(days=7)
+    if week_start >= week_end:
+        return  # nothing new to cover yet
+
+    recap = weekly_recap(conn, week_start.isoformat(), week_end.isoformat())
+    alerter.send(templates.render_weekly_recap(recap, now), priority=outbox.PRIORITY_NORMAL)
+    _mark_recap_sent(state_path, week_end)
+
+
+PINNED_STATUS_STATE_FILE = REPO_ROOT / "data" / "pinned_status_state.json"
+
+
+def _telegram_api_call(token: str, method: str, payload: dict) -> dict:
+    resp = requests.post(f"https://api.telegram.org/bot{token}/{method}", json=payload, timeout=10)
+    resp.raise_for_status()
+    return resp.json()["result"]
+
+
+def _load_pinned_status_state(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_pinned_status_state(path: Path, chat_id, message_id: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"chat_id": chat_id, "message_id": message_id}))
+
+
+def maybe_update_pinned_status(token: str, chat_id, conn, now: datetime, state_path: Path | None = None) -> None:
+    """Keeps ONE pinned message in the ops channel showing the live
+    sample size and today's significance verdict (see
+    performance.significance_check) — edited in place on every call
+    rather than re-sent, so it never spams a fresh pin. Deliberately a
+    direct Telegram API call, not the outbox: like TelegramHaltChecker
+    above, this is a control-plane operation on one fixed chat, not a
+    per-subscriber alert delivery."""
+    state_path = state_path or PINNED_STATUS_STATE_FILE
+    tr = track_record(conn, tier="high")
+    text = templates.render_pinned_status(tr, now)
+
+    state = _load_pinned_status_state(state_path)
+    if state is not None:
+        try:
+            _telegram_api_call(
+                token, "editMessageText",
+                {"chat_id": state["chat_id"], "message_id": state["message_id"], "text": text, "parse_mode": "HTML"},
+            )
+            return
+        except requests.RequestException:
+            pass  # pinned message may have been deleted/unpinned by hand -> fall through and recreate
+
+    sent = _telegram_api_call(token, "sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+    _telegram_api_call(
+        token, "pinChatMessage", {"chat_id": chat_id, "message_id": sent["message_id"], "disable_notification": True}
+    )
+    _save_pinned_status_state(state_path, chat_id, sent["message_id"])
+
+
 # --------------------------------------------------------------------------
 # Contract forward-mid backfill — live only (see journal.py's schema
 # comment: no cached historical options data to replay against). Fills in
@@ -455,6 +553,13 @@ def _contract_mid(chain, right: str, strike: float) -> float | None:
         if c.right == right and c.strike == strike:
             return (c.bid + c.ask) / 2
     return None  # contract not found in today's chain — never fabricated
+
+
+def _contract_occ_symbol(chain, right: str, strike: float) -> str | None:
+    for c in chain.contracts:
+        if c.right == right and c.strike == strike:
+            return c.symbol
+    return None
 
 
 def _forward_mid(md, symbol: str, right: str, strike: float, expiry: str, is_vertical: bool, short_strike: float | None) -> float | None:
@@ -507,6 +612,31 @@ def backfill_pending_contract_close_mids(conn, md, session_date: date) -> None:
                 record_contract_forward_mid(conn, detection_id, CLOSE_MARK_OFFSET_MIN, mid)
         except Exception:
             logger.error("contract close-mid backfill failed: detection_id=%s", detection_id, exc_info=True)
+
+
+def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
+    """Called once at the end of a live session, alongside
+    backfill_pending_contract_close_mids: records each contract's own
+    real intraday trade low/high for the day (see
+    journal.record_contract_day_range) — the "what was the most anyone
+    could have made on this contract today" context shown alongside our
+    actual entry's outcome. Vertical spreads are skipped: a spread's day
+    range isn't the sum of its two legs' independent ranges (they don't
+    hit their extremes at the same moment), so reporting one would imply
+    a number nobody could have actually captured."""
+    from tradebot.vendors.alpaca import fetch_option_day_range
+
+    for detection_id, symbol, right, strike, expiry in pending_contract_day_range_backfills(conn, session_date):
+        try:
+            chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
+            occ_symbol = _contract_occ_symbol(chain, right, strike)
+            if occ_symbol is None:
+                continue
+            day_range = fetch_option_day_range(occ_symbol, session_date)
+            if day_range is not None:
+                record_contract_day_range(conn, detection_id, day_range[0], day_range[1])
+        except Exception:
+            logger.error("contract day-range backfill failed: detection_id=%s", detection_id, exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -624,6 +754,14 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     session_date = now.astimezone(ET).date()
     open_ts, close_ts = session_bounds(session_date)
 
+    # A halt has no in-process "resume" moment (see tradebot.incidents'
+    # module docstring) — reaching a fresh run_live() call at all is
+    # itself proof the system came back, so any still-open halt incident
+    # closes right here, unconditionally (a safe no-op if none is open).
+    from tradebot import incidents
+
+    incidents.close_incident("halt", now)
+
     conn = connect()
     version = code_version()
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
@@ -635,6 +773,9 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
             templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now),
             priority=outbox.PRIORITY_NORMAL,
         )
+        maybe_send_weekly_recap(conn, alerter, now)
+        if isinstance(alerter, TelegramAlerter):
+            maybe_update_pinned_status(alerter.token, alerter.chat_id, conn, now)
     except Exception:
         stats.errors.append(traceback.format_exc())
 
@@ -657,7 +798,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
         if loop_start >= close_ts:
             break
         if HALT_FILE.exists() or (halt_checker is not None and halt_checker.check()):
-            alerter.send(templates.render_system_notice("halt requested. Stopping.", loop_start), priority=outbox.PRIORITY_HIGH)
+            alerter.send(templates.render_system_notice("Halt requested. Stopping the live session.", loop_start), priority=outbox.PRIORITY_HIGH)
             break
 
         for symbol in WATCHLIST:
@@ -723,6 +864,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     send_log_summary(budget, alerter, conn, end_time)
     backfill_marks(conn, session_date)
     backfill_pending_contract_close_mids(conn, md, session_date)
+    backfill_contract_day_ranges(conn, md, session_date)
     heartbeat = templates.render_heartbeat(
         session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,

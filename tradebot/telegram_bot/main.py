@@ -54,6 +54,13 @@ def _parse_bool(env_var: str, default: bool = False) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _parse_optional_int(env_var: str) -> int | None:
+    raw = os.environ.get(env_var)
+    if raw is None or not raw.strip():
+        return None
+    return int(raw)
+
+
 def build_app_config(bot_username: str | None = None) -> AppConfig:
     return AppConfig(
         admin_ids=_parse_id_list("ADMIN_TELEGRAM_IDS"),
@@ -68,6 +75,7 @@ def build_app_config(bot_username: str | None = None) -> AppConfig:
         bot_username=bot_username,
         allowed_user_ids=_parse_id_list("ALLOWED_USER_IDS") or None,
         channel_commands_enabled=_parse_bool("CHANNEL_COMMANDS_ENABLED", default=False),
+        max_active_users=_parse_optional_int("WATCHTOWER_MAX_USERS"),
     )
 
 
@@ -97,10 +105,11 @@ def main() -> None:
     app_config = build_app_config(bot_username)
 
     logger.info(
-        "config: allowed_user_ids=%s channel_commands_enabled=%s admin_ids=%s",
+        "config: allowed_user_ids=%s channel_commands_enabled=%s admin_ids=%s max_active_users=%s",
         sorted(app_config.allowed_user_ids) if app_config.allowed_user_ids else "unrestricted",
         app_config.channel_commands_enabled,
         sorted(app_config.admin_ids) or "none",
+        app_config.max_active_users if app_config.max_active_users is not None else "unlimited",
     )
 
     dispatcher = Dispatcher(

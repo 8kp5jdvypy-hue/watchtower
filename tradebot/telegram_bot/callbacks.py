@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from tradebot.journal import get_contract_outcome
+from tradebot.rendering import templates
 from tradebot.rendering.fields import ts
-from tradebot.telegram_bot import db, keyboards
+from tradebot.telegram_bot import access, db, keyboards
 from tradebot.telegram_bot.context import CallbackReply
-from tradebot.telegram_bot.handlers import _RESUME_ONBOARDING_TEXT, _resolve_detection, log_took
+from tradebot.telegram_bot.handlers import BETA_PRICING_NOTICE, _RESUME_ONBOARDING_TEXT, _resolve_detection, log_took
 
 
 # -------------------------------------------------------------------- #
@@ -87,6 +89,22 @@ def handle_whynt_button(ctx) -> CallbackReply:
     return CallbackReply(toast=text, show_alert=True)
 
 
+def handle_outcome_button(ctx) -> CallbackReply:
+    """'How'd it play out?' — the recommended contract's own outcome
+    (profitable or not at each checkpoint, against OUR entry) plus its
+    real day range (the most anyone could have made on it that day,
+    independent of our entry timing). See
+    tradebot.rendering.templates.render_contract_outcome."""
+    row = _resolve_detection(ctx, ctx.arg)
+    if row is None:
+        return CallbackReply(toast="Can't find that alert anymore.", show_alert=True)
+    detection_id = row[0]
+    outcome = get_contract_outcome(ctx.journal_conn, detection_id)
+    if outcome is None:
+        return CallbackReply(toast="No tradable contract was selected for this alert.", show_alert=True)
+    return CallbackReply(toast="Here you go.", send_text=templates.render_contract_outcome(outcome, ctx.now))
+
+
 # -------------------------------------------------------------------- #
 # Onboarding: risk ack -> timezone
 # -------------------------------------------------------------------- #
@@ -97,7 +115,7 @@ def handle_ack_risk_button(ctx) -> CallbackReply:
     db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "timezone")
     return CallbackReply(
         toast="Got it.",
-        edit_text=_RESUME_ONBOARDING_TEXT["timezone"],
+        edit_text=f"{BETA_PRICING_NOTICE}\n\n{_RESUME_ONBOARDING_TEXT['timezone']}",
         edit_keyboard=keyboards.timezone_keyboard(),
     )
 
@@ -145,8 +163,8 @@ def handle_pause_button(ctx) -> CallbackReply:
 
 
 def handle_watchlist_button(ctx) -> CallbackReply:
-    if ctx.user.tier == "free":
-        return CallbackReply(toast="Editing is a paid feature — see /tiers.", show_alert=True)
+    if not access.can_access(ctx.user, "watchlist_edit"):
+        return CallbackReply(toast="Editing isn't available on your plan — see /tiers.", show_alert=True)
 
     if ctx.arg == "save":
         active = db.get_watchlist(ctx.users_conn, ctx.user.telegram_user_id) or ctx.app.default_watchlist
@@ -173,6 +191,7 @@ CALLBACK_HANDLERS = {
     "mood": handle_mood_button,
     "skip": handle_skip_button,
     "whynt": handle_whynt_button,
+    "outcome": handle_outcome_button,
     "ack_risk": handle_ack_risk_button,
     "tz": handle_timezone_button,
     "pause": handle_pause_button,

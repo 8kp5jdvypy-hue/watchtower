@@ -262,6 +262,7 @@ def test_heartbeat_paging_fires_once_when_stale_during_rth(tmp_path):
     sender = FakeSender()
     worker = _worker(
         conn, sender, clock, heartbeat_path=heartbeat_path, is_rth_fn=lambda now: True, page_chat_id=999,
+        incidents_path=tmp_path / "incidents.jsonl",
     )
 
     worker._maybe_page_on_stale_heartbeat(clock())
@@ -281,7 +282,10 @@ def test_heartbeat_paging_is_silent_when_fresh():
     with tempfile.TemporaryDirectory() as d:
         path = __import__("pathlib").Path(d) / "heartbeat.json"
         bot_liveness.write_heartbeat(path, NOW - timedelta(seconds=30))
-        worker = _worker(conn, sender, clock, heartbeat_path=path, is_rth_fn=lambda now: True, page_chat_id=999)
+        worker = _worker(
+            conn, sender, clock, heartbeat_path=path, is_rth_fn=lambda now: True, page_chat_id=999,
+            incidents_path=path.parent / "incidents.jsonl",
+        )
         worker._maybe_page_on_stale_heartbeat(clock())
 
     assert sender.calls == []
@@ -308,11 +312,45 @@ def test_heartbeat_paging_does_not_repeat_within_the_repeat_interval(tmp_path):
     sender = FakeSender()
     worker = _worker(
         conn, sender, clock, heartbeat_path=heartbeat_path, is_rth_fn=lambda now: True, page_chat_id=999,
+        incidents_path=tmp_path / "incidents.jsonl",
     )
 
     worker._maybe_page_on_stale_heartbeat(clock())
     clock.advance(60)  # still stale, but well within the repeat cooldown
     worker._last_heartbeat_check = 0  # force the interval-throttle to allow re-checking
     worker._maybe_page_on_stale_heartbeat(clock())
+
+
+def test_stale_heartbeat_opens_an_incident_and_recovery_closes_it(tmp_path):
+    import json
+
+    from tradebot import incidents
+
+    heartbeat_path = tmp_path / "heartbeat.json"
+    incidents_path = tmp_path / "incidents.jsonl"
+    heartbeat_path.write_text(json.dumps({"ts_utc": (NOW - timedelta(minutes=10)).isoformat()}))
+    conn = _conn()
+    clock = FakeClock(NOW)
+    sender = FakeSender()
+    worker = _worker(
+        conn, sender, clock, heartbeat_path=heartbeat_path, is_rth_fn=lambda now: True, page_chat_id=999,
+        incidents_path=incidents_path,
+    )
+
+    worker._maybe_page_on_stale_heartbeat(clock())
+    open_incidents = incidents.list_incidents(path=incidents_path)
+    assert len(open_incidents) == 1
+    assert open_incidents[0]["kind"] == "heartbeat_stale"
+    assert open_incidents[0]["ended_at"] is None
+
+    # feed recovers -> a fresh, non-stale heartbeat write
+    clock.advance(600)
+    heartbeat_path.write_text(json.dumps({"ts_utc": clock().isoformat()}))
+    worker._last_heartbeat_check = 0
+    worker._maybe_page_on_stale_heartbeat(clock())
+
+    closed_incidents = incidents.list_incidents(path=incidents_path)
+    assert len(closed_incidents) == 1
+    assert closed_incidents[0]["ended_at"] is not None
 
     assert len(sender.calls) == 1  # no repeat page yet

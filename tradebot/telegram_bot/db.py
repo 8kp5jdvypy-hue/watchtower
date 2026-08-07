@@ -17,8 +17,9 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "users.db"
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS users (
     timezone TEXT NOT NULL DEFAULT 'America/New_York',
     quiet_hours_start TEXT,
     quiet_hours_end TEXT,
-    tier TEXT NOT NULL DEFAULT 'free',
+    tier TEXT NOT NULL DEFAULT 'free',  -- superseded by `plan` below; no longer read anywhere
     is_admin INTEGER NOT NULL DEFAULT 0,
     paused_until TEXT,
     pause_reason TEXT,
@@ -110,6 +111,15 @@ CREATE TABLE IF NOT EXISTS outbox (
     UNIQUE(alert_id, chat_id)
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_ready ON outbox(status, priority, next_attempt_at);
+
+-- One tap from anywhere (see handlers.handle_feedback) — during a free
+-- beta this is the only thing being collected instead of revenue.
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id INTEGER NOT NULL,
+    message TEXT NOT NULL,
+    ts_utc TEXT NOT NULL
+);
 """
 
 
@@ -133,11 +143,25 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _add_column_if_missing(conn, "users", "account_size", "REAL")
     _add_column_if_missing(conn, "users", "risk_per_trade_pct", "REAL")
     _add_column_if_missing(conn, "users", "telegram_unreachable_at", "TEXT")
+    # plan/founding_member deliberately use ALTER TABLE's default-fill
+    # behavior: every row that already exists the moment this migration
+    # runs — including everyone onboarded before this column existed —
+    # is, definitionally, a beta user, so backfilling plan='beta' and
+    # founding_member=1 for them is correct, not just convenient. See
+    # tradebot.telegram_bot.access for how (not yet) this gets read.
+    _add_column_if_missing(conn, "users", "plan", "TEXT NOT NULL DEFAULT 'beta'")
+    _add_column_if_missing(conn, "users", "founding_member", "INTEGER NOT NULL DEFAULT 1")
+    _add_column_if_missing(conn, "users", "waitlisted_at", "TEXT")
     return conn
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_hhmm(value: str) -> time:
+    hh, _, mm = value.partition(":")
+    return time(int(hh), int(mm))
 
 
 # --------------------------------------------------------------------------
@@ -171,6 +195,9 @@ class User:
     account_size: float | None
     risk_per_trade_pct: float | None
     telegram_unreachable_at: str | None
+    plan: str
+    founding_member: bool
+    waitlisted_at: str | None
 
     @property
     def is_onboarded(self) -> bool:
@@ -196,13 +223,33 @@ class User:
     def is_halted_for_session(self, session_date: date) -> bool:
         return self.halted_session == session_date.isoformat()
 
+    def is_in_quiet_hours(self, now_utc: datetime) -> bool:
+        """Converts now_utc into the user's own local time and checks it
+        against their configured quiet_hours window, handling a window
+        that spans midnight (e.g. 22:00-06:00). Fails open (never quiet)
+        on a bad timezone/time value rather than raising — this method
+        sits on the hot path for every HIGH alert fan-out (see
+        list_subscribers_for_symbol), and one corrupted row must never be
+        able to take that down for everyone."""
+        if self.quiet_hours_start is None or self.quiet_hours_end is None:
+            return False
+        try:
+            local_now = now_utc.astimezone(ZoneInfo(self.timezone)).time()
+            start = _parse_hhmm(self.quiet_hours_start)
+            end = _parse_hhmm(self.quiet_hours_end)
+        except (ZoneInfoNotFoundError, ValueError):
+            return False
+        if start <= end:
+            return start <= local_now < end
+        return local_now >= start or local_now < end
+
 
 _USER_COLUMNS = (
     "telegram_user_id, chat_id, username, created_at, onboarded_at, risk_ack_at, timezone, "
     "quiet_hours_start, quiet_hours_end, tier, is_admin, paused_until, pause_reason, "
     "locked_until, lock_reason, max_trades_per_day, max_daily_loss, max_position_size, "
     "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct, "
-    "telegram_unreachable_at"
+    "telegram_unreachable_at, plan, founding_member, waitlisted_at"
 )
 
 
@@ -211,7 +258,7 @@ def _row_to_user(row) -> User:
         uid, chat_id, username, created_at, onboarded_at, risk_ack_at, tz, qh_start, qh_end,
         tier, is_admin, paused_until, pause_reason, locked_until, lock_reason,
         max_trades, max_loss, max_size, pending_json, halted_session, onboarding_step,
-        account_size, risk_per_trade_pct, telegram_unreachable_at,
+        account_size, risk_per_trade_pct, telegram_unreachable_at, plan, founding_member, waitlisted_at,
     ) = row
     return User(
         telegram_user_id=uid, chat_id=chat_id, username=username, created_at=created_at,
@@ -221,7 +268,8 @@ def _row_to_user(row) -> User:
         lock_reason=lock_reason, max_trades_per_day=max_trades, max_daily_loss=max_loss,
         max_position_size=max_size, pending_limits=json.loads(pending_json), halted_session=halted_session,
         onboarding_step=onboarding_step, account_size=account_size, risk_per_trade_pct=risk_per_trade_pct,
-        telegram_unreachable_at=telegram_unreachable_at,
+        telegram_unreachable_at=telegram_unreachable_at, plan=plan, founding_member=bool(founding_member),
+        waitlisted_at=waitlisted_at,
     )
 
 
@@ -491,6 +539,8 @@ def list_subscribers_for_symbol(
             continue
         if user.is_telegram_unreachable:
             continue
+        if user.is_in_quiet_hours(now):
+            continue
         watchlist = get_watchlist(conn, user.telegram_user_id) or default_watchlist
         if symbol in watchlist:
             subscribers.append(user)
@@ -507,6 +557,67 @@ def mark_telegram_unreachable(conn: sqlite3.Connection, telegram_user_id: int, w
     conn.execute(
         "UPDATE users SET telegram_unreachable_at = ? WHERE telegram_user_id = ?",
         (when.isoformat(), telegram_user_id),
+    )
+    conn.commit()
+
+
+# --------------------------------------------------------------------------
+# Capacity + waitlist. AppConfig.max_active_users is the config cap (None =
+# unlimited) — see tradebot.telegram_bot.handlers.handle_start, the only
+# place this is checked. Note this is about the bot's own operational
+# scale (SQLite contention, support burden), not Telegram's send-rate
+# limits — those are already independently enforced by the outbox worker's
+# token buckets (tradebot.telegram_bot.worker) regardless of subscriber
+# count, so a large but sane user base was never going to get anyone
+# rate-limited on the delivery side.
+# --------------------------------------------------------------------------
+
+
+def count_active_users(conn: sqlite3.Connection) -> int:
+    """Users who completed onboarding and aren't confirmed gone — the
+    population that actually consumes a capacity slot. A paused or locked
+    user still counts: they can resume any time without re-consuming one."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM users WHERE onboarded_at IS NOT NULL AND telegram_unreachable_at IS NULL"
+    ).fetchone()[0]
+
+
+def set_waitlisted(conn: sqlite3.Connection, telegram_user_id: int, when: datetime) -> None:
+    conn.execute(
+        "UPDATE users SET waitlisted_at = ? WHERE telegram_user_id = ?", (when.isoformat(), telegram_user_id)
+    )
+    conn.commit()
+
+
+def clear_waitlist(conn: sqlite3.Connection, telegram_user_id: int) -> None:
+    conn.execute("UPDATE users SET waitlisted_at = NULL WHERE telegram_user_id = ?", (telegram_user_id,))
+    conn.commit()
+
+
+def waitlist_position(conn: sqlite3.Connection, telegram_user_id: int) -> int | None:
+    """1-indexed, first-come-first-served by when each person landed on
+    the waitlist. None if this user isn't currently waitlisted."""
+    row = conn.execute(
+        "SELECT waitlisted_at FROM users WHERE telegram_user_id = ?", (telegram_user_id,)
+    ).fetchone()
+    if row is None or row[0] is None:
+        return None
+    ahead = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE waitlisted_at IS NOT NULL AND waitlisted_at < ?", (row[0],)
+    ).fetchone()[0]
+    return ahead + 1
+
+
+# --------------------------------------------------------------------------
+# Feedback — /feedback, one tap from anywhere. During a free beta this is
+# the only thing being collected instead of revenue.
+# --------------------------------------------------------------------------
+
+
+def add_feedback(conn: sqlite3.Connection, telegram_user_id: int, message: str, when: datetime) -> None:
+    conn.execute(
+        "INSERT INTO feedback (telegram_user_id, message, ts_utc) VALUES (?, ?, ?)",
+        (telegram_user_id, message, when.isoformat()),
     )
     conn.commit()
 

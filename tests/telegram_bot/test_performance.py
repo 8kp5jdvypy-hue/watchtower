@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from tradebot.detectors import Detection
 from tradebot.journal import connect, set_news_driven, set_no_trade, write_cluster
 from tradebot.telegram_bot import performance
@@ -47,6 +49,66 @@ def test_hit_rate_avg_return_and_streak_hand_computed():
     assert abs(tr.avg_return_pct - 0.0) < 1e-9
     # losses at idx 1, then idx 3,4 (back to back) -> longest streak is 2
     assert tr.longest_losing_streak == 2
+    # exactly 50% is z=0 by construction -> never significant
+    assert tr.significance.z_score == 0.0
+    assert tr.significance.is_significant is False
+
+
+# ---------------------------------------------------------------------- #
+# Statistical significance — see performance.significance_check. This is
+# what stops the welcome text / pinned message from ever calling a
+# coin-flip hit rate "a measured, real edge."
+# ---------------------------------------------------------------------- #
+
+
+def test_hit_rate_z_score_is_zero_at_exactly_the_baseline():
+    assert performance.hit_rate_z_score(0.5, 1000) == 0.0
+
+
+def test_hit_rate_z_score_is_symmetric_around_baseline():
+    above = performance.hit_rate_z_score(0.55, 400)
+    below = performance.hit_rate_z_score(0.45, 400)
+    assert above > 0 and below < 0
+    assert abs(above + below) < 1e-9
+
+
+def test_hit_rate_z_score_zero_sample_size_does_not_divide_by_zero():
+    assert performance.hit_rate_z_score(0.5, 0) == 0.0
+
+
+def test_a_near_coin_flip_at_real_world_sample_size_is_not_significant():
+    """This is the exact regression case: 49.57% over n=466 (this
+    project's actual live numbers when this check was added) must not
+    read as significant — this is what makes the coin-flip finding real,
+    not a one-off in the current data."""
+    check = performance.significance_check(0.4957, 466)
+    assert check.is_significant is False
+    assert abs(check.z_score) < 1.0  # nowhere close to the ~1.96 threshold
+
+
+def test_a_strong_effect_at_a_large_sample_is_significant():
+    check = performance.significance_check(0.60, 1000)
+    assert check.is_significant is True
+    assert check.z_score > performance.Z_95_TWO_SIDED
+
+
+def test_required_sample_size_matches_the_standard_formula_by_hand():
+    # ((1.96 + 0.84)^2 * 0.25) / 0.05^2 ~= 784
+    n = performance.required_sample_size(0.55)
+    assert 780 <= n <= 790
+
+
+def test_required_sample_size_rejects_a_target_equal_to_baseline():
+    with pytest.raises(ValueError):
+        performance.required_sample_size(0.5)
+
+
+def test_n_needed_for_meaningful_edge_does_not_depend_on_current_sample():
+    """A fixed target ('how much would it take'), not a projection off
+    today's noisy observed effect — see SignificanceCheck's docstring."""
+    small = performance.significance_check(0.51, 20)
+    large = performance.significance_check(0.51, 4000)
+    assert small.n_needed_for_meaningful_edge == large.n_needed_for_meaningful_edge
 
 
 def test_max_drawdown_on_a_monotonic_losing_sequence():
@@ -87,3 +149,72 @@ def test_total_alerts_vs_no_trade_only_counts_tracked_rows():
     assert tr.total_alerts == 6
     assert tr.no_trade_tracked_count == 5  # the untracked one is excluded
     assert tr.total_no_trade == 2
+
+
+# ---------------------------------------------------------------------- #
+# Weekly recap — see tradebot.rendering.templates.render_weekly_recap.
+# Unlike track_record(), this never returns None: a thin week still gets
+# a recap, just one that says the sample is too thin for a rate.
+# ---------------------------------------------------------------------- #
+
+
+def _seed_on(conn, ts, close, mark, kind="gap", trend="up"):
+    did = write_cluster(
+        conn, session=ts.date().isoformat(), symbol="TEST", ts_utc=ts.isoformat(),
+        kinds=kind, headlines="h", score=5.0, close=close, atr14=1.0, trend=trend,
+        detections=[Detection("TEST", kind, ts, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, mark))
+    conn.commit()
+    return did
+
+
+def test_weekly_recap_scopes_strictly_to_the_week_window():
+    conn = connect(":memory:")
+    week_start = datetime(2026, 8, 3, tzinfo=timezone.utc)  # Monday
+    week_end = datetime(2026, 8, 10, tzinfo=timezone.utc)  # next Monday, exclusive
+    for i in range(5):  # inside the week: all hits
+        _seed_on(conn, week_start + timedelta(days=i, hours=1), 100, 101)
+    _seed_on(conn, week_start - timedelta(hours=1), 100, 101)  # just before -> excluded
+    _seed_on(conn, week_end, 100, 101)  # exactly at week_end -> excluded (exclusive)
+
+    recap = performance.weekly_recap(conn, week_start.isoformat(), week_end.isoformat())
+    assert recap.sample_size == 5
+    assert recap.hit_rate == 1.0
+
+
+def test_weekly_recap_never_returns_none_even_with_too_few_alerts():
+    conn = connect(":memory:")
+    week_start = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    week_end = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    _seed_on(conn, week_start + timedelta(hours=1), 100, 101)  # only 1 -> below MIN_HISTORY_SAMPLE
+
+    recap = performance.weekly_recap(conn, week_start.isoformat(), week_end.isoformat())
+    assert recap is not None
+    assert recap.sample_size == 1
+    assert recap.hit_rate is None
+    assert recap.significance is None
+
+
+def test_weekly_recap_with_zero_alerts_still_returns_a_recap():
+    conn = connect(":memory:")
+    recap = performance.weekly_recap(conn, "2026-08-03T00:00:00+00:00", "2026-08-10T00:00:00+00:00")
+    assert recap.sample_size == 0
+    assert recap.total_alerts == 0
+    assert recap.hit_rate is None
+
+
+def test_weekly_recap_computes_a_bad_week_exactly_like_a_good_one():
+    """The structural guarantee behind 'publishes bad weeks as
+    prominently as good ones': the SAME function, SAME fields, SAME
+    significance math regardless of sign."""
+    conn = connect(":memory:")
+    week_start = datetime(2026, 8, 3, tzinfo=timezone.utc)
+    week_end = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    for i in range(6):  # all losses
+        _seed_on(conn, week_start + timedelta(days=1, hours=i), 100, 99)
+
+    recap = performance.weekly_recap(conn, week_start.isoformat(), week_end.isoformat())
+    assert recap.hit_rate == 0.0
+    assert recap.avg_return_pct < 0
+    assert recap.significance is not None  # computed exactly the same as a winning week would be

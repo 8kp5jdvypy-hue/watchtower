@@ -37,16 +37,26 @@ duplicated.
    in the medium digest and heartbeat), and `hour_performance()` (per ET
    hour, informational only via `scripts/hour_report.py` — see "Best hours"
    below for why this doesn't gate anything).
-7. `tradebot/alerts.py` — `format_alert()`, `TelegramAlerter` /
-   `ConsoleAlerter`, `AlertBudget` (daily cap, per-detector cooldown,
-   hourly medium digest, EOD log summary).
-8. `tradebot/costs.py` — `breakeven_move()` for the ATM option contract,
-   shown in every alert.
-9. `tradebot/runner.py` — the live 5-minute loop. Sends
-   `format_morning_briefing()` once at the start of every run (live or
-   replay) — the validated rules (HIGH tier only, no confirmation delay,
-   no time-of-day filter — see below) plus the live HIGH-tier track
-   record, not a static list.
+7. `tradebot/rendering/templates.py` — one render function per message
+   type (`render_high_alert()`, `render_morning_briefing()`, etc.), pure:
+   data in, string out. `tradebot/alerts.py` holds `TelegramAlerter` /
+   `ConsoleAlerter` and `AlertBudget` (daily cap, per-detector cooldown,
+   hourly medium digest, EOD log summary) — delivery/budgeting, not
+   formatting.
+8. `tradebot/costs.py` — `select_contract()` picks the ATM (or vertical)
+   option contract and its real breakeven, shown in every HIGH alert.
+   The cost model assumes a 45-minute hold (`DEFAULT_HOLD_MINUTES`,
+   matched to `AlertBudget`'s own per-(symbol, kind) cooldown — see the
+   constant's own comment for why, not an arbitrary hour).
+9. `tradebot/runner.py` — the live 5-minute loop. Sends the morning
+   briefing once at the start of every run (live or replay) — the
+   validated rules (HIGH tier only, no confirmation delay, no
+   time-of-day filter — see below) plus the live HIGH-tier track record,
+   not a static list.
+
+See `README.md` for the fuller current architecture (the outbox/delivery
+worker, the Telegram command layer, the public status page, etc.) — this
+list only covers the original scanner/detector/cost core.
 
 ## Tiers
 
@@ -66,12 +76,20 @@ bucketed by `tier_for_score()`:
   never a single noisy 5-minute print. This cut gap detections ~4x
   (~1420 → 362) and changed the score distribution materially, hence
   the recalibration above.
-- HIGH tier is the one part of this system with a measured (not assumed)
-  edge, and even that is fragile: a Jan-May vs. Jun-Aug split showed
-  58.7%/+0.40% avg on the later half alone vs. 50.4%/+0.09% combined
-  with the earlier half. Treat every stat here as provisional until the
-  sample is much larger — `tier_performance()` keeps this honest by
-  recomputing live rather than freezing a number in this doc.
+- **HIGH tier is not a proven edge.** An earlier Jan-May vs. Jun-Aug split
+  looked promising in isolation (58.7%/+0.40% avg on the later half alone
+  vs. 50.4%/+0.09% combined with the earlier half) — but as more sessions
+  accumulated, the combined number kept drifting back toward a coin flip:
+  as of this writing, n=466 @ +30m sits at 49.57% hit rate / +0.03% avg
+  move, a z-score of -0.19 against a 50% baseline (nowhere near the ~1.96
+  needed to call that "different from chance" at all — see
+  `tradebot.telegram_bot.performance.significance_check`). That earlier
+  58.7% subset is exactly the kind of thing this doc already warned about
+  ("treat every stat here as provisional until the sample is much
+  larger") — it wasn't wrong to report, but it was never safe to build a
+  claim on. `tier_performance()` and `/start`'s onboarding text both
+  recompute this live and state the significance verdict plainly, rather
+  than freezing a number here that a real audit would later contradict.
 
 ## Best hours (why there's no time-of-day rule)
 
@@ -171,61 +189,76 @@ before/after comparison periodically as more sessions accumulate.
 
 ## Alert format
 
-Plain text with emojis, not HTML/Markdown — renders cleanly in both
-Telegram and ConsoleAlerter's stdout with no parse_mode or escaping
-needed. One cluster per message for high tier; medium tier is batched
-into an hourly digest; log tier only appears in the end-of-day summary,
-not as individual messages.
+HTML parse mode (not Markdown — fewer escaping bugs), rendered by
+`tradebot/rendering/templates.py::render_high_alert()`. **Exactly one
+emoji per message** — the tier marker — every other emoji (per-field
+icons, section headers) was deliberately removed in the Kestrel
+rendering rewrite; if you're looking at a message with lots of emoji,
+you're looking at an old build. One cluster per message for HIGH tier;
+MEDIUM is batched into an hourly digest; LOG only appears in the
+end-of-day summary, never as individual messages.
 
 ```
-{tier_emoji} {TIER} — {symbol} {trend_emoji}
-{kinds}
+{tier_emoji} {TIER} · {symbol} · {BULLISH|BEARISH}
 
-🎯 {BULLISH|BEARISH} — favors {calls|puts}
+{primary_headline}
 
-{headlines}
+Last         ${last:.2f}
+Prior close  ${prior_close:.2f}
+Session      ${prior_low:.2f}–${prior_high:.2f}
+Score        {score:.2f} ATR
+ATR(14)      {atr14:.2f}
+Similar      {history}
+Contract     {contract}
 
-📊 Score: {score:.2f} ATR
-💵 Close: ${close:.2f}  (ATR14: {atr14})
-⚖️ Breakeven (60m): {breakeven}
-📚 Similar setups: {history}
-📐 Range: ${opening_range_low:.2f}-${opening_range_high:.2f}  |  Prior close: ${prior_close:.2f}
-💹 Quote: ${bid:.2f} / ${ask:.2f}  (last ${last:.2f})
-
-🕐 {ts_et} ET
-🆔 {id} · v{code_version}
+{kind tag line}
+{HH:MM} ET · {short_id} · Not advice.
 ```
 
-- `{tier_emoji}` — 🔴 HIGH, 🟡 MEDIUM, ⚪ LOG.
-- `{trend_emoji}` — 📈 up, 📉 down (close vs. `prior_close`).
+- `{tier_emoji}` — 🔴 HIGH, 🟡 MEDIUM, ⚪ LOG. The only emoji in the message.
 - `{TIER}` — uppercase: `HIGH`, `MEDIUM`, or `LOG`.
-- `{kinds}` — the cluster's detector kinds, comma-and-space joined (e.g.
-  `gap, rvol_spike`).
-- `🎯 {BULLISH|BEARISH}` — a mechanical translation of `trend` (up/down)
+- `{BULLISH|BEARISH}` — a mechanical translation of `trend` (up/down)
   into the option side it favors. Not a prediction — pair with the
-  history line below to judge how reliable that direction actually is
-  for this kind of setup.
-- `{headlines}` — the constituent detections' headlines, semicolon
-  joined, as already stored in the journal.
-- `{atr14}` — two decimals, or `n/a` if unavailable.
-- `{breakeven}` — from `costs.breakeven_move()` for a 60-minute hold of
-  the nearest-ATM contract, shown as `X.XX% (Y.YY ATR)`, or
-  `no tradable contract` if the chain is unavailable or the ATM contract
-  fails the liquidity filter (spread > 12% of mid, or open interest <
-  500) — never a guessed delta.
-- `{history}` — from `journal.historical_performance()`: what past
+  Similar line to judge how reliable that direction actually is for
+  this kind of setup.
+- `{primary_headline}` — the single highest-scoring constituent
+  detection's own headline (the one-sentence rationale), not every
+  trigger chained together — the full kind list is the tag line at the
+  bottom instead.
+- `Session` — the **prior** session's low/high (naming carried over from
+  an earlier draft; not today's intraday range).
+- `Contract` — from `costs.select_contract()`: the picked ATM (or, on a
+  high-IV-rank day, debit vertical) contract's strike/expiry and real
+  breakeven (`X.XX% (Y.YY ATR)`), assuming a 45-minute hold matched to
+  the alert cooldown — or `none tradable — {reason}` if nothing cleared
+  the liquidity gate (spread > 10% of mid, absolute spread > 15¢ under
+  $3 mid, open interest below the symbol's liquidity-class floor
+  (500 deep-class / 250 thin-class), day volume < 100, or bid ≤ $0.05).
+  Never a guessed delta or a fabricated contract.
+- `Similar` — from `journal.historical_performance()`: what past
   clusters with this same primary detector kind and trend direction
   actually did, using real backfilled +30min prices from the `marks`
-  table (e.g. `65% continued (n=20), avg +0.80% at 30m`). Shows
-  `not enough history yet` below `MIN_HISTORY_SAMPLE` (5) — never a stat
-  built on too few data points to mean anything.
-- `{ts_et}` — `YYYY-MM-DD HH:MM` in US/Eastern.
-- `{id}` — the journal's detection id.
-- `{code_version}` — the short git hash the cluster was journaled under.
+  table (e.g. `65% cont. (n=20)`). Shows `not enough history yet` below
+  `MIN_HISTORY_SAMPLE` (5) — never a stat built on too few data points
+  to mean anything. Replaced with a plain note when the cluster overlaps
+  a known news/macro event window — technical base rates don't transfer
+  to an event-driven move.
+- `{kind tag line}` — the cluster's detector kinds, humanized and
+  `·`-joined (e.g. `gap · VWAP break`), never the raw internal kind
+  strings.
+- `{short_id}` — the first 6 characters of the journal detection id, for
+  a human to type into `/took`/`/closed` later. The alert's own buttons
+  ("I took this", "How'd it play out?", etc.) carry the full id in their
+  callback data regardless — the truncation is purely for what's shown
+  to a person, never for lookup, and `/took`'s own confirmation text
+  shows an 8-char prefix instead (see handlers.py) — cosmetically
+  inconsistent between the two, not a bug, since `_resolve_detection`
+  matches on any valid prefix length.
 
 Digests, log summaries, system notices (halt, staleness, cap reached,
-errors), and the heartbeat all follow the same emoji-plus-plain-text
-convention — see `tradebot/runner.py`'s message builders.
+errors), the heartbeat, the weekly recap, and the pinned status message
+all follow the same one-emoji-or-none HTML convention — see
+`tradebot/rendering/templates.py` for the full set of renderers.
 
 ## Non-goals
 

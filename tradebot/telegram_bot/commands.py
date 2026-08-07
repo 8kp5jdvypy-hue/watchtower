@@ -26,6 +26,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("export", "Download your journal as CSV"),
     ("help", "All commands and support"),
     ("halt", "Emergency stop"),
+    ("feedback", "Tell us what's broken or missing"),
 ]
 
 COMMAND_NAMES = [name for name, _ in COMMANDS]
@@ -34,7 +35,7 @@ COMMAND_NAMES = [name for name, _ in COMMANDS]
 # replies "DM me for that" rather than touching personal data in a shared
 # chat. Regular users' /halt in a group still only affects their own
 # session (see handlers.halt), so it's safe to allow there too.
-GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt"})
+GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt", "feedback"})
 
 # Channel posts (the bot posting alerts into a channel where it's admin)
 # carry NO user identity at all — Telegram's `channel_post` update has no

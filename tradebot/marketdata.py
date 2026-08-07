@@ -174,7 +174,7 @@ class ReplayMarketData:
 
     def chain(self, symbol: str, expiry: date) -> OptionChain:
         raise NotImplementedError(
-            "ReplayMarketData has no historical options chain cache — breakeven_move() "
+            "ReplayMarketData has no historical options chain cache — costs.select_contract() "
             "will report 'no tradable contract' rather than mix live greeks into a "
             "historical replay"
         )

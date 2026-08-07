@@ -1,10 +1,12 @@
 .env
-data/cache/
-data/journal.db
-data/users.db
-data/HALT
-data/heartbeat.json
-data/*.log
+# Everything under data/ is runtime-generated (databases, cache, lock
+# files, logs, small JSON state files) — never source, never fixtures.
+# A blanket ignore here on purpose: a per-file allowlist keeps drifting
+# out of date every time a new runtime file type gets added (metrics.json,
+# outbox_worker.lock, status.html, and two more state files all showed up
+# in one afternoon), and an accidental `git add -A` should never be able
+# to stage a live secret-adjacent or account-scoped file.
+data/
 out/
 __pycache__/
 .venv/

@@ -143,6 +143,8 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     _add_column_if_missing(conn, "detections", "event_kind", "TEXT")
     _add_column_if_missing(conn, "detections", "event_severity", "TEXT")
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
+    _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
+    _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
     return conn
 
 
@@ -222,8 +224,8 @@ def write_cluster(
 
 def set_no_trade(conn: sqlite3.Connection, detection_id: str, no_trade: bool) -> None:
     """Records whether a dispatched HIGH alert ended up with a tradable
-    contract — set once breakeven_move() has actually been computed, since
-    write_cluster() happens before that. NULL (never called) means 'not
+    contract — set once costs.select_contract() has actually been computed,
+    since write_cluster() happens before that. NULL (never called) means 'not
     applicable or not yet computed', not 'had a contract' — see
     /performance, which reports that distinction rather than assuming."""
     conn.execute("UPDATE detections SET no_trade = ? WHERE id = ?", (int(no_trade), detection_id))
@@ -648,3 +650,65 @@ def pending_contract_close_backfills(conn: sqlite3.Connection, session: date) ->
         (session.isoformat(),),
     ).fetchall()
     return rows
+
+
+def record_contract_day_range(conn: sqlite3.Connection, detection_id: str, day_low: float, day_high: float) -> None:
+    """The contract's own real intraday trade-price range for the day —
+    distinct from the mid_* columns (bid/ask midpoints at fixed
+    checkpoints): this is the actual low/high across every real trade in
+    the contract that session, i.e. the full range anyone trading it that
+    day could have captured, independent of our specific entry timing."""
+    conn.execute(
+        "UPDATE contract_selections SET day_low = ?, day_high = ? WHERE detection_id = ?",
+        (day_low, day_high, detection_id),
+    )
+    conn.commit()
+
+
+def pending_contract_day_range_backfills(conn: sqlite3.Connection, session: date) -> list[tuple]:
+    """Every SINGLE-LEG contract_selections row from `session` still
+    missing its day range — same due-once-the-session-ends timing as
+    pending_contract_close_backfills, fetched via a separate vendor call
+    (a full intraday bar series, not a point-in-time chain snapshot).
+    Verticals are excluded on purpose: a spread's real day range isn't
+    the sum of its two legs' independent ranges (they don't hit their
+    extremes at the same moment), so there's no honest single number to
+    report for one."""
+    rows = conn.execute(
+        """
+        SELECT cs.detection_id, cs.symbol, cs.right, cs.strike, cs.expiry
+        FROM contract_selections cs
+        JOIN detections d ON d.id = cs.detection_id
+        WHERE d.session = ? AND cs.day_low IS NULL AND cs.is_vertical = 0
+        """,
+        (session.isoformat(),),
+    ).fetchall()
+    return rows
+
+
+@dataclass(frozen=True)
+class ContractOutcome:
+    """Everything /took's "how'd it play out" follow-up needs — one
+    query, joined against the one contract_selections row for this
+    detection. Every field is None until the corresponding backfill has
+    actually run; never fabricated to fill a gap."""
+
+    symbol: str
+    right: str
+    strike: float
+    expiry: str
+    entry_mid: float
+    mid_30m: float | None
+    mid_60m: float | None
+    mid_close: float | None
+    day_low: float | None
+    day_high: float | None
+
+
+def get_contract_outcome(conn: sqlite3.Connection, detection_id: str) -> ContractOutcome | None:
+    row = conn.execute(
+        "SELECT symbol, right, strike, expiry, entry_mid, mid_30m, mid_60m, mid_close, day_low, day_high "
+        "FROM contract_selections WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()
+    return ContractOutcome(*row) if row else None

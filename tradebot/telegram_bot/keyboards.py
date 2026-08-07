@@ -22,7 +22,8 @@ def alert_actions_keyboard(detection_id: str) -> dict:
             ("I took this", f"took:{detection_id}"),
             ("Skipped", f"skip:{detection_id}"),
             ("Why NO TRADE?", f"whynt:{detection_id}"),
-        ]
+        ],
+        [("How'd it play out?", f"outcome:{detection_id}")],
     ])
 
 

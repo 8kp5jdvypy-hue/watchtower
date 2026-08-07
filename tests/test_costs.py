@@ -190,11 +190,41 @@ def test_required_move_is_reported_in_atr_directly_comparable_to_score():
     result = select_contract(_chain_fn(contracts), SYMBOL, spot=431.0, direction="up", atr14=4.0, similar_setups=_similar(), today=TODAY)
     spread_cost = (5.2 - 5.0) * 100
     commissions = 0.65 * 2
-    theta_per_hour = abs(-0.3) / 24
+    theta_per_hour = abs(-0.3) * 100 / 24  # theta is per-share, scaled to per-contract like spread_cost
     from tradebot.costs import DEFAULT_HOURS_HELD
     expected_pct = (spread_cost + commissions + theta_per_hour * DEFAULT_HOURS_HELD) / (0.5 * 100 * 431.0)
     assert result.breakeven.pct == pytest.approx(expected_pct)
     assert result.breakeven.atr_units == pytest.approx((expected_pct * 431.0) / 4.0)
+
+
+def test_theta_is_scaled_per_contract_not_left_per_share():
+    """Regression: theta is quoted per SHARE by the vendor (same as
+    delta and bid/ask) — verified live against a real 1-DTE ATM contract,
+    whose theta only made sense (~67% of its value decaying in one day)
+    once scaled by 100. An unscaled theta silently understated every
+    breakeven's real cost by ~100x on the theta term. This test fails
+    loudly if that scaling is ever accidentally removed: with a large,
+    realistic theta the correctly-scaled cost must swamp the tiny
+    spread/commission costs, not be swamped by them."""
+    # A short-dated, deep-theta contract: -2.00/share/day is a realistic
+    # theta for a near-ATM option a day or two from expiry.
+    contracts = [_contract(strike=430.0, delta=0.5, bid=5.00, ask=5.02, theta=-2.00)]
+    result = select_contract(
+        _chain_fn(contracts), SYMBOL, spot=431.0, direction="up", atr14=4.0, similar_setups=_similar(), today=TODAY,
+    )
+    from tradebot.costs import DEFAULT_HOURS_HELD
+
+    spread_cost = (5.02 - 5.00) * 100  # $2 — tiny
+    commissions = 0.65 * 2  # $1.30 — tiny
+    correctly_scaled_theta_cost = (abs(-2.00) * 100 / 24) * DEFAULT_HOURS_HELD  # ~$6.25 for a 45min hold
+    expected_total_cost = spread_cost + commissions + correctly_scaled_theta_cost
+    expected_pct = expected_total_cost / (0.5 * 100 * 431.0)
+
+    assert result.breakeven.pct == pytest.approx(expected_pct)
+    # The theta term must be the dominant cost here, not a rounding error
+    # next to spread+commissions — this is what an unscaled (per-share)
+    # theta would have gotten wrong.
+    assert correctly_scaled_theta_cost > (spread_cost + commissions)
 
 
 def test_returns_no_liquid_strike_rather_than_fabricating_a_missing_delta():

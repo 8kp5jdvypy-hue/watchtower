@@ -4,6 +4,7 @@ diff here instead of surprising someone in Telegram.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from tradebot.alerts import Cluster
@@ -208,7 +209,7 @@ def test_render_morning_briefing_golden():
         "2. Act immediately — waiting for confirmation tested worse, not better.\n"
         "3. No proven best hours — trade HIGH whenever it fires, not on a schedule.\n"
         "4. Check the track record before acting — a low rate is a real reason to skip.\n"
-        "5. Compare Score to the contract's breakeven — skip if the hurdle exceeds typical delivery.\n"
+        "5. Compare Score to the contract's breakeven — skip if the hurdle exceeds the typical move.\n"
         "6. Respect the daily cap and cooldown — they stop overtrading.\n"
         "\n"
         "<i>Current HIGH track record: 60% cont. (n=42)</i>\n"
@@ -349,6 +350,182 @@ def test_render_position_size_golden_exceeds_limit():
     )
 
 
+def _contract_outcome(**overrides):
+    from tradebot.journal import ContractOutcome
+
+    fields = dict(
+        symbol="META", right="call", strike=600.0, expiry="2026-04-17", entry_mid=2.96,
+        mid_30m=3.24, mid_60m=None, mid_close=1.85, day_low=1.43, day_high=3.90,
+    )
+    fields.update(overrides)
+    return ContractOutcome(**fields)
+
+
+def test_render_contract_outcome_golden():
+    when = datetime(2026, 4, 8, 20, 5, tzinfo=timezone.utc)
+    text = templates.render_contract_outcome(_contract_outcome(), when)
+    assert text == (
+        "<b>Contract outcome</b>\n"
+        "\n"
+        "$600.00 Call exp 4/17\n"
+        "Entry (at alert): $2.96\n"
+        "At +30m: $3.24 (+9.5%, profitable)\n"
+        "At close: $1.85 (-37.5%, not profitable)\n"
+        "\n"
+        "Day's range for this contract: $1.43 - $3.90\n"
+        "Max theoretical profit that day: +172.7% (buy the low, sell the high)\n"
+        "\n"
+        "<i>16:05 ET · Not advice.</i>"
+    )
+
+
+def test_render_contract_outcome_with_no_checkpoints_yet():
+    when = datetime(2026, 4, 8, 20, 5, tzinfo=timezone.utc)
+    outcome = _contract_outcome(mid_30m=None, mid_60m=None, mid_close=None, day_low=None, day_high=None)
+    text = templates.render_contract_outcome(outcome, when)
+    assert "No forward prices recorded yet" in text
+    assert "not available yet" in text.lower()
+    assert "profitable" not in text.lower()
+
+
+def test_render_contract_outcome_put_label():
+    outcome = _contract_outcome(right="put")
+    when = datetime(2026, 4, 8, 20, 5, tzinfo=timezone.utc)
+    text = templates.render_contract_outcome(outcome, when)
+    assert "Put exp" in text
+
+
+def _track_record_for_pin(**overrides):
+    from tradebot.telegram_bot.performance import SignificanceCheck, TrackRecord
+
+    fields = dict(
+        tier="high", offset_min=30, sample_size=466, hit_rate=0.4957, avg_return_pct=0.03,
+        max_drawdown_pct=-27.10, longest_losing_streak=9, news_driven=None, clean_technical=None,
+        total_alerts=10, total_no_trade=7, no_trade_tracked_count=7,
+        significance=SignificanceCheck(z_score=-0.19, is_significant=False, n_needed_for_meaningful_edge=785),
+    )
+    fields.update(overrides)
+    return TrackRecord(**fields)
+
+
+def test_render_pinned_status_golden_not_significant():
+    when = datetime(2026, 8, 6, 16, 5, tzinfo=timezone.utc)
+    text = templates.render_pinned_status(_track_record_for_pin(), when)
+    assert text == (
+        "<b>BETA — live sample size</b>\n"
+        "\n"
+        "HIGH tier: 466 alerts so far (+30m).\n"
+        "Not yet statistically different from a coin flip (z=-0.19). ~785 alerts needed to confirm even a modest real edge.\n"
+        "\n"
+        "Updated automatically each session — /performance has the full breakdown.\n"
+        "\n"
+        "<i>12:05 ET · Not advice.</i>"
+    )
+
+
+def test_render_pinned_status_golden_significant():
+    from tradebot.telegram_bot.performance import SignificanceCheck
+
+    when = datetime(2026, 8, 6, 16, 5, tzinfo=timezone.utc)
+    tr = _track_record_for_pin(
+        hit_rate=0.60, significance=SignificanceCheck(z_score=2.1, is_significant=True, n_needed_for_meaningful_edge=785),
+    )
+    text = templates.render_pinned_status(tr, when)
+    assert "Statistically better than a coin flip (z=2.10) — still provisional." in text
+
+
+def test_render_pinned_status_with_no_history_says_so():
+    when = datetime(2026, 8, 6, 16, 5, tzinfo=timezone.utc)
+    text = templates.render_pinned_status(None, when)
+    assert "Not enough tracked history yet" in text
+    assert "beta" in text.lower()
+
+
+def _weekly_recap(**overrides):
+    from tradebot.telegram_bot.performance import SignificanceCheck
+
+    fields = dict(
+        week_start="2026-07-27T00:00:00+00:00", week_end="2026-08-03T00:00:00+00:00", tier="high", offset_min=30,
+        sample_size=20, hit_rate=0.6, avg_return_pct=0.35,
+        significance=SignificanceCheck(z_score=0.89, is_significant=False, n_needed_for_meaningful_edge=785),
+        total_alerts=20, total_no_trade=4, no_trade_tracked_count=20,
+    )
+    fields.update(overrides)
+
+    @dataclass(frozen=True)
+    class _Recap:
+        week_start: str
+        week_end: str
+        tier: str
+        offset_min: int
+        sample_size: int
+        hit_rate: float | None
+        avg_return_pct: float | None
+        significance: object
+        total_alerts: int
+        total_no_trade: int
+        no_trade_tracked_count: int
+
+    return _Recap(**fields)
+
+
+def test_render_weekly_recap_golden_good_week():
+    when = datetime(2026, 8, 3, 16, 5, tzinfo=timezone.utc)
+    text = templates.render_weekly_recap(_weekly_recap(), when)
+    assert text == (
+        "<b>Weekly recap — 2026-07-27T00:00:00+00:00 to 2026-08-03T00:00:00+00:00</b>\n"
+        "\n"
+        "HIGH tier alerts published: 20\n"
+        "NO TRADE (system said sit this one out): 4 of 20 tracked\n"
+        "\n"
+        "Hit rate: +60.00%   Avg move: +0.35% (n=20, +30m)\n"
+        "That's not statistically different from a coin flip this week (z=0.89).\n"
+        "\n"
+        "<i>12:05 ET · Not advice.</i>"
+    )
+
+
+def test_render_weekly_recap_golden_bad_week_uses_the_identical_template():
+    """The whole point: a losing week renders through the SAME function,
+    same section order, same significance line — nothing about a bad
+    week is structurally smaller or softer than a good one."""
+    from tradebot.telegram_bot.performance import SignificanceCheck
+
+    when = datetime(2026, 8, 3, 16, 5, tzinfo=timezone.utc)
+    bad = _weekly_recap(
+        hit_rate=0.2, avg_return_pct=-0.9,
+        significance=SignificanceCheck(z_score=-2.68, is_significant=True, n_needed_for_meaningful_edge=785),
+    )
+    good = _weekly_recap()
+    bad_text = templates.render_weekly_recap(bad, when)
+    good_text = templates.render_weekly_recap(good, when)
+
+    assert bad_text == (
+        "<b>Weekly recap — 2026-07-27T00:00:00+00:00 to 2026-08-03T00:00:00+00:00</b>\n"
+        "\n"
+        "HIGH tier alerts published: 20\n"
+        "NO TRADE (system said sit this one out): 4 of 20 tracked\n"
+        "\n"
+        "Hit rate: +20.00%   Avg move: -0.90% (n=20, +30m)\n"
+        "That's statistically worse than a coin flip this week (z=-2.68).\n"
+        "\n"
+        "<i>12:05 ET · Not advice.</i>"
+    )
+    # same line count, same section order — no template branching on outcome
+    assert len(bad_text.splitlines()) == len(good_text.splitlines())
+
+
+def test_render_weekly_recap_with_too_few_alerts_says_so_rather_than_a_fabricated_rate():
+    when = datetime(2026, 8, 3, 16, 5, tzinfo=timezone.utc)
+    thin = _weekly_recap(
+        sample_size=2, hit_rate=None, avg_return_pct=None, significance=None,
+        total_alerts=2, no_trade_tracked_count=0, total_no_trade=0,
+    )
+    text = templates.render_weekly_recap(thin, when)
+    assert "not enough tracked alerts" in text.lower()
+    assert "hit rate:" not in text.lower()
+
+
 def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
     when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
     tier_perf = TierPerformance(tier="high", sample_size=42, continuation_rate=0.595, avg_return_pct=0.356, offset_min=30)
@@ -361,6 +538,9 @@ def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
         templates.render_system_notice("halt requested", when),
         templates.render_position_size(_position_size(), when),
         templates.render_position_size(_position_size(exceeds_limit=True), when),
+        templates.render_weekly_recap(_weekly_recap(), when),
+        templates.render_pinned_status(None, when),
+        templates.render_contract_outcome(_contract_outcome(), when),
     ]
     for text in messages:
         assert "!" not in text
@@ -375,3 +555,12 @@ def test_all_interpolated_text_is_html_escaped():
     assert "&lt;script&gt;" in text
     assert "&lt;b&gt;bold&lt;/b&gt;" in text
     assert "&amp;" in text
+
+
+def test_render_sample_alert_is_labeled_as_a_real_example_not_a_promise():
+    text = templates.render_sample_alert()
+    assert "META" in text
+    assert "not a mockup" in text.lower()
+    assert "+3.47%" in text
+    assert "one real win, not the average" in text.lower()
+    assert "/performance" in text

@@ -3,6 +3,7 @@ rule exercised through the actual /limits handler (not just the db layer).
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,8 +16,22 @@ from tradebot.telegram_bot.context import AppConfig, HandlerContext
 
 NOW = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
 
+# Every reply goes out with parse_mode=HTML (see client.BotClient.send_message)
+# — a literal '<' in plain usage-hint text (e.g. "<max trades/day>") gets
+# parsed as a bogus tag and Telegram rejects the WHOLE message with a 400,
+# which the dispatcher just logs and swallows: the user gets nothing, no
+# error shown. Caught live when /start's "limits" resume text 400'd in
+# production. _ALLOWED_TAG_RE is the small whitelist of tags this bot
+# actually renders; anything else must be written as &lt;/&gt;.
+_ALLOWED_TAG_RE = re.compile(r"</?(b|i|code)>")
 
-def _app(market_open=True, bot_username=None):
+
+def _assert_html_safe(text: str) -> None:
+    stripped = _ALLOWED_TAG_RE.sub("", text)
+    assert "<" not in stripped and ">" not in stripped, f"unescaped angle bracket in Telegram HTML text: {text!r}"
+
+
+def _app(market_open=True, bot_username=None, max_active_users=None):
     return AppConfig(
         admin_ids=frozenset({999}),
         default_watchlist=["SPY", "QQQ", "TSLA"],
@@ -27,11 +42,13 @@ def _app(market_open=True, bot_username=None):
         session_date_fn=lambda now: now.date(),
         halt_file=Path("/tmp/watchtower_test_HALT_handlers"),
         heartbeat_file=Path("/tmp/watchtower_test_heartbeat_handlers.json"),
+        incidents_path=Path("/tmp/watchtower_test_incidents_handlers.jsonl"),
         bot_username=bot_username,
+        max_active_users=max_active_users,
     )
 
 
-def _setup(user_id=1, onboarded=True, admin=False, tier="free", market_open=True):
+def _setup(user_id=1, onboarded=True, admin=False, market_open=True):
     users_conn = db.connect(":memory:")
     journal_conn = journal_connect(":memory:")
     db.get_or_create_user(users_conn, user_id, user_id, "alice")
@@ -40,17 +57,15 @@ def _setup(user_id=1, onboarded=True, admin=False, tier="free", market_open=True
         db.set_risk_ack(users_conn, user_id, NOW)
     if admin:
         db.set_admin(users_conn, user_id, True)
-    if tier != "free":
-        users_conn.execute("UPDATE users SET tier = ? WHERE telegram_user_id = ?", (tier, user_id))
-        users_conn.commit()
     return users_conn, journal_conn
 
 
-def _ctx(users_conn, journal_conn, user_id=1, args=None, now=NOW, market_open=True, chat_type="private", bot_username=None):
+def _ctx(users_conn, journal_conn, user_id=1, args=None, now=NOW, market_open=True, chat_type="private",
+         bot_username=None, max_active_users=None):
     return HandlerContext(
         client=None, users_conn=users_conn, journal_conn=journal_conn, user=db.get_user(users_conn, user_id),
         chat_id=user_id, chat_type=chat_type, args=args or [], now=now,
-        app=_app(market_open=market_open, bot_username=bot_username),
+        app=_app(market_open=market_open, bot_username=bot_username, max_active_users=max_active_users),
     )
 
 
@@ -87,6 +102,113 @@ def test_start_is_idempotent_for_an_already_onboarded_user():
     reply = handlers.handle_start(_ctx(users_conn, journal_conn))
     assert "already set up" in reply.text.lower()
     assert db.get_user(users_conn, 1).timezone == "America/Chicago"  # untouched
+    assert "beta" in reply.text.lower()
+
+
+def test_start_labels_beta_and_repositions_as_discipline_tool_not_a_proven_edge():
+    users_conn, journal_conn = _setup(onboarded=False)
+    reply = handlers.handle_start(_ctx(users_conn, journal_conn))
+    assert "beta" in reply.text.lower()
+    assert "discipline and journaling system" in reply.text.lower()
+    assert "not a proven trading edge" in reply.text.lower()
+    assert "may pause" in reply.text.lower()
+
+
+def test_start_states_plainly_when_the_hit_rate_is_not_yet_significant():
+    """The exact regression this whole feature exists for: a coin-flip
+    hit rate must never be silently presented as an edge."""
+    users_conn, journal_conn = _setup(onboarded=False)
+    journal_conn2 = journal_connect(":memory:")
+    base = NOW
+    for i in range(20):
+        did = write_cluster(
+            journal_conn2, session=base.date().isoformat(), symbol="TSLA", ts_utc=(base + timedelta(minutes=i)).isoformat(),
+            kinds="level_break", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection("TSLA", "level_break", base, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        # exactly 50/50 continuation -> hit_rate 0.5 -> z=0 -> not significant
+        journal_conn2.execute(
+            "INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)",
+            (did, 101 if i % 2 == 0 else 99),
+        )
+    journal_conn2.commit()
+
+    reply = handlers.handle_start(_ctx(users_conn, journal_conn2))
+    assert "not yet statistically different from a coin flip" in reply.text.lower()
+    assert "measured, real edge" not in reply.text.lower()
+
+
+# --------------------------------------------------------------------------
+# /start — capacity cap + waitlist
+# --------------------------------------------------------------------------
+
+
+def test_start_waitlists_a_brand_new_user_once_capacity_is_hit():
+    users_conn, journal_conn = _setup(onboarded=False)
+    db.get_or_create_user(users_conn, 998, 998, "already_onboarded")
+    db.mark_onboarded(users_conn, 998, NOW)  # fills the one available slot
+
+    reply = handlers.handle_start(_ctx(users_conn, journal_conn, max_active_users=1))
+    assert "capacity" in reply.text.lower() and "waitlist" in reply.text.lower()
+    user = db.get_user(users_conn, 1)
+    assert user.waitlisted_at is not None
+    assert user.onboarding_step is None  # never entered the onboarding flow
+
+
+def test_start_does_not_waitlist_below_capacity():
+    users_conn, journal_conn = _setup(onboarded=False)
+    reply = handlers.handle_start(_ctx(users_conn, journal_conn, max_active_users=10))
+    assert "waitlist" not in reply.text.lower()
+    assert db.get_user(users_conn, 1).onboarding_step == "risk_ack"
+
+
+def test_start_lets_a_waitlisted_user_in_once_a_slot_opens():
+    users_conn, journal_conn = _setup(onboarded=False)
+    db.set_waitlisted(users_conn, 1, NOW)
+
+    still_full = handlers.handle_start(_ctx(users_conn, journal_conn, max_active_users=0))
+    assert "waitlist" in still_full.text.lower()
+    assert db.get_user(users_conn, 1).waitlisted_at is not None
+
+    opened_up = handlers.handle_start(_ctx(users_conn, journal_conn, max_active_users=10))
+    assert "waitlist" not in opened_up.text.lower()
+    user = db.get_user(users_conn, 1)
+    assert user.waitlisted_at is None
+    assert user.onboarding_step == "risk_ack"
+
+
+# --------------------------------------------------------------------------
+# /start — risk ack transition includes the beta pricing notice
+# --------------------------------------------------------------------------
+
+
+def test_ack_risk_button_states_beta_pricing_before_timezone():
+    from tradebot.telegram_bot import callbacks
+    from tradebot.telegram_bot.context import CallbackContext
+
+    users_conn, journal_conn = _setup(onboarded=False)
+    ctx = CallbackContext(
+        client=None, users_conn=users_conn, journal_conn=journal_conn, user=db.get_user(users_conn, 1),
+        chat_id=1, message_id=1, arg="", now=NOW, app=_app(),
+    )
+    result = callbacks.handle_ack_risk_button(ctx)
+    assert "free during beta" in result.edit_text.lower()
+    assert "30 days" in result.edit_text.lower()
+    assert "founding-member pricing" in result.edit_text.lower()
+    assert "never free forever" not in result.edit_text.lower()  # no such promise is made
+    assert result.edit_keyboard is not None  # still lands on the timezone picker
+
+
+def test_completing_onboarding_sends_a_real_sample_alert():
+    """The 'here's what you actually get' moment — a real historical
+    alert, not a mockup, right when onboarding finishes."""
+    users_conn, journal_conn = _setup(onboarded=False)
+    db.set_onboarding_step(users_conn, 1, "limits")
+    reply = handlers._handle_limits_text(_ctx(users_conn, journal_conn), "5 200 10")
+    assert db.get_user(users_conn, 1).is_onboarded
+    assert "you're set" in reply.text.lower()
+    assert "what an alert actually looks like" in reply.text.lower()
+    assert "not a mockup" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #
@@ -100,6 +222,7 @@ def test_status_reports_market_state_and_users_own_lock_state():
     reply = handlers.handle_status(_ctx(users_conn, journal_conn))
     assert "paused" in reply.text.lower()
     assert "market" in reply.text.lower() or "live" in reply.text.lower() or "closed" in reply.text.lower()
+    assert "beta" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #
@@ -128,6 +251,30 @@ def test_performance_reports_real_numbers_once_history_exists():
     reply = handlers.handle_performance(_ctx(users_conn, journal_conn))
     assert "hit rate" in reply.text.lower()
     assert "100.00%" in reply.text  # every one of these synthetic rows continued
+    assert "coin flip" in reply.text.lower()  # the significance verdict — n=6 is nowhere near proof either way
+
+
+def test_performance_never_calls_a_coin_flip_hit_rate_a_measured_real_edge():
+    """The exact regression: /performance must state the coin-flip
+    verdict plainly, the same significance math as /start, not a rosier
+    number with no context."""
+    users_conn, journal_conn = _setup()
+    base = NOW
+    for i in range(20):
+        did = write_cluster(
+            journal_conn, session=base.date().isoformat(), symbol="TSLA", ts_utc=(base + timedelta(minutes=i)).isoformat(),
+            kinds="level_break", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection("TSLA", "level_break", base, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        journal_conn.execute(
+            "INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)",
+            (did, 101 if i % 2 == 0 else 99),
+        )
+        set_no_trade(journal_conn, did, False)
+    journal_conn.commit()
+    reply = handlers.handle_performance(_ctx(users_conn, journal_conn))
+    assert "not yet statistically different from a coin flip" in reply.text.lower()
+    assert "measured, real edge" not in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #
@@ -237,6 +384,38 @@ def test_closed_with_no_open_trade_gives_a_usage_hint():
     assert "no open trade" in reply.text.lower()
 
 
+def test_closed_by_short_price_is_never_misread_as_a_trade_id():
+    """Regression: a short whole-dollar price like '5' must never be
+    treated as a trade-id prefix lookup, even if some open trade's id
+    happens to start with '5' — see handle_closed's len>=8 gate."""
+    users_conn, journal_conn = _setup()
+    detection_id = _write_high_alert(journal_conn)
+    handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "4.00"]))
+    reply = handlers.handle_closed(_ctx(users_conn, journal_conn, args=["5"]))
+    assert "+25.00%" in reply.text  # (5-4)/4 -> treated as a price close, not a failed id lookup
+
+
+def test_closed_by_an_all_digit_short_id_prefix_is_treated_as_an_id_not_a_price():
+    """Regression: the 8-char short id prefix this bot shows (see
+    log_took's result.id[:8]) is hex, so an all-digit one is possible —
+    it must resolve as a trade-id prefix lookup, not get silently
+    misread as an absurd price, the way a bare numeric first arg
+    normally would be."""
+    users_conn, journal_conn = _setup()
+    detection_id = _write_high_alert(journal_conn)
+    handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "4.00"]))
+    trade = db.list_trades(users_conn, 1)[-1]
+    # Force this trade's real (32-char) id to start with an all-digit
+    # 8-char prefix, matching the exact edge case this fix is for.
+    forced_id = "12345678" + trade.id[8:]
+    users_conn.execute("UPDATE user_trades SET id = ? WHERE id = ?", (forced_id, trade.id))
+    users_conn.commit()
+
+    reply = handlers.handle_closed(_ctx(users_conn, journal_conn, args=["12345678", "5.00"]))
+    assert "+25.00%" in reply.text
+    assert db.get_trade(users_conn, forced_id).status == "closed"
+
+
 # ---------------------------------------------------------------------- #
 # /limits — including the mid-session raise-is-queued rule
 # ---------------------------------------------------------------------- #
@@ -254,6 +433,29 @@ def test_limits_decrease_applies_immediately_during_market_hours():
     reply = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["trades", "2"], market_open=True))
     assert "effective immediately" in reply.text.lower()
     assert db.get_user(users_conn, 1).max_trades_per_day == 2
+
+
+def test_limits_confirmation_uses_a_friendly_label_not_the_raw_field_name():
+    """Regression: confirmations must never leak internal snake_case
+    column names like 'max_trades_per_day' to the user."""
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["trades", "5"], market_open=True))
+    assert "max trades/day" in reply.text.lower()
+    assert "max_trades_per_day" not in reply.text
+    assert "is now 5," in reply.text  # a plain count, not "5.0"
+
+    loss_reply = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["loss", "200"], market_open=True))
+    assert "max daily loss" in loss_reply.text.lower()
+    assert "max_daily_loss" not in loss_reply.text
+    assert "$200.00" in loss_reply.text  # money-formatted, matching the /limits summary view
+
+
+def test_limits_queued_confirmation_uses_a_friendly_label_too():
+    users_conn, journal_conn = _setup()
+    handlers.handle_limits(_ctx(users_conn, journal_conn, args=["trades", "5"], market_open=False))
+    reply = handlers.handle_limits(_ctx(users_conn, journal_conn, args=["trades", "10"], market_open=True))
+    assert "max trades/day" in reply.text.lower()
+    assert "max_trades_per_day" not in reply.text
 
 
 def test_limits_increase_mid_session_is_queued_with_an_explanation():
@@ -320,15 +522,10 @@ def test_resume_refuses_when_locked_and_says_when_it_clears():
 # ---------------------------------------------------------------------- #
 
 
-def test_watchlist_free_tier_cannot_edit():
-    users_conn, journal_conn = _setup(tier="free")
-    reply = handlers.handle_watchlist(_ctx(users_conn, journal_conn))
-    assert reply.keyboard is None
-    assert "paid" in reply.text.lower()
-
-
-def test_watchlist_paid_tier_gets_an_editable_keyboard():
-    users_conn, journal_conn = _setup(tier="pro")
+def test_watchlist_editing_is_available_to_everyone_during_beta():
+    """No feature gating — see tradebot.telegram_bot.access.can_access,
+    which always returns True right now."""
+    users_conn, journal_conn = _setup()
     reply = handlers.handle_watchlist(_ctx(users_conn, journal_conn))
     assert reply.keyboard is not None
 
@@ -370,6 +567,14 @@ def test_tiers_lists_plans_and_notes_billing_not_configured():
     assert reply.keyboard is None  # no portal url configured
 
 
+def test_tiers_shows_plan_founding_member_status_and_the_beta_notice():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_tiers(_ctx(users_conn, journal_conn))
+    assert "beta" in reply.text.lower()
+    assert "founding member" in reply.text.lower()
+    assert "30 days" in reply.text.lower()
+
+
 # ---------------------------------------------------------------------- #
 # /export
 # ---------------------------------------------------------------------- #
@@ -406,6 +611,22 @@ def test_export_includes_direction_and_note_columns():
     assert "direction" in header and "note" in header
     assert b"up" in content
     assert b"took half size" in content
+
+
+def test_export_neutralizes_a_note_that_looks_like_a_spreadsheet_formula():
+    """Regression: a free-text note starting with =, +, -, or @ must not
+    open as a live formula in Excel/Sheets — this export is meant to be
+    shared, not just read back into this bot."""
+    users_conn, journal_conn = _setup()
+    detection_id = _write_high_alert(journal_conn)
+    handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "10.00"]))
+    handlers.handle_closed(_ctx(
+        users_conn, journal_conn, args=["11.00", "=cmd|'/c", "calc'!A1"],
+    ))
+    reply = handlers.handle_export(_ctx(users_conn, journal_conn))
+    _, content = reply.document
+    assert b"'=cmd" in content  # neutralized with a leading apostrophe
+    assert b",=cmd" not in content  # never written as a live formula cell
 
 
 # ---------------------------------------------------------------------- #
@@ -448,6 +669,26 @@ def test_help_in_dm_for_an_onboarded_user_has_no_setup_nag():
 
 
 # ---------------------------------------------------------------------- #
+# /feedback
+# ---------------------------------------------------------------------- #
+
+
+def test_feedback_with_no_message_gives_a_usage_hint():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_feedback(_ctx(users_conn, journal_conn))
+    assert "usage" in reply.text.lower()
+    assert users_conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
+
+
+def test_feedback_persists_the_message():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_feedback(_ctx(users_conn, journal_conn, args=["the", "sizing", "math", "is", "great"]))
+    assert "logged" in reply.text.lower() or "thanks" in reply.text.lower()
+    row = users_conn.execute("SELECT telegram_user_id, message FROM feedback").fetchone()
+    assert row == (1, "the sizing math is great")
+
+
+# ---------------------------------------------------------------------- #
 # /halt
 # ---------------------------------------------------------------------- #
 
@@ -473,3 +714,28 @@ def test_halt_as_admin_engages_a_global_halt():
     assert "global halt" in reply.text.lower()
     assert app.halt_file.exists()
     app.halt_file.unlink()
+
+
+# ---------------------------------------------------------------------- #
+# Telegram HTML safety — regression coverage for the production incident
+# above. Every usage-hint / error string that uses angle-bracket
+# placeholder notation must escape it, or the real send silently 400s.
+# ---------------------------------------------------------------------- #
+
+
+def test_no_usage_hint_text_has_an_unescaped_angle_bracket():
+    users_conn, journal_conn = _setup(onboarded=False)
+    db.set_onboarding_step(users_conn, 1, "limits")
+    _assert_html_safe(handlers.handle_start(_ctx(users_conn, journal_conn)).text)
+    _assert_html_safe(handlers._handle_limits_text(_ctx(users_conn, journal_conn), "not three numbers").text)
+
+    users_conn, journal_conn = _setup()
+    _assert_html_safe(handlers.handle_took(_ctx(users_conn, journal_conn)).text)
+    _assert_html_safe(handlers.handle_closed(_ctx(users_conn, journal_conn)).text)
+    _assert_html_safe(handlers.handle_limits(_ctx(users_conn, journal_conn, args=["badfield", "1"])).text)
+    _assert_html_safe(handlers.handle_feedback(_ctx(users_conn, journal_conn)).text)
+
+    detection_id = _write_high_alert(journal_conn)
+    handlers.handle_took(_ctx(users_conn, journal_conn, args=[detection_id, "1", "5.00"]))
+    trade = db.list_trades(users_conn, 1)[-1]
+    _assert_html_safe(handlers.handle_closed(_ctx(users_conn, journal_conn, args=[trade.id[:8]])).text)

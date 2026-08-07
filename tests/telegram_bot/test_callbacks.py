@@ -22,15 +22,12 @@ def _app():
     )
 
 
-def _setup(tier="free"):
+def _setup():
     users_conn = db.connect(":memory:")
     journal_conn = journal_connect(":memory:")
     db.get_or_create_user(users_conn, 1, 1, "alice")
     db.mark_onboarded(users_conn, 1, NOW)
     db.set_risk_ack(users_conn, 1, NOW)
-    if tier != "free":
-        users_conn.execute("UPDATE users SET tier = ? WHERE telegram_user_id = ?", (tier, 1))
-        users_conn.commit()
     return users_conn, journal_conn
 
 
@@ -138,6 +135,37 @@ def test_whynt_button_on_an_alert_that_did_have_a_contract():
     assert "did have" in r.toast.lower() or "actually had" in r.toast.lower()
 
 
+def test_outcome_button_with_no_contract_selection():
+    users_conn, journal_conn = _setup()
+    detection_id = _write_alert(journal_conn, no_trade=True)
+    r = callbacks.handle_outcome_button(_ctx(users_conn, journal_conn, detection_id))
+    assert r.show_alert is True
+    assert "no tradable contract" in r.toast.lower()
+    assert r.send_text is None
+
+
+def test_outcome_button_sends_the_real_contract_outcome():
+    from tradebot.journal import record_contract_selection
+
+    users_conn, journal_conn = _setup()
+    detection_id = _write_alert(journal_conn, no_trade=False)
+    record_contract_selection(
+        journal_conn, detection_id, symbol="TSLA", right="call", strike=250.0, expiry=NOW.date(), dte=10,
+        delta=0.45, entry_mid=2.96, entry_ts=NOW,
+    )
+    r = callbacks.handle_outcome_button(_ctx(users_conn, journal_conn, detection_id))
+    assert r.send_text is not None
+    assert "Contract outcome" in r.send_text
+    assert "$2.96" in r.send_text
+
+
+def test_outcome_button_unknown_alert():
+    users_conn, journal_conn = _setup()
+    r = callbacks.handle_outcome_button(_ctx(users_conn, journal_conn, "doesnotexist"))
+    assert r.show_alert is True
+    assert "can't find" in r.toast.lower()
+
+
 def test_ack_risk_button_advances_to_timezone_step():
     users_conn, journal_conn = _setup()
     db.set_onboarding_step(users_conn, 1, "risk_ack")
@@ -172,15 +200,10 @@ def test_pause_button_eod_halts_for_the_session():
     assert db.get_user(users_conn, 1).is_halted_for_session(NOW.date())
 
 
-def test_watchlist_button_blocked_for_free_tier():
-    users_conn, journal_conn = _setup(tier="free")
-    r = callbacks.handle_watchlist_button(_ctx(users_conn, journal_conn, "TSLA"))
-    assert r.show_alert is True
-    assert db.get_watchlist(users_conn, 1) is None
-
-
-def test_watchlist_button_toggles_for_paid_tier():
-    users_conn, journal_conn = _setup(tier="pro")
+def test_watchlist_button_toggles_regardless_of_plan():
+    """Everything is free during beta — no feature gating. See
+    tradebot.telegram_bot.access.can_access, which always returns True."""
+    users_conn, journal_conn = _setup()
     r1 = callbacks.handle_watchlist_button(_ctx(users_conn, journal_conn, "TSLA"))
     assert "added" in r1.toast.lower()
     assert db.get_watchlist(users_conn, 1) == ["TSLA"]
@@ -191,7 +214,7 @@ def test_watchlist_button_toggles_for_paid_tier():
 
 
 def test_watchlist_save_button_confirms_current_selection():
-    users_conn, journal_conn = _setup(tier="pro")
+    users_conn, journal_conn = _setup()
     callbacks.handle_watchlist_button(_ctx(users_conn, journal_conn, "TSLA"))
     r = callbacks.handle_watchlist_button(_ctx(users_conn, journal_conn, "save"))
     assert "saved" in r.toast.lower()
