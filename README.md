@@ -54,6 +54,37 @@ set -a && source .env && set +a
 
 ## Running
 
+### Quick start (recommended) — the wrapper kit
+
+Three scripts in `scripts/` bring the whole live stack up and down and
+keep this Mac from sleeping while it runs (a sleeping Mac freezes all
+three processes, so the scanner stops evaluating bars — see the
+`caffeinate` note below):
+
+```bash
+scripts/start.sh                 # start worker + bot + runner + caffeinate guardian
+scripts/start.sh --sync-commands # same, but also push commands.py to BotFather first
+scripts/status.sh                # one-glance health: procs, heartbeat age, HALT, incidents, power
+scripts/stop.sh                  # graceful SIGTERM to all (add --force to SIGKILL stragglers)
+```
+
+`start.sh` is idempotent — a process already running is left alone, not
+doubled. It writes a pidfile per process under `data/*.pid`, which
+`status.sh` and `stop.sh` read. `status.sh` exits non-zero when
+something's wrong (a process down, a stale heartbeat during market
+hours, or an open incident), so it doubles as a monitor/cron probe.
+
+**caffeinate + power.** `start.sh` launches `caffeinate -dimsu -w <runner
+pid>`, which holds an idle-sleep assertion for exactly as long as the
+scanner lives. This blocks *idle* sleep, but on **battery** a closed lid
+or low charge can still sleep the Mac. For a reliable market-hours run:
+**plug into AC power and keep the lid open.** `status.sh` warns when
+you're on battery.
+
+The manual, one-process-at-a-time commands below still work and are what
+the kit runs under the hood — use them when you need to restart a single
+process.
+
 ### Replay (backtest against cached sessions — no live market needed)
 
 ```bash

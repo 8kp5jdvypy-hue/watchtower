@@ -16,7 +16,7 @@ from __future__ import annotations
 import html
 from datetime import date, datetime
 
-from tradebot.rendering.fields import atr, dash, money, pct, qty, ts
+from tradebot.rendering.fields import atr, dash, money, pct, qty, rate, ts
 
 TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
 BIAS_LABEL = {"up": "BULLISH", "down": "BEARISH"}
@@ -409,7 +409,7 @@ def render_weekly_recap(recap, when: datetime) -> str:
     else:
         sign = "+" if recap.avg_return_pct >= 0 else ""
         lines.append(
-            f"Hit rate: {pct(recap.hit_rate * 100)}   Avg move: {sign}{recap.avg_return_pct:.2f}% "
+            f"Hit rate: {rate(recap.hit_rate * 100)}   Avg move: {sign}{recap.avg_return_pct:.2f}% "
             f"(n={qty(recap.sample_size)}, +{recap.offset_min}m)"
         )
         sig = recap.significance
@@ -496,7 +496,7 @@ def render_example(win, day, when: datetime) -> str:
     else:
         lines.append(
             f"One real day's HIGH-tier hit rate — {html.escape(day.session)}: "
-            f"{pct(day.hit_rate * 100)} (n={qty(day.sample_size)})"
+            f"{rate(day.hit_rate * 100)} (n={qty(day.sample_size)})"
         )
     lines += [
         "",

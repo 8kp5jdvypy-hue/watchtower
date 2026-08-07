@@ -306,7 +306,8 @@ def test_example_shows_a_real_win_with_the_correct_option_side():
     assert "calls favored" in reply.text.lower()
     assert "TSLA gapped up" in reply.text
     assert "hit rate" in reply.text.lower()
-    assert "+100.00%" in reply.text  # every seeded alert continued -> a real, if unrealistic, day rate
+    assert "100.00%" in reply.text  # every seeded alert continued -> a real, if unrealistic, day rate
+    assert "+100.00%" not in reply.text  # hit rate is a magnitude, not a signed move — no leading '+'
     assert "not typical" in reply.text.lower()
     assert "coin flip" in reply.text.lower()
 

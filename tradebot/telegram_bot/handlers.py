@@ -16,7 +16,7 @@ import io
 from datetime import datetime
 
 from tradebot.events import events_for_date
-from tradebot.rendering.fields import money, pct, qty, ts
+from tradebot.rendering.fields import money, pct, qty, rate, ts
 from tradebot.rendering.templates import render_pre_open_card
 from tradebot.telegram_bot import access, db, keyboards, performance
 from tradebot.telegram_bot.context import HandlerContext, Reply
@@ -33,7 +33,7 @@ def _fmt_bucket(bucket) -> str:
     if bucket is None:
         return "not enough samples yet"
     sign = "+" if bucket.avg_pnl_pct >= 0 else ""
-    return f"{pct(bucket.win_rate * 100)} win, {sign}{bucket.avg_pnl_pct:.2f}% avg (n={qty(bucket.n)})"
+    return f"{rate(bucket.win_rate * 100)} win, {sign}{bucket.avg_pnl_pct:.2f}% avg (n={qty(bucket.n)})"
 
 
 def _fmt_risk_pct(value: float | None) -> str:
@@ -91,7 +91,7 @@ def _track_record_and_risk_text(ctx: HandlerContext) -> str:
         lines += [
             "",
             f"HIGH tier, last {qty(tr.sample_size)} alerts @ +{tr.offset_min}m:",
-            f"  Hit rate: {pct(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
+            f"  Hit rate: {rate(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
             f"  Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
             f"  Worst drawdown: {pct(tr.max_drawdown_pct)}",
             "",
@@ -293,15 +293,15 @@ def handle_performance(ctx: HandlerContext) -> Reply:
     lines = [
         f"<b>HIGH tier track record</b> · @ +{tr.offset_min}m, n={qty(tr.sample_size)}",
         "",
-        f"Hit rate: {pct(tr.hit_rate * 100)}",
+        f"Hit rate: {rate(tr.hit_rate * 100)}",
         f"Avg move: {pct(tr.avg_return_pct)}",
         f"Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
         f"Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)} (equal-weighted, back-to-back — not real compounded P/L)",
         "",
         _significance_verdict_line(tr),
         "",
-        f"News-driven: {tr.news_driven and pct(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
-        f"Clean technical: {tr.clean_technical and pct(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
+        f"News-driven: {tr.news_driven and rate(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
+        f"Clean technical: {tr.clean_technical and rate(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
         "",
     ]
     if tr.no_trade_tracked_count:

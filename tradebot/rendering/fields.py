@@ -25,6 +25,14 @@ def pct(value: float) -> str:
     return f"{value:+.2f}%"
 
 
+def rate(value: float) -> str:
+    """49.57% — unsigned, 2 decimals. For a proportion/magnitude like a
+    hit rate or win rate, where a leading '+' would read as "gained
+    49.57%" rather than "won 49.57% of the time". `value` is already a
+    percentage (49.57 means 49.57%, not 0.4957)."""
+    return f"{value:.2f}%"
+
+
 def atr(value: float) -> str:
     """2.26 ATR — 2 decimals plus the unit."""
     return f"{value:.2f} ATR"
