@@ -81,6 +81,38 @@ or low charge can still sleep the Mac. For a reliable market-hours run:
 **plug into AC power and keep the lid open.** `status.sh` warns when
 you're on battery.
 
+### Auto-start before the market open (launchd)
+
+`scripts/com.watchtower.kestrel.autostart.plist` is a LaunchAgent that
+runs `start.sh` at **7:20 AM America/Denver, Mon-Fri** (9:20 AM ET, 10
+min before the open). It survives reboots. Install it once:
+
+```bash
+cp scripts/com.watchtower.kestrel.autostart.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.watchtower.kestrel.autostart.plist
+# run it now to confirm it works (idempotent — won't double anything):
+launchctl kickstart -k gui/$(id -u)/com.watchtower.kestrel.autostart
+launchctl print gui/$(id -u)/com.watchtower.kestrel.autostart | grep -E "state|last exit code"
+```
+
+To remove it: `launchctl bootout gui/$(id -u)/com.watchtower.kestrel.autostart`.
+Its output is captured to `data/launchd_autostart.log`.
+
+**Waking the Mac for it.** launchd fires the job on schedule but will
+NOT wake a sleeping Mac — and because the scanner exits at the market
+close each day (taking its caffeinate guardian with it), the Mac can
+sleep overnight and miss the 7:20 trigger. Schedule a wake a few minutes
+earlier (requires `sudo`, run in a real Terminal):
+
+```bash
+sudo pmset repeat wakeorpoweron MTWRF 07:15:00   # wake weekdays at 7:15 MT
+pmset -g sched                                   # verify the repeating wake
+```
+
+With the wake + the LaunchAgent, the stack comes up unattended before
+every open. Keep the Mac plugged into AC power so the wake isn't blocked
+on battery.
+
 The manual, one-process-at-a-time commands below still work and are what
 the kit runs under the hood — use them when you need to restart a single
 process.
