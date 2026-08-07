@@ -49,19 +49,24 @@ def _fmt_risk_pct(value: float | None) -> str:
 # -------------------------------------------------------------------- #
 
 
-def _significance_verdict_line(tr) -> str:
+def _significance_verdict_line(tr, verbose: bool = True) -> str:
     """The one line that stops this text from ever implying a proven
     edge when the numbers don't back it up. Computed fresh from
     performance.significance_check every time this renders — never a
     fixed claim written into the copy by hand, so it can't quietly go
-    stale as more sessions accumulate."""
+    stale as more sessions accumulate. verbose=False (onboarding) keeps
+    the same real verdict but drops the "how much more data" elaboration
+    that /performance (verbose=True, the deep-dive command) still shows
+    in full — shorter is fine at the door, the substance isn't cut."""
     sig = tr.significance
     if sig.is_significant:
         direction = "better than" if tr.hit_rate > 0.5 else "worse than"
-        return (
-            f"That hit rate is currently statistically {direction} a coin flip (z={sig.z_score:.2f}) — "
-            "still provisional, and past performance doesn't guarantee anything going forward."
-        )
+        line = f"That hit rate is currently statistically {direction} a coin flip (z={sig.z_score:.2f})"
+        if not verbose:
+            return line + "."
+        return line + " — still provisional, and past performance doesn't guarantee anything going forward."
+    if not verbose:
+        return f"Not yet statistically different from a coin flip at this sample size (z={sig.z_score:.2f})."
     return (
         f"At this sample size, that hit rate is NOT yet statistically different from a coin flip "
         f"(z={sig.z_score:.2f}) — treat every number above as unproven, not a track record to trade on. "
@@ -75,31 +80,29 @@ def _track_record_and_risk_text(ctx: HandlerContext) -> str:
     lines = [
         f"<b>Welcome to {html.escape(ctx.app.bot_name)} — BETA.</b>",
         "",
-        "What this actually is: a discipline and journaling system built on a technical alert "
-        "feed — not a proven trading edge. It's free while the track record accumulates.",
+        "A discipline and journaling system on top of a technical alert feed — not a promise of "
+        "an edge. Free during beta.",
         "",
-        "Before anything else — the real track record, losing stretches included:",
+        "Your real track record, no cherry-picking:",
     ]
     if tr is None:
-        lines.append("Not enough history yet for real numbers. Until this fills in, every alert is unproven — treat it that way.")
+        lines.append("Not enough history yet for real numbers.")
     else:
         lines += [
             "",
             f"HIGH tier, last {qty(tr.sample_size)} alerts @ +{tr.offset_min}m:",
             f"  Hit rate: {pct(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
             f"  Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
-            f"  Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)}",
+            f"  Worst drawdown: {pct(tr.max_drawdown_pct)}",
             "",
-            _significance_verdict_line(tr),
+            _significance_verdict_line(tr, verbose=False),
         ]
     lines += [
         "",
-        "This bot detects patterns and reports what actually happened after — it is not advice, and losses are a normal, likely part of using it, not a bug.",
+        "It reports patterns and what actually happened after — not advice, and losses happen. "
+        "Beta also means alerts might pause here and there for fixes.",
         "",
-        "Being in beta also means alerts may pause without much notice while something gets fixed — "
-        "that beats shipping around a real bug.",
-        "",
-        "Tap below only if you actually understand that.",
+        "Tap below to continue.",
     ]
     return "\n".join(lines)
 
@@ -309,6 +312,22 @@ def handle_performance(ctx: HandlerContext) -> Reply:
     else:
         lines.append(f"Alerts sent: {qty(tr.total_alerts)} · NO TRADE tracking not available for this history yet")
     return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /example — a real win and a real day's hit rate, randomly picked from
+# the journal on every call. See performance.random_real_win /
+# random_real_day_hit_rate's module comment for why this is a random
+# SELECTION among real records, never a generated result.
+# -------------------------------------------------------------------- #
+
+
+def handle_example(ctx: HandlerContext) -> Reply:
+    from tradebot.rendering.templates import render_example
+
+    win = performance.random_real_win(ctx.journal_conn)
+    day = performance.random_real_day_hit_rate(ctx.journal_conn)
+    return Reply(text=render_example(win, day, ctx.now))
 
 
 # -------------------------------------------------------------------- #
@@ -770,6 +789,7 @@ def handle_help(ctx: HandlerContext) -> Reply:
         "<b>Account</b>",
         "/status — bot & your state",
         "/performance — real track record",
+        "/example — a real win and a real day's hit rate, picked fresh each time",
         "/me — your personal stats (or /me recap for this month's biggest leaks)",
         "",
         "<b>Journaling</b>",
@@ -838,6 +858,7 @@ HANDLERS = {
     "start": handle_start,
     "status": handle_status,
     "performance": handle_performance,
+    "example": handle_example,
     "me": handle_me,
     "took": handle_took,
     "closed": handle_closed,

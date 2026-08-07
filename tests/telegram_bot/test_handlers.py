@@ -110,8 +110,8 @@ def test_start_labels_beta_and_repositions_as_discipline_tool_not_a_proven_edge(
     reply = handlers.handle_start(_ctx(users_conn, journal_conn))
     assert "beta" in reply.text.lower()
     assert "discipline and journaling system" in reply.text.lower()
-    assert "not a proven trading edge" in reply.text.lower()
-    assert "may pause" in reply.text.lower()
+    assert "not a promise of" in reply.text.lower()
+    assert "pause" in reply.text.lower()
 
 
 def test_start_states_plainly_when_the_hit_rate_is_not_yet_significant():
@@ -275,6 +275,40 @@ def test_performance_never_calls_a_coin_flip_hit_rate_a_measured_real_edge():
     reply = handlers.handle_performance(_ctx(users_conn, journal_conn))
     assert "not yet statistically different from a coin flip" in reply.text.lower()
     assert "measured, real edge" not in reply.text.lower()
+
+
+# ---------------------------------------------------------------------- #
+# /example
+# ---------------------------------------------------------------------- #
+
+
+def test_example_with_an_empty_journal_says_so_honestly():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_example(_ctx(users_conn, journal_conn))
+    assert "no real win in the journal yet" in reply.text.lower()
+    assert "no real day with enough tracked alerts" in reply.text.lower()
+
+
+def test_example_shows_a_real_win_with_the_correct_option_side():
+    users_conn, journal_conn = _setup()
+    base = NOW
+    for i in range(6):
+        did = write_cluster(
+            journal_conn, session=base.date().isoformat(), symbol="TSLA", ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="TSLA gapped up", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection("TSLA", "gap", base, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        journal_conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, 105))
+    journal_conn.commit()
+
+    reply = handlers.handle_example(_ctx(users_conn, journal_conn))
+    assert "TSLA" in reply.text
+    assert "calls favored" in reply.text.lower()
+    assert "TSLA gapped up" in reply.text
+    assert "hit rate" in reply.text.lower()
+    assert "+100.00%" in reply.text  # every seeded alert continued -> a real, if unrealistic, day rate
+    assert "not typical" in reply.text.lower()
+    assert "coin flip" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #

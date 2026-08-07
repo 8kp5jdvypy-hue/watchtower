@@ -466,3 +466,43 @@ def render_sample_alert() -> str:
         "One real win, not the average — /performance has the full, unfiltered track record, "
         "losing stretches included."
     )
+
+
+def render_example(win, day, when: datetime) -> str:
+    """/example — one of the more notable real wins (see
+    performance.random_real_win's docstring: restricted to a disclosed
+    top slice of real outcomes, not a uniform sample — most real wins in
+    this journal are under 1%) plus a real day's hit rate, freshly and
+    randomly picked every call. Both halves are real records, not
+    generated numbers — this renderer only ever formats what it's
+    handed; either half can be None if the journal doesn't have one yet,
+    stated plainly instead of skipped or faked. The "notable, not
+    typical" framing is not optional decoration — it is the thing that
+    keeps this honest instead of a cherry-picked highlight reel."""
+    lines = ["<b>One of the more notable real wins</b>", ""]
+    if win is None:
+        lines.append("No real win in the journal yet to show.")
+    else:
+        right = "call" if win.trend == "up" else "put"
+        bias = "bullish" if win.trend == "up" else "bearish"
+        lines += [
+            f"{html.escape(win.symbol)} · {_kind_tag(win.kinds)} — {bias}, {right}s favored",
+            html.escape(win.headline),
+            f"Entry ~{money(win.close)} → +{win.offset_min}m {money(win.mark_price)} (+{win.return_pct:.2f}%)",
+        ]
+    lines.append("")
+    if day is None:
+        lines.append("No real day with enough tracked alerts yet for a day's hit rate.")
+    else:
+        lines.append(
+            f"One real day's HIGH-tier hit rate — {html.escape(day.session)}: "
+            f"{pct(day.hit_rate * 100)} (n={qty(day.sample_size)})"
+        )
+    lines += [
+        "",
+        "Real, but not typical — most real wins here are much smaller, and the overall record is "
+        "a coin flip. /performance has the full, unfiltered picture.",
+        "",
+        _footer(when),
+    ]
+    return "\n".join(lines)

@@ -14,6 +14,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("start", "Set up Kestrel and see how it works"),
     ("status", "Bot health, market state, alerts today"),
     ("performance", "Real track record, including losing streaks"),
+    ("example", "A real win and a real day's hit rate"),
     ("me", "Your trading stats and biggest leaks"),
     ("took", "Log a trade you entered"),
     ("closed", "Log an exit"),

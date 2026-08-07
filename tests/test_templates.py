@@ -541,6 +541,7 @@ def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
         templates.render_weekly_recap(_weekly_recap(), when),
         templates.render_pinned_status(None, when),
         templates.render_contract_outcome(_contract_outcome(), when),
+        templates.render_example(_real_win(), _day_hit_rate(), when),
     ]
     for text in messages:
         assert "!" not in text
@@ -564,3 +565,67 @@ def test_render_sample_alert_is_labeled_as_a_real_example_not_a_promise():
     assert "+3.47%" in text
     assert "one real win, not the average" in text.lower()
     assert "/performance" in text
+
+
+def _real_win(**overrides):
+    from tradebot.telegram_bot.performance import RealWin
+
+    fields = dict(
+        detection_id="abc123", symbol="META", kinds="vwap_break", headline="META broke above VWAP (598.42), 0.77 ATR",
+        trend="up", close=599.82, mark_price=620.62, return_pct=3.47, offset_min=30, ts_utc="2026-04-08T16:05:00+00:00",
+    )
+    fields.update(overrides)
+    return RealWin(**fields)
+
+
+def _day_hit_rate(**overrides):
+    from tradebot.telegram_bot.performance import DayHitRate
+
+    fields = dict(session="2026-06-17", hit_rate=0.5, sample_size=20, offset_min=30)
+    fields.update(overrides)
+    return DayHitRate(**fields)
+
+
+def test_render_example_golden_both_present():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(), _day_hit_rate(), when)
+    assert text == (
+        "<b>One of the more notable real wins</b>\n"
+        "\n"
+        "META · VWAP break — bullish, calls favored\n"
+        "META broke above VWAP (598.42), 0.77 ATR\n"
+        "Entry ~$599.82 → +30m $620.62 (+3.47%)\n"
+        "\n"
+        "One real day's HIGH-tier hit rate — 2026-06-17: +50.00% (n=20)\n"
+        "\n"
+        "Real, but not typical — most real wins here are much smaller, and the overall record is "
+        "a coin flip. /performance has the full, unfiltered picture.\n"
+        "\n"
+        "<i>16:00 ET · Not advice.</i>"
+    )
+
+
+def test_render_example_puts_favored_on_a_down_win():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(trend="down", symbol="USO"), _day_hit_rate(), when)
+    assert "bearish, puts favored" in text
+
+
+def test_render_example_says_so_when_no_real_win_exists_yet():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(None, _day_hit_rate(), when)
+    assert "no real win in the journal yet" in text.lower()
+    assert "favored" not in text.lower()
+
+
+def test_render_example_says_so_when_no_real_day_exists_yet():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(), None, when)
+    assert "no real day with enough tracked alerts" in text.lower()
+
+
+def test_render_example_never_fabricates_either_half():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(None, None, when)
+    assert "no real win" in text.lower()
+    assert "no real day" in text.lower()
