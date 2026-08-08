@@ -376,13 +376,32 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
   .swipe-hint{display:flex;align-items:center;justify-content:center;gap:0.5em;margin-top:1rem;font-family:var(--mono);font-size:0.7rem;letter-spacing:0.08em;text-transform:uppercase;color:var(--text-dim);}
   .swipe-hint .sh-arrow{animation:sh 1.6s ease-in-out infinite;}
   @keyframes sh{0%,100%{transform:translateX(0);opacity:0.5;}50%{transform:translateX(5px);opacity:1;}}
+  /* phones: stop animating heavy blurred/box-shadow layers to keep scrolling smooth */
+  .aurora::before,.aurora::after,.aurora span{animation:none;filter:blur(55px);}
+  .aurora::before{width:82vw;height:82vw;}
+  .starfield span{animation:none;}
+  .grain{opacity:0.03;}
+  .tilt{transform:none;transform-style:flat;}
 }
 @media (max-width:640px){
   .signup{flex-direction:column;}
   .btn{width:100%;padding:0.95em;}
-  .kestrel-mark{opacity:0.10;right:-18%;}
+  .kestrel-mark{opacity:0.08;right:-24%;width:min(90vw,520px);}
   .scroll-cue{display:none;}
   .foot-cols{gap:2rem;}
+  h1{font-size:clamp(2.4rem,9.5vw,3.4rem);}
+  .hero{min-height:auto;padding:1rem 0 2.5rem;}
+  .hero-content{padding-top:1.4rem;padding-bottom:0;}
+  .sub{font-size:1rem;}
+  .bot{margin-top:1.5rem;}
+  .marquee{padding:0.9rem 0;}
+  .marquee-track{font-size:clamp(1.4rem,7vw,2rem);gap:1.7rem;}
+  .marquee-track span{gap:1.7rem;}
+  .nav-inner{height:56px;}
+  .brand-name{font-size:1.15rem;}
+  .section{padding:clamp(2.4rem,9vw,3.5rem) 0;}
+  .pl-name{font-size:2.4rem;}
+  .pl-mark{width:34px;height:34px;}
 }
 </style>
 </head>
