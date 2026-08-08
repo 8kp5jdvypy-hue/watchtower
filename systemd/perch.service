@@ -1,0 +1,31 @@
+# Manages `docker compose` itself on the VPS — the thing that survives
+# a reboot. Individual process supervision (worker/bot/runner) is
+# Docker's own `restart: unless-stopped` in docker-compose.yml; this
+# unit's only job is "the stack comes back up after the box restarts,"
+# same role scripts/watchdog.sh's LaunchAgent played on the old
+# macOS-laptop setup, one layer up.
+#
+# Install (as root, on the VPS):
+#   cp systemd/perch.service /etc/systemd/system/perch.service
+#   systemctl daemon-reload
+#   systemctl enable --now perch.service
+#
+# WorkingDirectory below assumes the repo is checked out to
+# /opt/perch — adjust both WorkingDirectory and the ExecStart/ExecStop
+# ambient paths if it lives elsewhere.
+[Unit]
+Description=Perch live stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/perch
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

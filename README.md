@@ -32,16 +32,18 @@ three must be running for live alerting to actually work end to end.
 
 ## Setup
 
-No `requirements.txt` yet — the only third-party dependencies are:
-
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install requests exchange_calendars alpaca-py pytest
+pip install -r requirements-dev.txt   # adds pytest on top of requirements.txt
 ```
 
 Everything else is Python standard library — deliberate, see e.g.
 `tradebot/metrics.py`'s docstring on avoiding a `statsd`/`prometheus_client`
 dependency for a bot this size; the same call was made throughout.
+
+For running this on a VPS instead of a laptop (Docker Compose +
+systemd + backups), see `docs/DEPLOYMENT.md` — everything below this
+point describes the bare-metal/macOS dev setup.
 
 Create a `.env` in the repo root (never committed — see `.gitignore`)
 with at least `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,

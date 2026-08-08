@@ -848,6 +848,58 @@ def test_weekly_recap_fires_again_the_following_week(tmp_path):
     assert "2026-08-03" in alerter.sent[1][0]
 
 
+# ---------------------------------------------------------------------- #
+# Session-open messages — see runner.maybe_send_session_open_messages.
+# Guards the morning briefing + pre-open card against duplicate sends
+# when run_live() is invoked more than once for the same session_date
+# (e.g. a supervised container restart after a clean end-of-session
+# exit, or a human re-running scripts/start.sh mid-morning).
+# ---------------------------------------------------------------------- #
+
+
+def test_session_open_messages_send_once(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    session_date = date(2026, 8, 10)
+    now = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
+
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, now, state_path=state_path)
+
+    assert len(alerter.sent) == 2  # morning briefing + pre-open card
+    assert state_path.exists()
+
+
+def test_session_open_messages_do_not_resend_for_the_same_session(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    session_date = date(2026, 8, 10)
+    first_call = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, first_call, state_path=state_path)
+
+    # A restart later the same session (e.g. after a crash, or a Docker
+    # restart following a clean end-of-session exit) must not resend.
+    restart = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, restart, state_path=state_path)
+
+    assert len(alerter.sent) == 2  # still just the first call's two sends
+
+
+def test_session_open_messages_send_again_for_a_new_session(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    runner_mod.maybe_send_session_open_messages(
+        conn, alerter, date(2026, 8, 10), datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc), state_path=state_path
+    )
+    runner_mod.maybe_send_session_open_messages(
+        conn, alerter, date(2026, 8, 11), datetime(2026, 8, 11, 13, 0, tzinfo=timezone.utc), state_path=state_path
+    )
+
+    assert len(alerter.sent) == 4  # two sessions, two sends each
+
+
 class _FakeResponse:
     def __init__(self, result, status_code=200):
         self._result = result

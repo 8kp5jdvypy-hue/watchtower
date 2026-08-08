@@ -801,6 +801,45 @@ def run_broad_scan(universe_conn, fetch_bars_fn=None, promotion_limit: int = BRO
     return [c.symbol for c in promoted[:promotion_limit]]
 
 
+SESSION_OPEN_STATE_FILE = REPO_ROOT / "data" / "session_open_state.json"
+
+
+def _load_session_open_state(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())["session_date"]
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+
+
+def _mark_session_open_sent(path: Path, session_date) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_date": session_date.isoformat()}))
+
+
+def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime, state_path: Path | None = None) -> None:
+    """The morning briefing + pre-open card are once-per-session
+    announcements, guarded the same way maybe_send_weekly_recap/
+    maybe_update_pinned_status guard theirs — run_live() itself has no
+    "have I already opened today" memory of its own, and under
+    supervised restart (Docker `restart: unless-stopped`, or a human
+    re-running scripts/start.sh mid-morning after a crash) it WILL be
+    called more than once for the same session_date. Without this guard
+    that means duplicate briefing/pre-open sends on every restart —
+    including, worst case, a restart loop after a clean end-of-session
+    exit repeatedly resending both until the next session."""
+    state_path = state_path or SESSION_OPEN_STATE_FILE
+    if _load_session_open_state(state_path) == session_date.isoformat():
+        return
+    alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now), priority=outbox.PRIORITY_NORMAL)
+    alerter.send(
+        templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now),
+        priority=outbox.PRIORITY_NORMAL,
+    )
+    _mark_session_open_sent(state_path, session_date)
+
+
 def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False) -> HeartbeatStats:
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
@@ -820,11 +859,7 @@ def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_
     stats = HeartbeatStats(start_time=now, session_date=session_date)
 
     try:
-        alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now), priority=outbox.PRIORITY_NORMAL)
-        alerter.send(
-            templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now),
-            priority=outbox.PRIORITY_NORMAL,
-        )
+        maybe_send_session_open_messages(conn, alerter, session_date, now)
         maybe_send_weekly_recap(conn, alerter, now)
         if isinstance(alerter, TelegramAlerter):
             maybe_update_pinned_status(alerter.token, alerter.chat_id, conn, now)

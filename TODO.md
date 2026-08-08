@@ -55,11 +55,15 @@ Tick a box with `[x]` as you go.
 - [ ] **DM the bot `/start` from your own Telegram account** (not a
   channel) and walk the full onboarding once, as a user would see it.
 
-- [ ] **Decide on hosting.** The bot currently depends on this one laptop
-  staying awake and online. For a public launch, consider moving the
-  three processes to a cheap always-on server so uptime doesn't hinge on
-  your machine. (Ask me to sketch this when ready — it's where the GitHub
-  push actually earns its keep.)
+- [ ] **Move off the laptop onto a VPS.** Dockerfile, docker-compose.yml,
+  systemd units, and a backup script are already written and
+  live-tested (`scripts/backup.sh` verified against the real databases
+  2026-08-08) — see `docs/DEPLOYMENT.md` for the full setup checklist.
+  What's still only-you-can-do: provision the VPS itself (any
+  provider, 2 vCPU/4GB is plenty), and copy `.env` to it by hand
+  (never via git). This is also where the GitHub push actually earns
+  its keep — right now the VPS would have to pull from a local clone
+  instead of `git clone`.
 
 - [ ] **Document trades honestly**, including the losers — the whole
   design (status page, weekly recap, coin-flip disclosure) depends on the

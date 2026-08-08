@@ -1,0 +1,5 @@
+# Test-only, on top of requirements.txt. Not installed in the
+# production image (see Dockerfile) — keeps the runtime image smaller
+# and keeps "what ships" and "what's needed to test it" separate.
+-r requirements.txt
+pytest==8.4.2

@@ -1,0 +1,72 @@
+# Production stack for a single VPS. Three services, one image (see
+# Dockerfile) — mirrors what scripts/start.sh runs on bare metal, but
+# supervised by Docker instead of pidfiles: `restart: unless-stopped`
+# is this deployment's watchdog, so scripts/watchdog.sh and the
+# LaunchAgent plists are the macOS-laptop equivalent and are not used
+# here.
+#
+# `api` is not listed yet — it doesn't exist until Phase 6 (web
+# dashboard + internal API). Add it here as a fourth service, same
+# pattern, once tradebot/api/ exists.
+#
+# Usage:
+#   docker compose up -d --build
+#   docker compose logs -f runner
+#   docker compose restart bot
+services:
+  worker:
+    build: .
+    command: python -m tradebot.telegram_bot.worker
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  bot:
+    build: .
+    command: python -m tradebot.telegram_bot.main
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - worker
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  runner:
+    build: .
+    command: python -m tradebot.runner --live --broad-scan
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - worker
+    healthcheck:
+      # Same staleness contract as scripts/status.sh: if the scanner
+      # hasn't written a heartbeat in 15 minutes, something's wrong.
+      # During market close the process exits on its own (see
+      # runner.py's run_live loop) — Docker will then restart it into a
+      # fast no-op idle state, not a crash loop, since run_live's own
+      # session-bounds check makes an off-hours start a quick return.
+      # maybe_send_session_open_messages guards the morning
+      # briefing/pre-open card against resending on that restart.
+      test: ["CMD", "python", "-c", "import json,sys,time; from datetime import datetime; d=json.load(open('data/heartbeat.json')); age=time.time()-datetime.fromisoformat(d['ts_utc']).timestamp(); sys.exit(0 if age < 900 else 1)"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -1,0 +1,13 @@
+# Install alongside perch-backup.service:
+#   cp systemd/perch-backup.* /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now perch-backup.timer
+[Unit]
+Description=Run perch-backup.service nightly
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
