@@ -75,6 +75,8 @@ export default function MarketField() {
       const others = fieldRef.current.querySelectorAll('.mf-sym:not(.is-chosen)')
       const label = rootRef.current.querySelector('.mf-caption')
       const kestrel = rootRef.current.querySelector('.mf-kestrel')
+      const funnelNum = rootRef.current.querySelector('.mf-funnel-num')
+      const funnelLbl = rootRef.current.querySelector('.mf-funnel-lbl')
 
       gsap.timeline({
         scrollTrigger: {
@@ -85,6 +87,17 @@ export default function MarketField() {
           pin: true,
         },
       })
+        // The core story, told as numbers: thousands of events, filtered
+        // down to a handful of anomalies, down to what's actually worth
+        // seeing. Demo data -- clearly labeled, never claimed as live.
+        .fromTo('.mf-funnel', { opacity: 0 }, { opacity: 1, duration: 0.15 }, 0)
+        .fromTo(funnelNum, { innerText: 0 }, { innerText: 12481, duration: 0.001, snap: { innerText: 1 } }, 0)
+        .set(funnelLbl, { innerText: 'MARKET EVENTS' }, 0)
+        .to(funnelNum, { innerText: 47, duration: 0.3, snap: { innerText: 1 }, ease: 'power1.out' }, 0.25)
+        .set(funnelLbl, { innerText: 'ANOMALIES' }, 0.25)
+        .to(funnelNum, { innerText: 3, duration: 0.25, snap: { innerText: 1 }, ease: 'power1.out' }, 0.6)
+        .set(funnelLbl, { innerText: 'WORTH YOUR ATTENTION' }, 0.6)
+        .to('.mf-funnel', { opacity: 0, duration: 0.15 }, 0.82)
         // The kestrel moment: it drifts across from above, the field is
         // visible beneath it, then it dives toward the found signal and
         // dissolves into darkness -- Perch watching from above, made literal.
@@ -120,6 +133,11 @@ export default function MarketField() {
           <path d="M40 9 L34 6 Q32 1 26 2 Q19 3 16 9 Q12 15 4 20 Q3 21 5 21
                    Q14 20 19 18 Q21 25 27 25 Q35 24 36 16 Q37 12 40 9 Z" />
         </svg>
+        <div className="mf-funnel" aria-hidden="true">
+          <span className="mf-funnel-num">0</span>
+          <span className="mf-funnel-lbl">MARKET EVENTS</span>
+          <span className="demo-tag">Demo</span>
+        </div>
         <div className="mf-caption">
           <span className="eyebrow"><span className="dot" /> SIGNAL DETECTED</span>
           <p>Something changed. Perch found it.</p>

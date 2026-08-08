@@ -1,0 +1,27 @@
+.market-context { padding: clamp(5rem, 12vw, 9rem) 0; background: var(--bg); }
+.market-context .section-head { max-width: 60ch; margin-bottom: 3rem; }
+.market-context h2 { font-family: var(--display); font-weight: 600; letter-spacing: -0.015em; font-size: var(--step-4); margin: 0.9rem 0 0; color: var(--ink); }
+.mc-sub { color: var(--ink-dim); margin: 1rem 0 0; font-size: var(--step-0); line-height: 1.6; display: flex; align-items: center; gap: 0.7em; flex-wrap: wrap; }
+
+.mc-table { max-width: 640px; border-top: 1px solid var(--line); }
+.mc-row {
+  display: grid; grid-template-columns: 5.5em 1fr 6em; align-items: center; gap: 1rem;
+  padding: 1.1rem 0; border-bottom: 1px solid var(--line);
+}
+.mc-sym { font-family: var(--mono); font-weight: 500; font-size: 0.95rem; color: var(--ink); }
+.mc-name { font-size: 0.9rem; color: var(--ink-dim); }
+.mc-chg { font-family: var(--mono); font-size: 0.9rem; text-align: right; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.mc-row.is-hero { background: rgba(52,226,255,0.05); }
+.mc-row.is-hero .mc-sym, .mc-row.is-hero .mc-chg { color: var(--cyan); }
+.mc-row.is-hero .mc-name { color: var(--ink); }
+
+.mc-obs {
+  max-width: 640px; margin-top: 1.6rem; padding: 1.4rem 1.6rem;
+  background: var(--bg-1); border: 1px solid var(--line); border-left: 2px solid var(--cyan); border-radius: 2px;
+}
+.mc-obs p { margin: 0.7rem 0 0; color: var(--ink); font-size: 0.98rem; line-height: 1.55; }
+
+@media (max-width: 620px) {
+  .mc-row { grid-template-columns: 4.5em 1fr 5em; gap: 0.6rem; }
+  .mc-name { font-size: 0.82rem; }
+}

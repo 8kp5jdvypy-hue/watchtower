@@ -26,6 +26,17 @@ export default function Hero() {
   const isMobile = useIsMobile()
   const time = useEtClock()
   const rootRef = useRef(null)
+  const [inView, setInView] = useState(true)
+
+  // The single biggest performance win here: stop driving the WebGL
+  // render loop entirely once the hero scrolls out of view, instead of
+  // letting it render forever in the background behind every other section.
+  useEffect(() => {
+    if (!rootRef.current || !('IntersectionObserver' in window)) return
+    const io = new IntersectionObserver(([entry]) => setInView(entry.isIntersecting), { threshold: 0.01 })
+    io.observe(rootRef.current)
+    return () => io.disconnect()
+  }, [])
 
   useEffect(() => {
     if (!rootRef.current) return
@@ -48,12 +59,13 @@ export default function Hero() {
     <header className="hero" ref={rootRef} id="top">
       <div className="hero-canvas">
         <Canvas
-          dpr={[1, isMobile ? 1.3 : 2]}
+          frameloop="demand"
+          dpr={[1, isMobile ? 1.3 : 1.5]}
           camera={{ position: [0, 0, 5], fov: 45 }}
-          gl={{ antialias: true, alpha: false }}
+          gl={{ antialias: true, alpha: false, powerPreference: 'low-power' }}
         >
           <Suspense fallback={null}>
-            <HeroScene reduced={reduced} isMobile={isMobile} />
+            <HeroScene reduced={reduced} isMobile={isMobile} active={inView} />
           </Suspense>
         </Canvas>
       </div>
@@ -72,14 +84,14 @@ export default function Hero() {
         </h1>
 
         <p className="hero-fade hero-sub">
-          It watches continuously. It knows what's normal for six names, all session.
-          When something isn't, you hear about it — in plain language, seconds after it happens.
+          Perch watches the market continuously and surfaces the things worth your attention —
+          in plain language, seconds after they happen.
         </p>
 
         <div className="hero-fade hero-cta">
-          <MagneticButton as="a" href="#waitlist">Request early access</MagneticButton>
+          <MagneticButton as="a" href="#waitlist">Request access</MagneticButton>
           <a className="hero-scroll-hint" href="#field" data-cursor="link">
-            <span>Enter Perch</span>
+            <span>See how Perch works</span>
             <span className="hero-scroll-line" />
           </a>
         </div>

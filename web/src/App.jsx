@@ -7,8 +7,10 @@ import CustomCursor from './components/CustomCursor'
 import Hero from './components/Hero'
 import MarketField from './components/MarketField'
 import SignalVisualization from './components/SignalVisualization'
+import MarketContext from './components/MarketContext'
 import Manifesto from './components/Manifesto'
 import ProductDemo from './components/ProductDemo'
+import MarketCoverage from './components/MarketCoverage'
 import Waitlist from './components/Waitlist'
 import FinalCta from './components/FinalCta'
 import Footer from './components/Footer'
@@ -39,8 +41,10 @@ export default function App() {
         <Hero />
         <MarketField />
         <SignalVisualization />
+        <MarketContext />
         <Manifesto />
         <ProductDemo />
+        <MarketCoverage />
         <Waitlist />
         <FinalCta />
       </main>

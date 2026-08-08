@@ -1,0 +1,20 @@
+.market-coverage { padding: clamp(5rem, 12vw, 9rem) 0; background: var(--bg-1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.market-coverage h2 { font-family: var(--display); font-weight: 600; letter-spacing: -0.015em; font-size: var(--step-4); margin: 0.9rem 0 2.4rem; color: var(--ink); }
+
+.mcv-tabs { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 2rem; }
+.mcv-tab {
+  display: inline-flex; align-items: center; gap: 0.5em;
+  font-family: var(--mono); font-size: 0.82rem; letter-spacing: 0.03em;
+  color: var(--ink-dim); background: transparent; border: 1px solid var(--line);
+  border-radius: 999px; padding: 0.6em 1.2em; cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.mcv-tab:hover { border-color: var(--ink-faint); color: var(--ink); }
+.mcv-tab.is-active { border-color: var(--cyan); color: var(--ink); background: rgba(52,226,255,0.06); }
+.mcv-soon { font-size: 0.62rem; letter-spacing: 0.06em; color: var(--ink-faint); border: 1px solid var(--line); border-radius: 3px; padding: 0.1em 0.4em; }
+
+.mcv-panel {
+  max-width: 640px; min-height: 5.5rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: 1.6rem 0; border-top: 1px solid var(--line);
+}
+.mcv-panel p { margin: 0; font-size: var(--step-1); color: var(--ink); line-height: 1.5; }

@@ -1,15 +1,19 @@
 import { useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Billboard } from '@react-three/drei'
-import { EffectComposer, Bloom, Vignette, ChromaticAberration } from '@react-three/postprocessing'
-import { BlendFunction } from 'postprocessing'
-import * as THREE from 'three'
+import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import { makeKestrelTexture } from './kestrelTexture'
 import { makeSoftDotTexture } from './particleTexture'
+import { useThrottledInvalidate } from '../hooks/useThrottledInvalidate'
 import './KestrelMaterial'
 
-const PARTICLE_COUNT_FAR = 340
-const PARTICLE_COUNT_NEAR = 90
+// Cut hard from the previous pass: fewer points, no chromatic aberration
+// (real GPU cost for the least essential effect), and everything now
+// only renders when useThrottledInvalidate ticks it -- not a continuous
+// 60fps loop. See Hero.jsx for the IntersectionObserver that stops the
+// tick entirely once this scene scrolls out of view.
+const PARTICLE_COUNT_FAR = 180
+const PARTICLE_COUNT_NEAR = 50
 
 function ParticleLayer({ count, depth, spread, size, speed, reduced }) {
   const ref = useRef(null)
@@ -100,7 +104,9 @@ function CameraRig({ reduced }) {
   return null
 }
 
-export default function HeroScene({ reduced, isMobile }) {
+export default function HeroScene({ reduced, isMobile, active }) {
+  useThrottledInvalidate(active && !reduced, 12)
+
   return (
     <>
       <color attach="background" args={['#05070a']} />
@@ -116,12 +122,6 @@ export default function HeroScene({ reduced, isMobile }) {
       {!reduced && !isMobile && (
         <EffectComposer multisampling={0}>
           <Bloom intensity={0.85} luminanceThreshold={0.15} luminanceSmoothing={0.4} mipmapBlur radius={0.7} />
-          <ChromaticAberration
-            blendFunction={BlendFunction.NORMAL}
-            offset={new THREE.Vector2(0.0006, 0.0006)}
-            radialModulation={true}
-            modulationOffset={0.4}
-          />
           <Vignette eskil={false} offset={0.25} darkness={0.9} />
         </EffectComposer>
       )}

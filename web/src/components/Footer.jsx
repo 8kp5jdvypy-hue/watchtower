@@ -15,12 +15,18 @@ export default function Footer() {
         </div>
         <nav className="ft-nav">
           <a href="#field" data-cursor="link">What it watches</a>
+          <a href="#coverage" data-cursor="link">Coverage</a>
           <a href="#demo" data-cursor="link">The interface</a>
           <a href="#waitlist" data-cursor="link">Waitlist</a>
         </nav>
       </div>
       <div className="wrap ft-base">
-        <span>© {new Date().getFullYear()} Perch. Not investment advice. Perch does not place trades or control brokerage accounts.</span>
+        <p className="ft-disclaimer">
+          Perch surfaces information. It does not predict market movement, provide financial advice,
+          or guarantee any result. It never places trades and never has access to your brokerage account.
+          Nothing here is investment advice — decisions, and their consequences, are yours.
+        </p>
+        <span>© {new Date().getFullYear()} Perch.</span>
       </div>
     </footer>
   )
