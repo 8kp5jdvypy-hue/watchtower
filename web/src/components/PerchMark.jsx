@@ -7,10 +7,15 @@ export default function PerchMark({ size = 26, className = '' }) {
       viewBox="0 0 260 100"
       aria-hidden="true"
     >
+      {/* Perched variant of the same silhouette used in the hero
+          (kestrelTexture.js) and the mid-page dive (MarketField.jsx) --
+          wings folded rather than spread, standing on the branch/line
+          rather than hovering, but the same rounded head + hooked beak
+          language. */}
       <path
         className="pm-bird"
-        d="M64 14 L54 10 Q52 2 42 3 Q30 4 26 14 Q20 24 6 32 Q4 34 8 34
-           Q22 33 30 30 Q34 40 44 40 Q56 38 58 26 Q60 18 64 14 Z"
+        d="M8 34 C4 22 12 8 28 4 C36 2 44 4 48 10 C56 8 63 12 58 18
+           C54 20 48 18 44 22 C47 30 44 38 34 41 C24 43 14 40 8 34 Z"
         transform="translate(10,6) scale(1.1)"
       />
       <g className="pm-legs" transform="translate(10,6) scale(1.1)" strokeLinecap="round">

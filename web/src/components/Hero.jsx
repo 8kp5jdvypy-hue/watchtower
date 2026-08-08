@@ -65,7 +65,7 @@ export default function Hero() {
           gl={{ antialias: true, alpha: false, powerPreference: 'low-power' }}
         >
           <Suspense fallback={null}>
-            <HeroScene reduced={reduced} isMobile={isMobile} active={inView} />
+            <HeroScene reduced={reduced} isMobile={isMobile} active={inView} heroRootRef={rootRef} />
           </Suspense>
         </Canvas>
       </div>

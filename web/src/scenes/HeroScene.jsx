@@ -1,7 +1,10 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import { Billboard } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
+import gsap from 'gsap'
+// ScrollTrigger is registered once, app-wide, by useSmoothScroll.js -- no
+// need to re-register it here, just use the `scrollTrigger:` tween config.
 import { makeKestrelTexture } from './kestrelTexture'
 import { makeSoftDotTexture } from './particleTexture'
 import { useThrottledInvalidate } from '../hooks/useThrottledInvalidate'
@@ -53,21 +56,55 @@ function ParticleLayer({ count, depth, spread, size, speed, reduced }) {
   )
 }
 
-function Kestrel({ reduced }) {
+function Kestrel({ reduced, heroRootRef }) {
   const groupRef = useRef(null)
   const matRef = useRef(null)
   const texture = useMemo(() => makeKestrelTexture(), [])
+  const invalidate = useThree((s) => s.invalidate)
+  // Mutable, not React state -- this changes on every scrub tick and has
+  // no business triggering a re-render; useFrame reads it directly.
+  const dive = useRef({ t: 0 })
+
+  // "The bird dives out of the hero as you scroll" -- scrubbed to the
+  // hero's own scroll-out range so it hands off to the mid-page kestrel
+  // (MarketField's dive-pose SVG) right as that one dives in. Tilts
+  // forward, drops, continues its established rightward drift, and fades
+  // via the shader's opacity uniform rather than cutting when the hero's
+  // IntersectionObserver eventually stops the render loop entirely.
+  useEffect(() => {
+    if (reduced || !heroRootRef?.current) return
+    const ctx = gsap.context(() => {
+      gsap.to(dive.current, {
+        t: 1,
+        ease: 'none',
+        onUpdate: invalidate,
+        scrollTrigger: {
+          trigger: heroRootRef.current,
+          start: 'bottom 88%',
+          end: 'bottom 15%',
+          scrub: 0.3,
+        },
+      })
+    }, heroRootRef)
+    return () => ctx.revert()
+  }, [reduced, heroRootRef, invalidate])
 
   useFrame((state) => {
     if (!groupRef.current) return
     const t = state.clock.elapsedTime
-    const hover = reduced ? 0 : Math.sin(t * 0.6) * 0.09
-    groupRef.current.position.y = 0.4 + hover
+    const d = dive.current.t
+    const hover = reduced ? 0 : Math.sin(t * 0.6) * 0.09 * (1 - d)
+    groupRef.current.position.y = 0.4 + hover - d * 2.6
     if (!reduced) {
-      groupRef.current.rotation.z = state.pointer.x * -0.05
-      groupRef.current.position.x = 2.1 + state.pointer.x * 0.18
+      groupRef.current.rotation.z = state.pointer.x * -0.05 - d * 0.9
+      groupRef.current.position.x = 2.1 + state.pointer.x * 0.18 + d * 1.1
     }
-    if (matRef.current) matRef.current.time = t
+    const s = 1 - d * 0.4
+    groupRef.current.scale.setScalar(s)
+    if (matRef.current) {
+      matRef.current.time = t
+      matRef.current.fade = 1 - d
+    }
   })
 
   return (
@@ -104,7 +141,7 @@ function CameraRig({ reduced }) {
   return null
 }
 
-export default function HeroScene({ reduced, isMobile, active }) {
+export default function HeroScene({ reduced, isMobile, active, heroRootRef }) {
   useThrottledInvalidate(active && !reduced, 12)
 
   return (
@@ -118,7 +155,7 @@ export default function HeroScene({ reduced, isMobile, active }) {
       {!isMobile && (
         <ParticleLayer count={PARTICLE_COUNT_NEAR} depth={6} spread={14} size={0.05} speed={2.2} reduced={reduced} />
       )}
-      <Kestrel reduced={reduced} />
+      <Kestrel reduced={reduced} heroRootRef={heroRootRef} />
       {!reduced && !isMobile && (
         <EffectComposer multisampling={0}>
           <Bloom intensity={0.85} luminanceThreshold={0.15} luminanceSmoothing={0.4} mipmapBlur radius={0.7} />

@@ -13,6 +13,7 @@ const KestrelMaterial = shaderMaterial(
     rimStrength: 1.6,
     time: 0,
     texel: 1 / 1024,
+    fade: 1,
   },
   /* glsl */ `
     varying vec2 vUv;
@@ -27,6 +28,7 @@ const KestrelMaterial = shaderMaterial(
     uniform float rimStrength;
     uniform float time;
     uniform float texel;
+    uniform float fade;
     varying vec2 vUv;
 
     void main() {
@@ -41,7 +43,7 @@ const KestrelMaterial = shaderMaterial(
       float pulse = 0.82 + 0.18 * sin(time * 1.1);
       vec3 color = tex.rgb + rimColor * edge * rimStrength * pulse;
       float alpha = clamp(tex.a + edge * 0.85, 0.0, 1.0);
-      gl_FragColor = vec4(color, alpha);
+      gl_FragColor = vec4(color, alpha * fade);
     }
   `
 )
