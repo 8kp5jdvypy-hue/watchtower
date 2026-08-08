@@ -1,0 +1,10 @@
+.site-footer { background: #000; border-top: 1px solid var(--line); padding: 3rem 0 1.5rem; }
+.ft-inner { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2rem; padding-bottom: 2rem; }
+.ft-mark-row { display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; }
+.ft-mark-row span { font-family: var(--display); font-weight: 600; letter-spacing: 0.02em; color: var(--ink); }
+.ft-brand p { margin: 0.7rem 0 0; color: var(--ink-dim); font-size: 0.88rem; }
+.ft-nav { display: flex; gap: 1.8rem; align-items: center; }
+.ft-nav a { color: var(--ink-dim); text-decoration: none; font-size: 0.88rem; transition: color 0.2s ease; }
+.ft-nav a:hover { color: var(--ink); }
+.ft-base { border-top: 1px solid var(--line); padding-top: 1.2rem; }
+.ft-base span { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); line-height: 1.6; }

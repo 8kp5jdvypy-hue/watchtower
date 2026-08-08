@@ -1,0 +1,29 @@
+.manifesto {
+  position: relative;
+  height: 100svh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  overflow: hidden;
+}
+.man-inner { text-align: center; }
+.manifesto h2 {
+  font-family: var(--display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  font-size: var(--step-5);
+  line-height: 1.05;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15em;
+}
+.man-watch { color: var(--ink-faint); transition: none; }
+.man-decide { color: var(--ink); opacity: 0; text-shadow: 0 0 60px rgba(52,226,255,0.25); }
+.man-lines { margin-top: 2.6rem; }
+.man-lines p { margin: 0.3rem 0; color: var(--ink-dim); font-size: var(--step-0); opacity: 0; }
+
+@media (max-width: 760px) {
+  .manifesto h2 { font-size: var(--step-4); }
+}

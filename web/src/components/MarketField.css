@@ -1,0 +1,36 @@
+.market-field {
+  position: relative;
+  height: 100svh;
+  background: radial-gradient(ellipse 80% 60% at 50% 40%, #0a0f16, var(--bg) 75%);
+  overflow: hidden;
+}
+.mf-inner { position: absolute; inset: 0; }
+.mf-sym {
+  position: absolute;
+  font-family: var(--mono);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  transform: translate(-50%, -50%) scale(calc(1 + var(--boost, 0) * 0.5));
+  opacity: calc(0.28 + var(--boost, 0) * 0.6);
+  filter: brightness(calc(1 + var(--boost, 0) * 1.4));
+  animation: mf-flicker 5s ease-in-out infinite;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+@keyframes mf-flicker { 0%, 100% { opacity: 0.85; } 50% { opacity: 0.4; } }
+.mf-sym.is-chosen {
+  color: var(--cyan);
+  text-shadow: 0 0 18px rgba(52, 226, 255, 0.6);
+  animation: none;
+  opacity: 1;
+  z-index: 2;
+}
+.mf-caption {
+  position: absolute; left: 50%; top: 62%; transform: translateX(-50%);
+  text-align: center; opacity: 0; pointer-events: none;
+}
+.mf-caption p { margin: 0.7rem 0 0; font-family: var(--display); font-size: var(--step-2); color: var(--ink); }
+
+@media (max-width: 760px) {
+  .mf-sym { font-size: 0.68rem !important; }
+}

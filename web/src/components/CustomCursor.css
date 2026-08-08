@@ -1,0 +1,30 @@
+.has-custom-cursor, .has-custom-cursor * { cursor: none !important; }
+
+.cx-dot, .cx-ring {
+  position: fixed;
+  top: 0; left: 0;
+  z-index: 200;
+  pointer-events: none;
+  border-radius: 50%;
+  will-change: transform;
+}
+.cx-dot {
+  width: 6px; height: 6px;
+  background: var(--ink);
+  transition: opacity 0.2s ease;
+}
+.cx-ring {
+  width: 32px; height: 32px;
+  border: 1px solid rgba(238, 242, 246, 0.35);
+  transition: width 0.25s cubic-bezier(.2,.8,.2,1), height 0.25s cubic-bezier(.2,.8,.2,1),
+              border-color 0.25s ease, background 0.25s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.cx-signal { opacity: 0; width: 4px; height: 4px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px 1px var(--cyan); transition: opacity 0.2s ease; }
+
+.cx-ring[data-mode="link"] { width: 52px; height: 52px; border-color: var(--ink); background: rgba(238,242,246,0.06); }
+.cx-ring[data-mode="data"] { width: 40px; height: 40px; border-color: var(--cyan); }
+.cx-ring[data-mode="data"] .cx-signal { opacity: 1; }
+.cx-ring[data-mode="cta"] { width: 64px; height: 64px; border-color: var(--cyan); background: rgba(52,226,255,0.08); }
