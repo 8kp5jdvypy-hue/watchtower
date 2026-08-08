@@ -56,6 +56,11 @@ export default function Nav() {
           <a href="#top" className="nav-brand" data-cursor="link" aria-label="Perch home" onClick={() => setMenuOpen(false)}>
             <PerchMark size={20} />
             <span>PERCH</span>
+            {/* The boot sequence's signal dot flies home into this one --
+                always mounted (no IntersectionObserver gating) so it's a
+                reliable handoff target, and it doubles as a quiet "still
+                watching" indicator for the rest of the session. */}
+            <span className="nav-live-dot" aria-hidden="true" />
           </a>
           <div className="nav-links">
             <a href="#demo" data-cursor="link">Interface</a>

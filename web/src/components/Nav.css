@@ -17,6 +17,11 @@
 .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 68px; }
 .nav-brand { display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; }
 .nav-brand span { font-family: var(--display); font-weight: 600; letter-spacing: 0.03em; color: var(--ink); font-size: 1rem; }
+.nav-live-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex: none;
+  background: var(--cyan); box-shadow: 0 0 6px 1px rgba(52,226,255,0.7);
+  animation: pulse 2.4s ease-in-out infinite;
+}
 .nav-links { display: flex; align-items: center; gap: 2rem; }
 .nav-links a:not(.nav-cta) { color: var(--ink-dim); text-decoration: none; font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.04em; text-transform: uppercase; transition: color 0.2s ease; }
 .nav-links a:not(.nav-cta):hover { color: var(--ink); }
