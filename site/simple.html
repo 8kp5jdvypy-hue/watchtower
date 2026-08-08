@@ -130,20 +130,48 @@ form.is-hidden{display:none;}
 .section-tag{font-family:var(--mono);font-size:0.72rem;letter-spacing:0.12em;color:var(--text-dim);text-transform:uppercase;margin:0 0 0.6rem;}
 .section h2{font-family:var(--display);font-weight:900;text-transform:uppercase;font-size:clamp(1.7rem,4vw,2.6rem);margin:0;color:var(--text);line-height:1;}
 
-.watch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);}
-.wcard{background:var(--panel);padding:1.4rem 1.5rem 1.6rem;transition:background 0.2s ease;transition-delay:inherit;}
-.wcard:hover{background:var(--panel-2);}
-.wcard-top{display:flex;justify-content:space-between;align-items:baseline;}
-.wsym{font-size:1rem;color:var(--text);letter-spacing:0.03em;}
-.wchg{font-size:0.85rem;}
-.wchg.up{color:var(--up);}
-.wchg.down{color:var(--down);}
-.wname{font-size:0.82rem;color:var(--text-dim);margin:0.3rem 0 1rem;}
-.spark{width:100%;height:44px;display:block;}
-.spark path{stroke-dasharray:400;stroke-dashoffset:400;transition:stroke-dashoffset 1.3s cubic-bezier(.2,.7,.2,1);}
-.spark.up path{stroke:var(--up);}
-.spark.down path{stroke:var(--down);}
-.reveal.is-visible .spark path{stroke-dashoffset:0;}
+.lchart-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:1.1rem;}
+.lchart-card{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;}
+.lchart-card.up{--acc:var(--up);}
+.lchart-card.down{--acc:var(--down);}
+.lchart-head{display:flex;align-items:flex-start;justify-content:space-between;padding:1rem 1.1rem 0.35rem;}
+.lc-id{display:flex;flex-direction:column;gap:0.12rem;}
+.lc-sym{font-family:var(--mono);font-size:0.95rem;color:var(--text);letter-spacing:0.03em;}
+.lc-name{font-size:0.74rem;color:var(--text-dim);}
+.lc-chg{font-family:var(--mono);font-size:0.85rem;font-variant-numeric:tabular-nums;}
+.lc-chg.up{color:var(--up);}
+.lc-chg.down{color:var(--down);}
+.lchart-plot{position:relative;height:132px;}
+.lchart-svg{width:100%;height:100%;display:block;}
+.lc-grid{stroke:var(--line);stroke-width:1;vector-effect:non-scaling-stroke;}
+.lc-area{opacity:0;}
+.lc-trigline{stroke:var(--text-dim);stroke-width:1;stroke-dasharray:3 4;vector-effect:non-scaling-stroke;opacity:0;}
+.lc-line{stroke:var(--acc);stroke-width:2.25;fill:none;vector-effect:non-scaling-stroke;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1000;stroke-dashoffset:1000;}
+.lc-dot{position:absolute;width:9px;height:9px;border-radius:50%;transform:translate(-50%,-50%);opacity:0;pointer-events:none;background:var(--acc);color:var(--acc);}
+.lc-dot-trig{left:var(--tx);top:var(--ty);}
+.lc-dot-live{left:calc(100% - 5px);top:var(--ey);width:8px;height:8px;}
+.lc-alert{position:absolute;left:var(--tx);top:var(--ty);white-space:nowrap;display:inline-flex;align-items:center;gap:0.4em;padding:0.34rem 0.62rem;border-radius:7px;font-family:var(--mono);font-size:0.68rem;letter-spacing:0.01em;background:var(--panel-2);border:1px solid var(--acc);color:var(--text);opacity:0;pointer-events:none;box-shadow:0 10px 26px -12px rgba(0,0,0,0.85);z-index:2;transform:translate(-50%,calc(-100% - 12px));}
+.lc-alert-arrow{color:var(--acc);font-size:0.75em;}
+.lchart-foot{display:flex;align-items:center;gap:0.45em;padding:0.6rem 1.1rem 0.9rem;font-family:var(--mono);font-size:0.68rem;color:var(--text-dim);}
+.lchart-foot .dot{width:6px;height:6px;border-radius:50%;background:var(--acc);box-shadow:0 0 8px 1px rgba(35,201,124,0.4);flex:none;}
+
+/* play-out timeline, driven by JS toggling .playing */
+.lchart-card.playing .lc-line{animation:lc-draw var(--draw) cubic-bezier(.35,.7,.25,1) forwards;}
+@keyframes lc-draw{to{stroke-dashoffset:0;}}
+.lchart-card.playing .lc-area{animation:lc-appear 700ms ease var(--draw) forwards;}
+.lchart-card.playing .lc-trigline{animation:lc-appear 350ms ease var(--trigdelay) forwards;}
+.lchart-card.playing .lc-dot-trig{animation:lc-appear 320ms ease var(--trigdelay) forwards, lc-ping 1.6s ease-out var(--trigdelay) 2;}
+.lchart-card.playing .lc-alert{animation:lc-pop 520ms cubic-bezier(.2,.8,.2,1) calc(var(--trigdelay) + 100ms) forwards;}
+.lchart-card.playing .lc-dot-live{animation:lc-appear 300ms ease var(--draw) forwards, lc-live 1.6s ease-out calc(var(--draw) + 300ms) infinite;}
+@keyframes lc-appear{to{opacity:1;}}
+@keyframes lc-pop{from{opacity:0;transform:translate(-50%,calc(-100% - 3px)) scale(0.92);}to{opacity:1;transform:translate(-50%,calc(-100% - 12px)) scale(1);}}
+@keyframes lc-ping{0%{box-shadow:0 0 0 0 var(--acc);}100%{box-shadow:0 0 0 13px transparent;}}
+@keyframes lc-live{0%{box-shadow:0 0 0 0 var(--acc);}70%,100%{box-shadow:0 0 0 8px transparent;}}
+/* reduced-motion / no-JS: show the finished chart with alert in place */
+.lchart-card.reduced .lc-line{stroke-dashoffset:0;}
+.lchart-card.reduced .lc-area,.lchart-card.reduced .lc-trigline,.lchart-card.reduced .lc-dot-trig,.lchart-card.reduced .lc-dot-live,.lchart-card.reduced .lc-alert{opacity:1;}
+.watch-note{max-width:62ch;margin:1.6rem 0 0;font-size:0.9rem;color:var(--text-dim);}
+.watch-note b{color:var(--text);font-weight:600;}
 
 /* ---------------- how it works ---------------- */
 .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:clamp(1.5rem,4vw,2.5rem);}
@@ -272,54 +300,80 @@ footer.site-foot b{color:var(--text);}
   <div class="wrap">
     <div class="section-head reveal">
       <div class="section-tag">What it's watching</div>
-      <h2>Three names, all session.</h2>
+      <h2>Watch the alert fire.</h2>
     </div>
-    <div class="watch-grid">
-      <div class="wcard reveal">
-        <div class="wcard-top">
-          <span class="wsym mono">SPY</span>
-          <span class="wchg mono down">+0.42%</span>
+    <div class="lchart-grid">
+      <div class="lchart-card reveal up" style="--draw:2300ms;--trigdelay:1283ms;--tx:56.4%;--ty:78.7%;--ey:16.0%">
+        <div class="lchart-head">
+          <div class="lc-id"><span class="lc-sym">SPY</span><span class="lc-name">S&P 500</span></div>
+          <span class="lc-chg up">+0.41%</span>
         </div>
-        <div class="wname">S&P 500</div>
-        <svg class="spark down" viewBox="0 0 160 44" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M 0.0,23.5 L 12.3,20.2 L 24.6,8.9 L 36.9,23.1 L 49.2,21.8 L 61.5,19.3 L 73.8,31.7 L 86.2,21.6 L 98.5,18.0 L 110.8,13.0 L 123.1,34.5 L 135.4,28.1 L 147.7,34.6 L 160.0,12.5" fill="none" stroke-width="2"></path>
-        </svg>
-      </div>
-      <div class="wcard reveal">
-        <div class="wcard-top">
-          <span class="wsym mono">QQQ</span>
-          <span class="wchg mono up">-0.18%</span>
+        <div class="lchart-plot">
+          <svg class="lchart-svg up" viewBox="0 0 300 120" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="grad-SPY" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#23C97C" stop-opacity="0.30"/>
+              <stop offset="1" stop-color="#23C97C" stop-opacity="0"/>
+            </linearGradient></defs>
+            <line class="lc-grid" x1="0" y1="40" x2="300" y2="40"/>
+            <line class="lc-grid" x1="0" y1="80" x2="300" y2="80"/>
+            <path class="lc-area" d="M 0.0,87.0 L 5.5,86.2 L 10.9,80.8 L 16.4,81.3 L 21.8,81.2 L 27.3,80.1 L 32.7,84.1 L 38.2,83.9 L 43.6,82.3 L 49.1,78.6 L 54.5,83.7 L 60.0,86.2 L 65.5,91.4 L 70.9,87.4 L 76.4,85.0 L 81.8,90.8 L 87.3,84.7 L 92.7,78.8 L 98.2,76.9 L 103.6,75.4 L 109.1,79.7 L 114.5,85.9 L 120.0,85.5 L 125.5,91.1 L 130.9,95.0 L 136.4,98.3 L 141.8,100.8 L 147.3,100.8 L 152.7,100.8 L 158.2,96.5 L 163.6,96.2 L 169.1,94.5 L 174.5,91.3 L 180.0,87.3 L 185.5,85.2 L 190.9,83.0 L 196.4,76.0 L 201.8,72.8 L 207.3,70.5 L 212.7,68.1 L 218.2,67.0 L 223.6,64.3 L 229.1,60.9 L 234.5,58.9 L 240.0,52.0 L 245.5,50.8 L 250.9,45.2 L 256.4,44.5 L 261.8,38.3 L 267.3,35.7 L 272.7,37.1 L 278.2,32.9 L 283.6,25.9 L 289.1,25.1 L 294.5,19.2 L 300.0,19.2 L 300.0,120.0 L 0.0,120.0 Z" fill="url(#grad-SPY)"/>
+            <line class="lc-trigline" x1="169.1" y1="0" x2="169.1" y2="120"/>
+            <path class="lc-line" d="M 0.0,87.0 L 5.5,86.2 L 10.9,80.8 L 16.4,81.3 L 21.8,81.2 L 27.3,80.1 L 32.7,84.1 L 38.2,83.9 L 43.6,82.3 L 49.1,78.6 L 54.5,83.7 L 60.0,86.2 L 65.5,91.4 L 70.9,87.4 L 76.4,85.0 L 81.8,90.8 L 87.3,84.7 L 92.7,78.8 L 98.2,76.9 L 103.6,75.4 L 109.1,79.7 L 114.5,85.9 L 120.0,85.5 L 125.5,91.1 L 130.9,95.0 L 136.4,98.3 L 141.8,100.8 L 147.3,100.8 L 152.7,100.8 L 158.2,96.5 L 163.6,96.2 L 169.1,94.5 L 174.5,91.3 L 180.0,87.3 L 185.5,85.2 L 190.9,83.0 L 196.4,76.0 L 201.8,72.8 L 207.3,70.5 L 212.7,68.1 L 218.2,67.0 L 223.6,64.3 L 229.1,60.9 L 234.5,58.9 L 240.0,52.0 L 245.5,50.8 L 250.9,45.2 L 256.4,44.5 L 261.8,38.3 L 267.3,35.7 L 272.7,37.1 L 278.2,32.9 L 283.6,25.9 L 289.1,25.1 L 294.5,19.2 L 300.0,19.2" pathLength="1000" fill="none"/>
+          </svg>
+          <span class="lc-dot lc-dot-trig"></span>
+          <span class="lc-dot lc-dot-live"></span>
+          <div class="lc-alert"><span class="lc-alert-arrow">▲</span><span>Range break · 2.1× ATR</span></div>
         </div>
-        <div class="wname">Nasdaq 100</div>
-        <svg class="spark up" viewBox="0 0 160 44" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M 0.0,7.9 L 12.3,33.1 L 24.6,36.7 L 36.9,6.6 L 49.2,31.7 L 61.5,33.7 L 73.8,17.3 L 86.2,26.8 L 98.5,10.0 L 110.8,30.3 L 123.1,7.8 L 135.4,27.6 L 147.7,18.9 L 160.0,8.7" fill="none" stroke-width="2"></path>
-        </svg>
+        <div class="lchart-foot"><span class="dot"></span>Alerted 10:47 AM ET</div>
       </div>
-      <div class="wcard reveal">
-        <div class="wcard-top">
-          <span class="wsym mono">IWM</span>
-          <span class="wchg mono up">+0.65%</span>
+      <div class="lchart-card reveal down" style="--draw:2300ms;--trigdelay:1286ms;--tx:56.4%;--ty:16.0%;--ey:84.0%">
+        <div class="lchart-head">
+          <div class="lc-id"><span class="lc-sym">QQQ</span><span class="lc-name">Nasdaq 100</span></div>
+          <span class="lc-chg down">-0.63%</span>
         </div>
-        <div class="wname">Small caps</div>
-        <svg class="spark up" viewBox="0 0 160 44" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M 0.0,19.8 L 12.3,17.9 L 24.6,12.2 L 36.9,28.9 L 49.2,17.3 L 61.5,10.0 L 73.8,9.4 L 86.2,31.7 L 98.5,17.3 L 110.8,18.4 L 123.1,21.9 L 135.4,7.6 L 147.7,21.1 L 160.0,23.7" fill="none" stroke-width="2"></path>
-        </svg>
-      </div>
-      <div class="wcard reveal">
-        <div class="wcard-top">
-          <span class="wsym mono">TSLA</span>
-          <span class="wchg mono up">-1.24%</span>
+        <div class="lchart-plot">
+          <svg class="lchart-svg down" viewBox="0 0 300 120" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="grad-QQQ" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#E5484D" stop-opacity="0.30"/>
+              <stop offset="1" stop-color="#E5484D" stop-opacity="0"/>
+            </linearGradient></defs>
+            <line class="lc-grid" x1="0" y1="40" x2="300" y2="40"/>
+            <line class="lc-grid" x1="0" y1="80" x2="300" y2="80"/>
+            <path class="lc-area" d="M 0.0,28.5 L 5.5,33.3 L 10.9,39.8 L 16.4,33.0 L 21.8,37.3 L 27.3,42.4 L 32.7,40.4 L 38.2,42.5 L 43.6,37.2 L 49.1,40.8 L 54.5,34.6 L 60.0,37.1 L 65.5,35.7 L 70.9,29.8 L 76.4,27.3 L 81.8,21.6 L 87.3,19.2 L 92.7,25.3 L 98.2,20.2 L 103.6,19.2 L 109.1,21.8 L 114.5,26.0 L 120.0,21.2 L 125.5,20.1 L 130.9,19.2 L 136.4,19.2 L 141.8,19.2 L 147.3,19.2 L 152.7,19.2 L 158.2,19.2 L 163.6,22.5 L 169.1,19.2 L 174.5,23.7 L 180.0,24.3 L 185.5,26.7 L 190.9,31.9 L 196.4,38.2 L 201.8,37.6 L 207.3,41.9 L 212.7,48.1 L 218.2,52.3 L 223.6,52.9 L 229.1,59.1 L 234.5,57.3 L 240.0,63.2 L 245.5,66.5 L 250.9,70.5 L 256.4,72.4 L 261.8,74.3 L 267.3,81.2 L 272.7,84.2 L 278.2,86.4 L 283.6,91.4 L 289.1,93.1 L 294.5,96.8 L 300.0,100.8 L 300.0,120.0 L 0.0,120.0 Z" fill="url(#grad-QQQ)"/>
+            <line class="lc-trigline" x1="169.1" y1="0" x2="169.1" y2="120"/>
+            <path class="lc-line" d="M 0.0,28.5 L 5.5,33.3 L 10.9,39.8 L 16.4,33.0 L 21.8,37.3 L 27.3,42.4 L 32.7,40.4 L 38.2,42.5 L 43.6,37.2 L 49.1,40.8 L 54.5,34.6 L 60.0,37.1 L 65.5,35.7 L 70.9,29.8 L 76.4,27.3 L 81.8,21.6 L 87.3,19.2 L 92.7,25.3 L 98.2,20.2 L 103.6,19.2 L 109.1,21.8 L 114.5,26.0 L 120.0,21.2 L 125.5,20.1 L 130.9,19.2 L 136.4,19.2 L 141.8,19.2 L 147.3,19.2 L 152.7,19.2 L 158.2,19.2 L 163.6,22.5 L 169.1,19.2 L 174.5,23.7 L 180.0,24.3 L 185.5,26.7 L 190.9,31.9 L 196.4,38.2 L 201.8,37.6 L 207.3,41.9 L 212.7,48.1 L 218.2,52.3 L 223.6,52.9 L 229.1,59.1 L 234.5,57.3 L 240.0,63.2 L 245.5,66.5 L 250.9,70.5 L 256.4,72.4 L 261.8,74.3 L 267.3,81.2 L 272.7,84.2 L 278.2,86.4 L 283.6,91.4 L 289.1,93.1 L 294.5,96.8 L 300.0,100.8" pathLength="1000" fill="none"/>
+          </svg>
+          <span class="lc-dot lc-dot-trig"></span>
+          <span class="lc-dot lc-dot-live"></span>
+          <div class="lc-alert"><span class="lc-alert-arrow">▼</span><span>Session low · heavy volume</span></div>
         </div>
-        <div class="wname">Tesla</div>
-        <svg class="spark up" viewBox="0 0 160 44" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M 0.0,24.8 L 12.3,20.7 L 24.6,10.8 L 36.9,32.0 L 49.2,30.5 L 61.5,36.5 L 73.8,33.8 L 86.2,37.1 L 98.5,32.6 L 110.8,21.6 L 123.1,6.9 L 135.4,16.0 L 147.7,25.7 L 160.0,24.9" fill="none" stroke-width="2"></path>
-        </svg>
+        <div class="lchart-foot"><span class="dot"></span>Alerted 11:02 AM ET</div>
       </div>
-      <div class="wcard reveal">
-        <div class="wcard-top"><span class="wsym mono">+ more</span></div>
-        <div class="wname">TSLA, GOOGL, BE, IONQ also on watch.</div>
+      <div class="lchart-card reveal up" style="--draw:2300ms;--trigdelay:1299ms;--tx:56.4%;--ty:84.0%;--ey:16.0%">
+        <div class="lchart-head">
+          <div class="lc-id"><span class="lc-sym">TSLA</span><span class="lc-name">Tesla</span></div>
+          <span class="lc-chg up">+1.18%</span>
+        </div>
+        <div class="lchart-plot">
+          <svg class="lchart-svg up" viewBox="0 0 300 120" preserveAspectRatio="none" aria-hidden="true">
+            <defs><linearGradient id="grad-TSLA" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#23C97C" stop-opacity="0.30"/>
+              <stop offset="1" stop-color="#23C97C" stop-opacity="0"/>
+            </linearGradient></defs>
+            <line class="lc-grid" x1="0" y1="40" x2="300" y2="40"/>
+            <line class="lc-grid" x1="0" y1="80" x2="300" y2="80"/>
+            <path class="lc-area" d="M 0.0,86.2 L 5.5,85.6 L 10.9,80.6 L 16.4,85.1 L 21.8,88.9 L 27.3,95.4 L 32.7,100.8 L 38.2,100.8 L 43.6,100.8 L 49.1,100.6 L 54.5,93.8 L 60.0,91.1 L 65.5,92.8 L 70.9,94.1 L 76.4,91.5 L 81.8,93.9 L 87.3,99.8 L 92.7,95.1 L 98.2,93.4 L 103.6,98.8 L 109.1,100.8 L 114.5,100.8 L 120.0,94.4 L 125.5,99.9 L 130.9,98.1 L 136.4,91.6 L 141.8,98.1 L 147.3,99.7 L 152.7,100.0 L 158.2,94.2 L 163.6,98.5 L 169.1,100.8 L 174.5,98.8 L 180.0,96.5 L 185.5,89.4 L 190.9,85.0 L 196.4,83.8 L 201.8,82.7 L 207.3,75.2 L 212.7,71.6 L 218.2,68.7 L 223.6,67.1 L 229.1,60.7 L 234.5,58.4 L 240.0,55.2 L 245.5,52.0 L 250.9,50.4 L 256.4,45.6 L 261.8,40.1 L 267.3,37.3 L 272.7,35.8 L 278.2,29.5 L 283.6,25.9 L 289.1,27.2 L 294.5,23.1 L 300.0,19.2 L 300.0,120.0 L 0.0,120.0 Z" fill="url(#grad-TSLA)"/>
+            <line class="lc-trigline" x1="169.1" y1="0" x2="169.1" y2="120"/>
+            <path class="lc-line" d="M 0.0,86.2 L 5.5,85.6 L 10.9,80.6 L 16.4,85.1 L 21.8,88.9 L 27.3,95.4 L 32.7,100.8 L 38.2,100.8 L 43.6,100.8 L 49.1,100.6 L 54.5,93.8 L 60.0,91.1 L 65.5,92.8 L 70.9,94.1 L 76.4,91.5 L 81.8,93.9 L 87.3,99.8 L 92.7,95.1 L 98.2,93.4 L 103.6,98.8 L 109.1,100.8 L 114.5,100.8 L 120.0,94.4 L 125.5,99.9 L 130.9,98.1 L 136.4,91.6 L 141.8,98.1 L 147.3,99.7 L 152.7,100.0 L 158.2,94.2 L 163.6,98.5 L 169.1,100.8 L 174.5,98.8 L 180.0,96.5 L 185.5,89.4 L 190.9,85.0 L 196.4,83.8 L 201.8,82.7 L 207.3,75.2 L 212.7,71.6 L 218.2,68.7 L 223.6,67.1 L 229.1,60.7 L 234.5,58.4 L 240.0,55.2 L 245.5,52.0 L 250.9,50.4 L 256.4,45.6 L 261.8,40.1 L 267.3,37.3 L 272.7,35.8 L 278.2,29.5 L 283.6,25.9 L 289.1,27.2 L 294.5,23.1 L 300.0,19.2" pathLength="1000" fill="none"/>
+          </svg>
+          <span class="lc-dot lc-dot-trig"></span>
+          <span class="lc-dot lc-dot-live"></span>
+          <div class="lc-alert"><span class="lc-alert-arrow">▲</span><span>Momentum · 2.4× normal range</span></div>
+        </div>
+        <div class="lchart-foot"><span class="dot"></span>Alerted 11:33 AM ET</div>
       </div>
     </div>
+    <p class="watch-note reveal">Real examples of the moves Kestrel flags — the price ranges quietly, makes its move, and the alert fires right at the turn. Watching <b>SPY · QQQ · GOOGL · TSLA · BE · IONQ</b> every session.</p>
   </div>
 </section>
 
@@ -419,6 +473,49 @@ footer.site-foot b{color:var(--text);}
       }, 1150);
     }
     setTimeout(step, 700);
+  })();
+
+  // ---- live play-out charts: draw the session, fire the alert, replay while in view ----
+  (function(){
+    var cards = Array.prototype.slice.call(document.querySelectorAll('.lchart-card'));
+    if(!cards.length) return;
+    var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(reduced){ cards.forEach(function(c){ c.classList.add('reduced'); }); return; }
+
+    var timers = {};
+    function play(card){
+      card.classList.remove('playing');
+      void card.offsetWidth;   // force reflow so the animation restarts
+      card.classList.add('playing');
+    }
+    function start(card, id, delay){
+      setTimeout(function(){
+        if(timers[id] === undefined) return; // stopped before it began
+        play(card);
+        timers[id] = setInterval(function(){ play(card); }, 6800);
+      }, delay);
+    }
+    function stop(id){
+      if(timers[id]){ clearInterval(timers[id]); }
+      delete timers[id];
+    }
+    cards.forEach(function(c, i){ c.dataset.lc = i; });
+
+    if('IntersectionObserver' in window){
+      var io = new IntersectionObserver(function(entries){
+        entries.forEach(function(e){
+          var id = e.target.dataset.lc;
+          if(e.isIntersecting){
+            if(!(id in timers)){ timers[id] = null; start(e.target, id, cards.indexOf(e.target) * 400); }
+          } else {
+            stop(id);
+          }
+        });
+      }, {threshold:0.35});
+      cards.forEach(function(c){ io.observe(c); });
+    } else {
+      cards.forEach(function(c){ play(c); });
+    }
   })();
 
   // Wire the "See it live on Telegram" buttons, or hide them until a link exists.
