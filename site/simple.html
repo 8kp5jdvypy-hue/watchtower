@@ -189,19 +189,24 @@ h1{font-family:var(--display);font-weight:700;letter-spacing:-0.04em;line-height
 h1 .accent{color:var(--up);}
 .sub{font-size:var(--step-1);color:var(--text-dim);max-width:46ch;margin:1.5rem 0 0;line-height:1.45;}
 
-/* hero viz: the line ignites on scroll (the product, performed) */
+/* signal field: every name being watched, live — hover it, and it reacts under your cursor */
 .hero-viz-wrap{margin:2.6rem 0 0;max-width:560px;}
-.hero-viz{width:100%;height:auto;overflow:visible;--p:0;}
-.hero-viz path,.hero-viz circle{vector-effect:non-scaling-stroke;}
-.hv-flat{stroke:url(#hvg);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:520;stroke-dashoffset:520;}
-body:not(.is-loading) .hv-flat{animation:hv-draw 1.3s cubic-bezier(.16,1,.3,1) .15s forwards;}
-@keyframes hv-draw{to{stroke-dashoffset:0;}}
-.hv-break{stroke:url(#hvg);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:300;stroke-dashoffset:calc(300 * (1 - var(--p)));}
-.hv-glow{stroke:var(--accent);stroke-width:9;stroke-linecap:round;stroke-linejoin:round;filter:blur(7px);opacity:calc(var(--p) * 0.75);}
-.hv-tip{fill:var(--accent-2);opacity:var(--p);}
-.hv-bird{transform:translateY(calc(var(--p) * -14px));transition:transform 0.15s linear;}
-.hv-bird path{fill:var(--text-low);transition:fill 0.4s ease;}
-.hero-viz.ignited .hv-bird path{fill:var(--accent-2);}
+.signal-field{position:relative;height:112px;padding-bottom:11px;border-bottom:1px solid var(--line);}
+.sf-bars{display:flex;align-items:flex-end;gap:3px;height:100%;}
+.sf-bar{flex:1 1 0;min-width:2px;border-radius:2px 2px 0 0;background:linear-gradient(180deg,var(--accent-2),var(--accent));opacity:0.42;transform-origin:bottom;transition:transform 0.5s cubic-bezier(.2,.8,.2,1),opacity 0.5s ease;will-change:transform;}
+.sf-alert-bar{position:relative;background:var(--up);opacity:0.62;}
+.sf-tag{position:absolute;left:50%;bottom:calc(100% + 10px);transform:translateX(-50%) translateY(6px);white-space:nowrap;padding:0.32rem 0.65rem;border-radius:7px;background:var(--panel-2);border:1px solid var(--up);font-family:var(--mono);font-size:0.68rem;color:var(--text);opacity:0;pointer-events:none;box-shadow:0 10px 26px -12px rgba(0,0,0,0.85);transition:opacity 0.3s ease,transform 0.3s ease;z-index:2;}
+.sf-tag b{color:var(--up);font-weight:600;}
+@media (prefers-reduced-motion:no-preference){
+  .sf-alert-bar.firing{animation:sf-fire 2.6s cubic-bezier(.2,.8,.2,1);}
+}
+.sf-alert-bar.firing .sf-tag{opacity:1;transform:translateX(-50%) translateY(0);transition-delay:0.15s;}
+@keyframes sf-fire{
+  0%{transform:scaleY(1);filter:none;}
+  35%{transform:scaleY(2.35);filter:drop-shadow(0 0 10px rgba(124,92,255,0.85));}
+  70%{transform:scaleY(2.1);filter:drop-shadow(0 0 10px rgba(124,92,255,0.85));}
+  100%{transform:scaleY(1);filter:none;}
+}
 .hero-viz-cap{display:block;margin-top:1rem;font-size:var(--step--1);color:var(--text-low);}
 .app-soon{display:inline-flex;align-items:center;gap:0.55em;font-size:var(--step--1);color:var(--text-dim);}
 .app-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px 1px rgba(124,92,255,0.6);animation:pulse-dot 2.2s ease-in-out infinite;}
@@ -509,6 +514,8 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
   .hero-content{padding-top:1.4rem;padding-bottom:0;}
   .sub{font-size:1rem;}
   .bot{margin-top:1.5rem;}
+  .hero-viz-wrap{margin-top:3.6rem;}
+  .sf-tag{font-size:0.62rem;padding:0.28rem 0.55rem;}
   .marquee{padding:0.9rem 0;}
   .marquee-track{font-size:clamp(1.4rem,7vw,2rem);gap:1.7rem;}
   .marquee-track span{gap:1.7rem;}
@@ -600,15 +607,10 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
     <p class="sub intro" style="transition-delay:.34s">Perch watches the market every minute of every session and alerts you the second a name does something genuinely unusual. It never trades — it just makes sure the moment worth watching never gets past you.</p>
 
     <div class="hero-viz-wrap intro" style="transition-delay:.44s">
-      <svg class="hero-viz" id="heroViz" viewBox="0 0 620 200" fill="none" aria-hidden="true">
-        <defs><linearGradient id="hvg" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7C5CFF"/><stop offset="1" stop-color="#B794FF"/></linearGradient></defs>
-        <path class="hv-glow" d="M10,140 L70,138 L130,142 L190,137 L250,141 L310,138 L370,140 L400,139 L450,120 L500,96 L555,66 L610,34"/>
-        <path class="hv-flat" d="M10,140 L70,138 L130,142 L190,137 L250,141 L310,138 L370,140 L400,139"/>
-        <path class="hv-break" d="M400,139 L450,120 L500,96 L555,66 L610,34"/>
-        <circle class="hv-tip" cx="610" cy="34" r="4.5"/>
-        <g class="hv-bird" transform="translate(388,112)"><path transform="scale(1.15)" d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></g>
-      </svg>
-      <span class="hero-viz-cap">The line goes flat, then it doesn't — that's your alert.</span>
+      <div class="signal-field" id="signalField">
+        <div class="sf-bars"><div class="sf-bar" style="height:27.9%"></div><div class="sf-bar" style="height:27.9%"></div><div class="sf-bar" style="height:31.3%"></div><div class="sf-bar" style="height:24.1%"></div><div class="sf-bar" style="height:23.3%"></div><div class="sf-bar" style="height:23.0%"></div><div class="sf-bar" style="height:16.4%"></div><div class="sf-bar" style="height:22.0%"></div><div class="sf-bar" style="height:24.9%"></div><div class="sf-bar" style="height:28.3%"></div><div class="sf-bar" style="height:20.6%"></div><div class="sf-bar" style="height:24.6%"></div><div class="sf-bar" style="height:23.2%"></div><div class="sf-bar" style="height:31.2%"></div><div class="sf-bar" style="height:28.3%"></div><div class="sf-bar" style="height:18.5%"></div><div class="sf-bar" style="height:29.4%"></div><div class="sf-bar" style="height:27.9%"></div><div class="sf-bar" style="height:22.5%"></div><div class="sf-bar" style="height:23.3%"></div><div class="sf-bar" style="height:18.7%"></div><div class="sf-bar" style="height:18.2%"></div><div class="sf-bar" style="height:26.2%"></div><div class="sf-bar" style="height:21.4%"></div><div class="sf-bar" style="height:24.5%"></div><div class="sf-bar" style="height:23.8%"></div><div class="sf-bar" style="height:19.7%"></div><div class="sf-bar" style="height:24.0%"></div><div class="sf-bar" style="height:22.4%"></div><div class="sf-bar" style="height:26.3%"></div><div class="sf-bar" style="height:20.7%"></div><div class="sf-bar" style="height:23.7%"></div><div class="sf-bar" style="height:23.2%"></div><div class="sf-bar sf-alert-bar" id="sfAlertBar" style="height:34%"><span class="sf-tag" id="sfTag"><b>TSLA</b> 2.4&times; range</span></div><div class="sf-bar" style="height:27.9%"></div><div class="sf-bar" style="height:26.6%"></div><div class="sf-bar" style="height:25.6%"></div><div class="sf-bar" style="height:33.6%"></div><div class="sf-bar" style="height:32.3%"></div><div class="sf-bar" style="height:28.9%"></div><div class="sf-bar" style="height:25.9%"></div><div class="sf-bar" style="height:19.4%"></div><div class="sf-bar" style="height:17.0%"></div><div class="sf-bar" style="height:19.1%"></div><div class="sf-bar" style="height:17.6%"></div><div class="sf-bar" style="height:28.0%"></div><div class="sf-bar" style="height:24.5%"></div><div class="sf-bar" style="height:31.7%"></div></div>
+      </div>
+      <span class="hero-viz-cap">Fifty names, watched every second. When one jumps, you'll know.</span>
     </div>
 
     <div class="join-console tilt intro" id="joinConsole" style="transition-delay:.54s">
@@ -1039,25 +1041,62 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
     ids.forEach(function(id){ var s = document.getElementById(id); if(s) io.observe(s); });
   })();
 
-  // ---- hero viz: scroll ignites the line + lifts the bird ----
+  // ---- signal field: bars ripple under the cursor; one fires like a real alert, on a loop ----
   (function(){
-    var viz = document.getElementById('heroViz');
-    var hero = document.querySelector('.hero');
-    if(!viz || !hero) return;
+    var field = document.getElementById('signalField');
+    if(!field) return;
+    var allBars = Array.prototype.slice.call(field.querySelectorAll('.sf-bar'));
+    var bars = allBars.filter(function(b){ return !b.classList.contains('sf-alert-bar'); });
+    var alertBar = field.querySelector('.sf-alert-bar');
+    var tag = document.getElementById('sfTag');
+    var fine = window.matchMedia('(pointer: fine)').matches;
     var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if(reduced){ viz.style.setProperty('--p', 1); viz.classList.add('ignited'); return; }
-    var ticking = false;
-    function update(){
-      ticking = false;
-      var span = Math.max(1, window.innerHeight * 0.6);
-      var p = Math.min(1, Math.max(0, window.scrollY / span));
-      viz.style.setProperty('--p', p.toFixed(3));
-      viz.classList.toggle('ignited', p > 0.55);
+
+    if(fine && !reduced && bars.length){
+      var ticking = false, mx = -9999;
+      field.addEventListener('pointermove', function(e){
+        var r = field.getBoundingClientRect();
+        mx = e.clientX - r.left;
+        if(ticking) return; ticking = true;
+        requestAnimationFrame(function(){
+          ticking = false;
+          bars.forEach(function(bar){
+            var bx = bar.offsetLeft + bar.offsetWidth / 2;
+            var d = Math.abs(mx - bx);
+            var boost = Math.max(0, 1 - d / 130);
+            bar.style.transform = boost > 0.02 ? 'scaleY(' + (1 + boost * 2.1).toFixed(2) + ')' : '';
+            bar.style.opacity = boost > 0.02 ? (0.42 + boost * 0.5).toFixed(2) : '';
+          });
+        });
+      });
+      field.addEventListener('pointerleave', function(){
+        bars.forEach(function(bar){ bar.style.transform = ''; bar.style.opacity = ''; });
+      });
     }
-    window.addEventListener('scroll', function(){
-      if(!ticking){ ticking = true; requestAnimationFrame(update); }
-    }, {passive:true});
-    update();
+
+    if(alertBar && tag){
+      var alerts = [
+        {sym:'TSLA', txt:'2.4&times; range'},
+        {sym:'QQQ', txt:'session low'},
+        {sym:'GOOGL', txt:'range reclaim'},
+        {sym:'SPY', txt:'2.1&times; ATR'}
+      ];
+      var i = 0;
+      function fire(){
+        var a = alerts[i % alerts.length]; i++;
+        tag.innerHTML = '<b>' + a.sym + '</b> ' + a.txt;
+        alertBar.classList.remove('firing');
+        void alertBar.offsetWidth;
+        alertBar.classList.add('firing');
+      }
+      if(reduced){
+        tag.innerHTML = '<b>TSLA</b> 2.4&times; range';
+        alertBar.classList.add('firing'); // static reveal; the keyframe itself is motion-gated
+      } else {
+        fire();
+        setInterval(fire, 5200);
+      }
+    }
   })();
 
   // ---- live play-out charts: draw the session, fire the alert, replay while in view ----
