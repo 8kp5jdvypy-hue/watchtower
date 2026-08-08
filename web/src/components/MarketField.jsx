@@ -74,6 +74,7 @@ export default function MarketField() {
       const chosenEl = fieldRef.current.querySelector('.mf-sym.is-chosen')
       const others = fieldRef.current.querySelectorAll('.mf-sym:not(.is-chosen)')
       const label = rootRef.current.querySelector('.mf-caption')
+      const kestrel = rootRef.current.querySelector('.mf-kestrel')
 
       gsap.timeline({
         scrollTrigger: {
@@ -84,6 +85,12 @@ export default function MarketField() {
           pin: true,
         },
       })
+        // The kestrel moment: it drifts across from above, the field is
+        // visible beneath it, then it dives toward the found signal and
+        // dissolves into darkness -- Perch watching from above, made literal.
+        .fromTo(kestrel, { opacity: 0, xPercent: -10, yPercent: -60, scale: 0.8 },
+          { opacity: 0.9, xPercent: 20, yPercent: -20, scale: 1, duration: 1, ease: 'power1.inOut' }, 0)
+        .to(kestrel, { xPercent: 55, yPercent: 8, scale: 0.55, opacity: 0, duration: 0.6, ease: 'power2.in' }, 0.55)
         .to(others, { opacity: 0, scale: 0.6, filter: 'blur(6px)', stagger: { each: 0.003, from: 'random' }, ease: 'power1.in' }, 0.15)
         .to(chosenEl, { left: '50%', top: '50%', scale: isMobile ? 2.6 : 3.4, duration: 1, ease: 'power2.inOut' }, 0.1)
         .to(chosenEl, { color: '#ff3b4e', duration: 0.3 }, 0.85)
@@ -109,6 +116,10 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
+        <svg className="mf-kestrel" viewBox="0 0 64 64" aria-hidden="true">
+          <path d="M40 9 L34 6 Q32 1 26 2 Q19 3 16 9 Q12 15 4 20 Q3 21 5 21
+                   Q14 20 19 18 Q21 25 27 25 Q35 24 36 16 Q37 12 40 9 Z" />
+        </svg>
         <div className="mf-caption">
           <span className="eyebrow"><span className="dot" /> SIGNAL DETECTED</span>
           <p>Something changed. Perch found it.</p>

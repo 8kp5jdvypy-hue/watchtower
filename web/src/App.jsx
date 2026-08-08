@@ -1,5 +1,7 @@
 import { useEffect } from 'react'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import BootSequence from './components/BootSequence'
+import Grain from './components/Grain'
 import Nav from './components/Nav'
 import CustomCursor from './components/CustomCursor'
 import Hero from './components/Hero'
@@ -29,6 +31,8 @@ export default function App() {
 
   return (
     <>
+      <BootSequence />
+      <Grain />
       <CustomCursor />
       <Nav />
       <main>

@@ -30,10 +30,15 @@ export default function Hero() {
   useEffect(() => {
     if (!rootRef.current) return
     const ctx = gsap.context(() => {
-      const tl = gsap.timeline({ delay: 0.3, defaults: { ease: 'power3.out' } })
+      // Boot sequence holds the stage for ~1.9s (see BootSequence) -- the
+      // reveal waits for it so the headline "arrives" the instant the
+      // system finishes initializing, not on its own separate clock.
+      const tl = gsap.timeline({ delay: 1.85, defaults: { ease: 'power3.out' } })
       tl.set('.hero-line-i', { yPercent: 115 })
         .set('.hero-fade', { opacity: 0, y: 16 })
+        .set('h1', { '--wght': 300 })
         .to('.hero-line-i', { yPercent: 0, duration: 1.1, stagger: 0.09 })
+        .to('h1', { '--wght': 640, duration: 1.3, ease: 'power2.out' }, '-=1.1')
         .to('.hero-fade', { opacity: 1, y: 0, duration: 0.9, stagger: 0.08 }, '-=0.6')
     }, rootRef)
     return () => ctx.revert()
@@ -48,7 +53,7 @@ export default function Hero() {
           gl={{ antialias: true, alpha: false }}
         >
           <Suspense fallback={null}>
-            <HeroScene reduced={reduced || isMobile} />
+            <HeroScene reduced={reduced} isMobile={isMobile} />
           </Suspense>
         </Canvas>
       </div>
