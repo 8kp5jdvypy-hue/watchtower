@@ -100,6 +100,14 @@ h1 .accent{color:var(--up);}
 .btn:hover,.btn:focus-visible{filter:brightness(1.08);}
 .btn:active{transform:translateY(1px);}
 .btn[disabled]{opacity:0.6;cursor:default;}
+.btn-ghost{display:inline-flex;align-items:center;gap:0.55em;font-family:var(--sans);font-weight:600;font-size:0.95rem;color:var(--text);background:rgba(255,255,255,0.02);border:1px solid var(--line);border-radius:6px;padding:0.72em 1.25em;cursor:pointer;text-decoration:none;transition:border-color 0.18s ease,background 0.18s ease,transform 0.15s ease;}
+.btn-ghost:hover,.btn-ghost:focus-visible{border-color:var(--up);background:rgba(35,201,124,0.06);}
+.btn-ghost:active{transform:translateY(1px);}
+.btn-ghost svg{width:17px;height:17px;fill:currentColor;flex:none;}
+.btn-ghost .arrow{transition:transform 0.18s ease;}
+.btn-ghost:hover .arrow{transform:translateX(3px);}
+.cta-row{display:flex;align-items:center;gap:0.9rem;flex-wrap:wrap;margin-top:1.15rem;}
+.cta-or{font-family:var(--mono);font-size:0.72rem;letter-spacing:0.08em;color:var(--text-dim);text-transform:uppercase;}
 .form-msg{font-family:var(--mono);font-size:0.78rem;margin:0.85rem 0 0;min-height:1.2em;color:var(--text-dim);}
 .form-msg.error{color:var(--down);}
 .success{display:none;max-width:520px;margin-top:1.4rem;}
@@ -142,6 +150,22 @@ form.is-hidden{display:none;}
 .step-num{font-family:var(--mono);font-size:0.78rem;color:var(--up);letter-spacing:0.1em;margin-bottom:0.7rem;}
 .step h3{font-family:var(--display);font-weight:700;text-transform:uppercase;font-size:1.3rem;margin:0 0 0.5rem;color:var(--text);}
 .step p{font-size:0.94rem;color:var(--text-dim);margin:0;max-width:32ch;}
+
+/* ---------------- sample alert ---------------- */
+.alert-demo{margin-top:clamp(2.4rem,6vw,3.4rem);max-width:540px;background:var(--panel-2);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 18px 50px -24px rgba(0,0,0,0.7);}
+.alert-head{display:flex;align-items:center;gap:0.65rem;padding:0.85rem 1.15rem;border-bottom:1px solid var(--line);background:var(--panel);}
+.alert-badge{width:30px;height:30px;border-radius:8px;background:var(--up);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 14px 1px rgba(35,201,124,0.4);}
+.alert-badge svg{width:18px;height:18px;fill:#06110B;}
+.alert-who{font-family:var(--mono);font-size:0.82rem;color:var(--text);letter-spacing:0.02em;}
+.alert-who b{color:var(--up);font-weight:500;}
+.alert-time{margin-left:auto;font-family:var(--mono);font-size:0.7rem;color:var(--text-dim);font-variant-numeric:tabular-nums;}
+.alert-live{display:inline-flex;align-items:center;gap:0.4em;margin-left:auto;font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;color:var(--up);text-transform:uppercase;}
+.alert-live .dot{width:7px;height:7px;border-radius:50%;background:var(--up);box-shadow:0 0 8px 1px rgba(35,201,124,0.6);animation:pulse-dot 1.6s ease-in-out infinite;}
+.alert-live + .alert-time{margin-left:0.9rem;}
+.alert-body{padding:1.05rem 1.15rem 1.25rem;}
+.alert-body p{margin:0;font-size:0.98rem;line-height:1.5;color:var(--text);}
+.alert-body b{color:var(--text);}
+.alert-body .muted{color:var(--text-dim);font-size:0.85rem;margin-top:0.6rem;}
 
 /* ---------------- footer signup ---------------- */
 .footer-cta{background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line);}
@@ -186,7 +210,7 @@ footer.site-foot b{color:var(--text);}
   <div class="hero-content">
     <div class="eyebrow">Live market alerts on Telegram</div>
     <h1>Catch the moves that <span class="accent">matter</span>.</h1>
-    <p class="sub">Kestrel watches SPY, QQQ, and IWM around the clock and pings you the moment something unusual happens — before it's old news.</p>
+    <p class="sub">Kestrel watches the market every minute of every session and pings your Telegram the second a name does something genuinely unusual. It never trades — it just makes sure the moment worth watching never gets past you.</p>
 
     <div class="chart-wrap">
       <svg class="chart-line" viewBox="0 0 270 70" preserveAspectRatio="none">
@@ -205,6 +229,13 @@ footer.site-foot b{color:var(--text);}
       </form>
       <p class="form-msg" id="heroMsg"></p>
       <div class="success" id="heroSuccess"><p>You're on the list. I'll email you when it's ready.</p></div>
+      <div class="cta-row">
+        <span class="cta-or">or</span>
+        <a class="btn-ghost" id="heroTelegram" href="#" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.8 4.3 18.5 19.6c-.24 1.08-.9 1.34-1.82.84l-5-3.7-2.4 2.32c-.27.27-.5.5-1 .5l.35-5.05 9.2-8.3c.4-.36-.09-.56-.62-.2L5.8 13.1l-4.9-1.53c-1.07-.33-1.09-1.07.22-1.58l19.16-7.4c.9-.33 1.68.2 1.32 1.74z"/></svg>
+          See it live on Telegram <span class="arrow" aria-hidden="true">→</span>
+        </a>
+      </div>
     </div>
     <p class="fine">Free during beta · No spam · Unsubscribe anytime</p>
   </div>
@@ -273,9 +304,24 @@ footer.site-foot b{color:var(--text);}
       <h2>Watch. Detect. Alert.</h2>
     </div>
     <div class="steps">
-      <div class="step reveal"><div class="step-num">01</div><h3>Watch</h3><p>Kestrel reads live price action across the session, every few minutes, no breaks.</p></div>
-      <div class="step reveal"><div class="step-num">02</div><h3>Detect</h3><p>It flags moves that are genuinely unusual for that name — not just noise.</p></div>
-      <div class="step reveal"><div class="step-num">03</div><h3>Alert</h3><p>You get a plain-English ping on Telegram, the moment it happens.</p></div>
+      <div class="step reveal"><div class="step-num">01</div><h3>Watch</h3><p>Kestrel reads live price action across the whole session, every few minutes, no breaks and no days off.</p></div>
+      <div class="step reveal"><div class="step-num">02</div><h3>Detect</h3><p>It measures each move against what's normal for that specific name, so you hear about the signal — not the noise.</p></div>
+      <div class="step reveal"><div class="step-num">03</div><h3>Alert</h3><p>You get a plain-English ping on Telegram the moment it happens. What you do next is up to you.</p></div>
+    </div>
+
+    <div class="alert-demo reveal">
+      <div class="alert-head">
+        <span class="alert-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></svg>
+        </span>
+        <span class="alert-who"><b>Kestrel</b> · Telegram</span>
+        <span class="alert-live"><span class="dot"></span>Live</span>
+        <span class="alert-time">2:14 PM ET</span>
+      </div>
+      <div class="alert-body">
+        <p><b>SPY</b> just broke its 20-day range on 2.3&times; average volume — the first time all week.</p>
+        <p class="muted">Not advice. Just the heads-up, so you get to decide while it still matters.</p>
+      </div>
     </div>
   </div>
 </section>
@@ -294,6 +340,13 @@ footer.site-foot b{color:var(--text);}
       </form>
       <p class="form-msg" id="footerMsg"></p>
       <div class="success" id="footerSuccess"><p>You're on the list. I'll email you when it's ready.</p></div>
+      <div class="cta-row">
+        <span class="cta-or">or</span>
+        <a class="btn-ghost" id="footerTelegram" href="#" target="_blank" rel="noopener">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.8 4.3 18.5 19.6c-.24 1.08-.9 1.34-1.82.84l-5-3.7-2.4 2.32c-.27.27-.5.5-1 .5l.35-5.05 9.2-8.3c.4-.36-.09-.56-.62-.2L5.8 13.1l-4.9-1.53c-1.07-.33-1.09-1.07.22-1.58l19.16-7.4c.9-.33 1.68.2 1.32 1.74z"/></svg>
+          See it live on Telegram <span class="arrow" aria-hidden="true">→</span>
+        </a>
+      </div>
     </div>
   </div>
 </section>
@@ -306,8 +359,21 @@ footer.site-foot b{color:var(--text);}
 <script>
 (function(){
   var FORM_ENDPOINT = ""; // point this at Formspree, Buttondown, etc.
+  var TELEGRAM_URL = ""; // your bot link, e.g. "https://t.me/YourKestrelBot"
 
   document.getElementById('year').textContent = new Date().getFullYear();
+
+  // Wire the "See it live on Telegram" buttons, or hide them until a link exists.
+  ['heroTelegram','footerTelegram'].forEach(function(id){
+    var el = document.getElementById(id);
+    if(!el) return;
+    if(TELEGRAM_URL){
+      el.href = TELEGRAM_URL;
+    } else {
+      var row = el.closest('.cta-row');
+      if(row){ row.style.display = 'none'; }
+    }
+  });
 
   function wire(formId, msgId, successId){
     var form = document.getElementById(formId);
