@@ -429,12 +429,24 @@ def process_new_bar(
     conn.commit()
 
 
-def send_medium_digest_if_due(budget: AlertBudget, alerter, conn, when: datetime) -> None:
+def send_medium_digest_if_due(
+    budget: AlertBudget, alerter, conn, when: datetime, personal_fanout_fn=None,
+) -> None:
+    """personal_fanout_fn(clusters, text, when), if given, is called right
+    after the ops-channel digest is sent — it's how 'aggressive'-
+    sensitivity subscribers get this same digest personally (see
+    tradebot.telegram_bot.delivery.make_medium_fanout_fn), without this
+    module needing to know anything about per-user sensitivity settings.
+    None (the default) preserves the exact prior behavior — no personal
+    fan-out, used by replay and by every existing test."""
     digest = budget.pop_medium_digest_if_due()
     if not digest:
         return
     tier_perf = tier_performance(conn).get("medium")
-    alerter.send(templates.render_digest("Medium Digest", "medium", digest, tier_perf, when), priority=outbox.PRIORITY_NORMAL)
+    text = templates.render_digest("Medium Digest", "medium", digest, tier_perf, when)
+    alerter.send(text, priority=outbox.PRIORITY_NORMAL)
+    if personal_fanout_fn is not None:
+        personal_fanout_fn(digest, text, when)
 
 
 def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None:
@@ -749,7 +761,47 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
 # --------------------------------------------------------------------------
 
 
-def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
+# Stage 1 broad-scan cadence (see tradebot.broad_scan / tradebot.universe)
+# — deliberately much coarser than the 5-minute Stage 2 bar cadence:
+# daily-bar-level volume/range doesn't meaningfully change every 5
+# minutes, and a bulk fetch across the ~13,000-symbol active universe
+# (live-verified 2026-08-08: ~9 chunked requests, ~20s total — see
+# vendors.alpaca.fetch_daily_bars_bulk) is real API load that has no
+# business repeating on the same cadence as the fixed 17-symbol loop.
+BROAD_SCAN_INTERVAL_MINUTES = 30
+# Caps how many EXTRA symbols beyond WATCHLIST get pulled into live
+# Stage 2 evaluation per scan — the explicit "higher coverage, NOT higher
+# alert volume" bound: a bigger universe can surface more candidates, but
+# only this many of the strongest ones ever reach the real detector suite
+# and the daily HIGH cap/cooldowns in alerts.AlertBudget still apply on
+# top of that.
+BROAD_SCAN_PROMOTION_LIMIT = 25
+BROAD_SCAN_LOOKBACK_DAYS = 30
+
+
+def run_broad_scan(universe_conn, fetch_bars_fn=None, promotion_limit: int = BROAD_SCAN_PROMOTION_LIMIT) -> list[str]:
+    """One Stage 1 pass: the active universe (tradebot.universe) -> one
+    bulk daily-bars fetch -> the cheap screen (tradebot.broad_scan) ->
+    the strongest `promotion_limit` symbols. fetch_bars_fn defaults to
+    vendors.alpaca.fetch_daily_bars_bulk (deferred import — this module
+    stays usable without the Alpaca SDK installed for anything that
+    doesn't call this); tests inject a fake."""
+    from tradebot import broad_scan
+    from tradebot import universe as universe_mod
+
+    if fetch_bars_fn is None:
+        from tradebot.vendors.alpaca import fetch_daily_bars_bulk
+
+        fetch_bars_fn = fetch_daily_bars_bulk
+
+    symbols = universe_mod.active_symbols(universe_conn)
+    bars_by_symbol = fetch_bars_fn(symbols, BROAD_SCAN_LOOKBACK_DAYS)
+    snapshots = broad_scan.build_snapshots_from_daily_bars(bars_by_symbol)
+    promoted = broad_scan.run_stage1_screen(snapshots)
+    return [c.symbol for c in promoted[:promotion_limit]]
+
+
+def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False) -> HeartbeatStats:
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
     open_ts, close_ts = session_bounds(session_date)
@@ -793,6 +845,25 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
     if isinstance(alerter, TelegramAlerter):
         halt_checker = TelegramHaltChecker(alerter.token, alerter.chat_id)
 
+    # Stage 1 wiring — see run_broad_scan's docstring. Entirely opt-in
+    # (enable_broad_scan=False preserves the exact fixed-WATCHLIST
+    # behavior this loop always had) and never allowed to take the
+    # session down: a universe-refresh or bulk-fetch failure is logged
+    # like any other per-iteration exception, not fatal.
+    universe_conn = None
+    dynamic_symbols: list[str] = []
+    last_broad_scan: datetime | None = None
+    if enable_broad_scan:
+        try:
+            from tradebot import universe as universe_mod
+            from tradebot.vendors.alpaca import fetch_us_equity_assets
+
+            universe_conn = universe_mod.connect()
+            universe_mod.refresh_universe(universe_conn, fetch_us_equity_assets, now)
+        except Exception:
+            stats.errors.append(traceback.format_exc())
+            universe_conn = None
+
     while True:
         loop_start = datetime.now(timezone.utc)
         if loop_start >= close_ts:
@@ -801,7 +872,22 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
             alerter.send(templates.render_system_notice("Halt requested. Stopping the live session.", loop_start), priority=outbox.PRIORITY_HIGH)
             break
 
-        for symbol in WATCHLIST:
+        if universe_conn is not None and (
+            last_broad_scan is None or (loop_start - last_broad_scan).total_seconds() >= BROAD_SCAN_INTERVAL_MINUTES * 60
+        ):
+            try:
+                dynamic_symbols = run_broad_scan(universe_conn)
+                for symbol in dynamic_symbols:
+                    if symbol not in md:
+                        md[symbol] = LiveMarketData(symbol, session_date)
+                        rth_bar_count[symbol] = 0
+                logger.info("broad scan promoted %d symbol(s): %s", len(dynamic_symbols), dynamic_symbols)
+            except Exception:
+                stats.errors.append(traceback.format_exc())
+            last_broad_scan = loop_start
+
+        scan_symbols = WATCHLIST + [s for s in dynamic_symbols if s not in WATCHLIST]
+        for symbol in scan_symbols:
             try:
                 rth_bars = list(md[symbol].session_bars(symbol, session_date))
                 if not rth_bars:
@@ -832,7 +918,13 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                         session_date=session_date,
                         prior_daily_bars=daily,
                         opening_range_bars=rth_bars[:1],
-                        historical_session_bars=history_by_symbol[symbol],
+                        # .get(..., []): a symbol Stage 1 just promoted mid-session
+                        # has no cached replay history (see cached_session_dates'
+                        # WATCHLIST-only scope above) — an empty history just
+                        # means rvol_spike (the one detector that reads
+                        # avg_cum_volume_by_bar) never fires for it; every other
+                        # detector works fine off this session's own bars alone.
+                        historical_session_bars=history_by_symbol.get(symbol, []),
                     )
 
                 process_new_bar(
@@ -841,7 +933,7 @@ def run_live(alerter, subscriber_hook=None) -> HeartbeatStats:
                     lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
                     stats, subscriber_hook, now=loop_start,
                 )
-                send_medium_digest_if_due(budget, alerter, conn, loop_start)
+                send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
             except Exception:
                 stats.errors.append(traceback.format_exc())
                 try:
@@ -885,6 +977,12 @@ def main() -> None:
         "--no-personal-alerts", action="store_true",
         help="with --live, skip the per-user DM fan-out (tradebot.telegram_bot) and only push the ops channel",
     )
+    parser.add_argument(
+        "--broad-scan", action="store_true",
+        help="with --live, also run Stage 1 (tradebot.broad_scan) across the full active universe "
+        "(tradebot.universe) every 30 minutes, promoting up to 25 extra symbols into live Stage 2 "
+        "evaluation on top of the fixed WATCHLIST. Off by default.",
+    )
     args = parser.parse_args()
 
     alerter = TelegramAlerter() if args.live else ConsoleAlerter()
@@ -893,20 +991,21 @@ def main() -> None:
         run_replay(date.fromisoformat(args.replay_date), alerter)
     else:
         subscriber_hook = None
+        medium_fanout_fn = None
         if args.live and not args.no_personal_alerts:
             # Deferred import: the command layer (and its own DB) is only
             # needed here, so replay/console-only runs stay decoupled from it.
-            # No BotClient here anymore — the hook only enqueues to the
+            # No BotClient here anymore — the hooks only enqueue to the
             # outbox now; tradebot.telegram_bot.worker is the only thing
             # that actually calls the Telegram API.
             from tradebot.telegram_bot.db import connect as users_connect
-            from tradebot.telegram_bot.delivery import make_subscriber_hook
+            from tradebot.telegram_bot.delivery import make_medium_fanout_fn, make_subscriber_hook
 
             users_conn = users_connect()
-            subscriber_hook = make_subscriber_hook(
-                users_conn, lambda now: now.astimezone(ET).date(), WATCHLIST
-            )
-        run_live(alerter, subscriber_hook)
+            session_date_fn = lambda now: now.astimezone(ET).date()
+            subscriber_hook = make_subscriber_hook(users_conn, session_date_fn, WATCHLIST)
+            medium_fanout_fn = make_medium_fanout_fn(users_conn, session_date_fn, WATCHLIST)
+        run_live(alerter, subscriber_hook, medium_fanout_fn, enable_broad_scan=args.broad_scan)
 
 
 if __name__ == "__main__":

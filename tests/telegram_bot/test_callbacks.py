@@ -166,23 +166,77 @@ def test_outcome_button_unknown_alert():
     assert "can't find" in r.toast.lower()
 
 
-def test_ack_risk_button_advances_to_timezone_step():
+def test_ack_risk_button_advances_to_sensitivity_step():
     users_conn, journal_conn = _setup()
     db.set_onboarding_step(users_conn, 1, "risk_ack")
     r = callbacks.handle_ack_risk_button(_ctx(users_conn, journal_conn, ""))
     assert db.get_user(users_conn, 1).risk_ack_at is not None
-    assert db.get_user(users_conn, 1).onboarding_step == "timezone"
+    assert db.get_user(users_conn, 1).onboarding_step == "sensitivity"
     assert r.edit_keyboard is not None
 
 
-def test_timezone_button_sets_timezone_and_advances_to_quiet_hours():
+def test_sensitivity_button_sets_sensitivity_and_advances_to_timezone():
+    users_conn, journal_conn = _setup()
+    db.set_onboarding_step(users_conn, 1, "sensitivity")
+    r = callbacks.handle_sensitivity_button(_ctx(users_conn, journal_conn, "aggressive"))
+    user = db.get_user(users_conn, 1)
+    assert user.alert_sensitivity == "aggressive"
+    assert user.onboarding_step == "timezone"
+    assert r.edit_keyboard is not None
+
+
+def test_timezone_button_sets_timezone_and_advances_to_speak_timing():
     users_conn, journal_conn = _setup()
     db.set_onboarding_step(users_conn, 1, "timezone")
     r = callbacks.handle_timezone_button(_ctx(users_conn, journal_conn, "America/Chicago"))
     user = db.get_user(users_conn, 1)
     assert user.timezone == "America/Chicago"
+    assert user.onboarding_step == "speak_timing"
+    assert r.edit_keyboard is not None
+
+
+def _setup_mid_onboarding():
+    """A user who has acked risk but hasn't finished onboarding yet —
+    unlike _setup() above (used by the alert-response tests, which need a
+    fully onboarded user), the speak_timing tests below need to observe
+    onboarding actually completing."""
+    users_conn = db.connect(":memory:")
+    journal_conn = journal_connect(":memory:")
+    db.get_or_create_user(users_conn, 1, 1, "alice")
+    db.set_risk_ack(users_conn, 1, NOW)
+    return users_conn, journal_conn
+
+
+def test_speak_timing_always_finishes_onboarding_with_no_quiet_hours():
+    users_conn, journal_conn = _setup_mid_onboarding()
+    db.set_onboarding_step(users_conn, 1, "speak_timing")
+    r = callbacks.handle_speak_timing_button(_ctx(users_conn, journal_conn, "always"))
+    user = db.get_user(users_conn, 1)
+    assert user.is_onboarded
+    assert user.onboarding_step is None
+    assert user.quiet_hours_start is None and user.quiet_hours_end is None
+    assert "what an alert actually looks like" in r.edit_text.lower()
+
+
+def test_speak_timing_market_hours_sets_a_real_quiet_window_in_the_users_timezone():
+    users_conn, journal_conn = _setup_mid_onboarding()
+    db.set_timezone(users_conn, 1, "America/Chicago")
+    db.set_onboarding_step(users_conn, 1, "speak_timing")
+    callbacks.handle_speak_timing_button(_ctx(users_conn, journal_conn, "market_hours"))
+    user = db.get_user(users_conn, 1)
+    assert user.is_onboarded
+    # 9:30 AM-4:00 PM ET is 8:30 AM-3:00 PM Central -> quiet outside that window
+    assert (user.quiet_hours_start, user.quiet_hours_end) == ("15:00", "08:30")
+
+
+def test_speak_timing_custom_defers_to_the_typed_quiet_hours_step():
+    users_conn, journal_conn = _setup_mid_onboarding()
+    db.set_onboarding_step(users_conn, 1, "speak_timing")
+    r = callbacks.handle_speak_timing_button(_ctx(users_conn, journal_conn, "custom"))
+    user = db.get_user(users_conn, 1)
+    assert not user.is_onboarded  # onboarding isn't finished until the typed reply lands
     assert user.onboarding_step == "quiet_hours"
-    assert r.edit_keyboard is None
+    assert "quiet hours" in r.edit_text.lower()
 
 
 def test_pause_button_30m_sets_a_pause_and_confirms_when_it_lifts():

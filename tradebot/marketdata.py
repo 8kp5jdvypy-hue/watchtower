@@ -54,6 +54,28 @@ class OptionChain:
     contracts: Sequence[OptionContract]
 
 
+@dataclass(frozen=True)
+class AssetInfo:
+    """One tradable security as Alpaca's asset catalog describes it — the
+    unit tradebot.universe discovers, diffs, and stores. `attributes` is
+    kept verbatim (not just the two booleans derived from it) so a future
+    need (e.g. 'ipo', fractional-trading eligibility) doesn't require a
+    second live-verified adapter change to find out what Alpaca actually
+    calls it — see vendors.alpaca.fetch_us_equity_assets's docstring for
+    the real, observed attribute vocabulary this was built against.
+    overnight_eligible is None (not False) when neither 'overnight_tradable'
+    nor 'overnight_halted' is present — Alpaca doesn't tag every asset,
+    and "not tagged" is not the same claim as "confirmed not eligible"."""
+
+    symbol: str
+    exchange: str
+    name: str
+    tradable: bool
+    options_enabled: bool
+    overnight_eligible: bool | None
+    attributes: tuple[str, ...]
+
+
 class MarketData(Protocol):
     def daily_bars(self, symbol: str, n: int) -> Sequence[Bar]:
         """The n most recent daily bars, oldest first."""

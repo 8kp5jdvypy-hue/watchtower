@@ -94,7 +94,7 @@ fi
 
 start_one "runner" "$DATA_DIR/runner.pid" "$DATA_DIR/runner_live.log" \
   "tradebot.runner" \
-  "$PY" -m tradebot.runner --live
+  "$PY" -m tradebot.runner --live --broad-scan
 
 # --- caffeinate guardian tied to the scanner's lifetime ------------- #
 RUNNER_PID="$(cat "$DATA_DIR/runner.pid" 2>/dev/null || true)"

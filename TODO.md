@@ -1,4 +1,4 @@
-# Kestrel — operator to-do
+# Perch — operator to-do
 
 Checklist of things **only you can do** (sudo prompts, GitHub auth,
 physical machine, Telegram account). Everything else is already wired up.
@@ -19,6 +19,13 @@ Tick a box with `[x]` as you go.
 - [ ] **Keep the Mac on AC power with the lid open** during market hours.
   On battery, a closed lid or low charge can still sleep the machine and
   stall the scanner, even with caffeinate running.
+
+- [x] **Auto-restart if a process crashes mid-day.** `scripts/watchdog.sh`
+  now runs every 5 minutes via a LaunchAgent
+  (`scripts/com.perch.watchdog.plist`, installed) and re-runs
+  `start.sh` for anything that's down (the runner only during market
+  hours). Still doesn't help if the Mac itself is asleep or off — that's
+  what the wake + AC-power items above are for.
 
 ## Do soon — off-machine backup
 

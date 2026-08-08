@@ -113,6 +113,32 @@ With the wake + the LaunchAgent, the stack comes up unattended before
 every open. Keep the Mac plugged into AC power so the wake isn't blocked
 on battery.
 
+### Auto-restart if something crashes mid-day (launchd watchdog)
+
+`scripts/watchdog.sh` checks every 5 minutes whether the bot, worker, or
+(during market hours only) the runner have died, and re-runs `start.sh`
+— already idempotent — to bring back only what's missing. This is what
+actually recovers from a mid-session crash; the autostart LaunchAgent
+above only covers the pre-open start. Install it once:
+
+```bash
+cp scripts/com.perch.watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.perch.watchdog.plist
+launchctl print gui/$(id -u)/com.perch.watchdog | grep -E "state|last exit code"
+```
+
+To remove it: `launchctl bootout gui/$(id -u)/com.perch.watchdog`. Its
+output goes to `data/watchdog_launchd.log`; every restart it triggers is
+also logged to `data/watchdog.log` and recorded as a short, already-
+resolved entry in the incident log (`data/incidents.jsonl`) so it shows
+up in the history, not just the log file.
+
+**This is a stopgap, not production infrastructure.** It only helps if
+the Mac itself is awake and on AC power — see the `pmset`/LaunchAgent
+caveats above. The real fix (process supervision on a real server that
+doesn't depend on a laptop staying open) is planned separately; this
+watchdog exists to close the gap in the meantime.
+
 The manual, one-process-at-a-time commands below still work and are what
 the kit runs under the hood — use them when you need to restart a single
 process.
@@ -139,6 +165,17 @@ disown
 Default is log-only (`ConsoleAlerter`) unless `--live` is passed with
 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` set, in which case alerts route
 through the outbox to the ops channel and to subscribers.
+
+Add `--broad-scan` (on by default in `scripts/start.sh`) to also run
+Stage 1 (`tradebot.broad_scan`) across the full active universe
+(`tradebot.universe`, discovered from Alpaca's asset catalog — live-
+verified 2026-08-08 at ~13,000 active US equities/ETFs excluding OTC)
+every 30 minutes, promoting up to 25 of the strongest cheap-screen
+candidates into live Stage 2 evaluation alongside the fixed `WATCHLIST`.
+This only widens *coverage* — every promoted symbol still goes through
+the exact same detectors, tiers, daily HIGH cap, and cooldowns as
+everything else; it does not raise the alert budget. Off by default if
+you invoke `tradebot.runner` directly without the flag.
 
 ### Command bot
 

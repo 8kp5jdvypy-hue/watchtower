@@ -124,9 +124,10 @@ def _settings_summary(ctx: HandlerContext) -> str:
 
 
 _RESUME_ONBOARDING_TEXT = {
+    "sensitivity": "How much signal do you want?",
     "timezone": "Pick your timezone:",
+    "speak_timing": "When should Perch speak?",
     "quiet_hours": "What are your quiet hours (no alerts)? Reply like 22:00-06:00, or 'none'.",
-    "limits": "Set your risk limits — reply as: &lt;max trades/day&gt; &lt;max daily loss $&gt; &lt;max position size&gt;. Example: 5 200 10",
 }
 
 # Shown once, right after the risk ack tap and before timezone setup — see
@@ -180,9 +181,35 @@ def handle_start(ctx: HandlerContext) -> Reply:
 
     if user.onboarding_step == "risk_ack":
         return Reply(text=_track_record_and_risk_text(ctx), keyboard=keyboards.risk_ack_keyboard())
+    if user.onboarding_step == "sensitivity":
+        return Reply(text=_RESUME_ONBOARDING_TEXT["sensitivity"], keyboard=keyboards.sensitivity_keyboard())
     if user.onboarding_step == "timezone":
         return Reply(text=_RESUME_ONBOARDING_TEXT["timezone"], keyboard=keyboards.timezone_keyboard())
+    if user.onboarding_step == "speak_timing":
+        return Reply(text=_RESUME_ONBOARDING_TEXT["speak_timing"], keyboard=keyboards.speak_timing_keyboard())
     return Reply(text=_RESUME_ONBOARDING_TEXT.get(user.onboarding_step, "Let's pick this back up — reply to continue."))
+
+
+def finish_onboarding(ctx: HandlerContext) -> Reply:
+    """The shared last step of onboarding, reached from either branch of
+    'when should Perch speak?' (always/market hours finish immediately;
+    custom finishes here once the typed quiet-hours reply is read — see
+    _handle_quiet_hours_text). Real numeric risk limits (max trades/day,
+    daily loss $, position size) are deliberately NOT asked here anymore
+    — see /limits, already a complete, always-available command; keeping
+    onboarding itself to what the spec calls "progressive personalization"
+    means not front-loading every setting before someone has seen a
+    single alert."""
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, None)
+    db.mark_onboarded(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
+    from tradebot.rendering.templates import render_sample_alert
+
+    return Reply(
+        text="You're set. Alerts will respect your quiet hours and sensitivity from now on.\n"
+        "/limits to set daily loss and trade caps, /watchlist to customize your symbols, /help any time.\n"
+        "\n"
+        f"{render_sample_alert()}"
+    )
 
 
 def _handle_quiet_hours_text(ctx: HandlerContext, text: str) -> Reply:
@@ -194,8 +221,7 @@ def _handle_quiet_hours_text(ctx: HandlerContext, text: str) -> Reply:
         if len(parts) != 2 or not all(_looks_like_time(p) for p in parts):
             return Reply(text="Couldn't read that. Reply like 22:00-06:00, or 'none'.")
         db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, parts[0].strip(), parts[1].strip())
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "limits")
-    return Reply(text=_RESUME_ONBOARDING_TEXT["limits"])
+    return finish_onboarding(ctx)
 
 
 def _looks_like_time(value: str) -> bool:
@@ -206,29 +232,8 @@ def _looks_like_time(value: str) -> bool:
     return hh.isdigit() and mm.isdigit() and 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
 
 
-def _handle_limits_text(ctx: HandlerContext, text: str) -> Reply:
-    parts = text.split()
-    if len(parts) != 3 or any(_parse_float(p) is None for p in parts):
-        return Reply(text="Reply with three numbers: &lt;max trades/day&gt; &lt;max daily loss $&gt; &lt;max position size&gt;. Example: 5 200 10")
-    trades, loss, size = (_parse_float(p) for p in parts)
-    market_open = ctx.app.market_is_open_fn(ctx.now)
-    for field, value in (("max_trades_per_day", trades), ("max_daily_loss", loss), ("max_position_size", size)):
-        db.apply_limit_change(ctx.users_conn, ctx.user.telegram_user_id, field, value, now=ctx.now, market_is_open=market_open)
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, None)
-    db.mark_onboarded(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
-    from tradebot.rendering.templates import render_sample_alert
-
-    return Reply(
-        text="You're set. Alerts will respect these limits and your quiet hours from now on.\n"
-        "/watchlist to customize your symbols, /limits to change these later, /help any time.\n"
-        "\n"
-        f"{render_sample_alert()}"
-    )
-
-
 ONBOARDING_TEXT_STEPS = {
     "quiet_hours": _handle_quiet_hours_text,
-    "limits": _handle_limits_text,
 }
 
 

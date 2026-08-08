@@ -35,6 +35,20 @@ def timezone_keyboard() -> dict:
     return _kb([[(label, f"tz:{tz}") for label, tz in COMMON_TIMEZONES]])
 
 
+SENSITIVITY_LABELS = (("quiet", "Quiet"), ("balanced", "Balanced"), ("aggressive", "Aggressive"))
+
+
+def sensitivity_keyboard() -> dict:
+    return _kb([[(label, f"sens:{value}") for value, label in SENSITIVITY_LABELS]])
+
+
+SPEAK_TIMING_LABELS = (("always", "Always"), ("market_hours", "Market hours"), ("custom", "Custom"))
+
+
+def speak_timing_keyboard() -> dict:
+    return _kb([[(label, f"speak:{value}") for value, label in SPEAK_TIMING_LABELS]])
+
+
 def pause_keyboard() -> dict:
     return _kb([[("30m", "pause:30m"), ("1h", "pause:1h"), ("Rest of day", "pause:eod")]])
 

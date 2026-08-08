@@ -941,3 +941,116 @@ def test_weekly_recap_catches_up_correctly_after_a_skipped_run(tmp_path):
 
     assert len(alerter.sent) == 2
     assert "2026-08-03" in alerter.sent[1][0]  # covers the week that was missed, up to the following Monday
+
+
+def test_send_medium_digest_if_due_calls_the_optional_personal_fanout_fn():
+    """personal_fanout_fn is how 'aggressive'-sensitivity subscribers get
+    the MEDIUM digest personally (see delivery.make_medium_fanout_fn) —
+    None (the default, used by replay and every other existing caller)
+    must leave behavior exactly as it was before this parameter existed."""
+    from tradebot.alerts import AlertBudget, Cluster
+
+    def _medium_cluster(cid):
+        return Cluster(
+            id=cid, ts_utc="2026-07-23T14:00:00+00:00", session="2026-07-23", symbol="TSLA",
+            kinds="gap", headlines="h", primary_headline="h", score=2.0, tier="medium",
+            close=100.0, atr14=1.0, trend="up", code_version="v1",
+        )
+
+    clock = {"t": datetime(2026, 7, 23, 13, 5, tzinfo=timezone.utc)}
+    budget = AlertBudget(now=lambda: clock["t"])
+    budget.evaluate(_medium_cluster("m1"))
+    clock["t"] += timedelta(hours=1, minutes=5)  # cross the hour boundary so the digest is due
+
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    fanout_calls = []
+
+    def fanout(clusters, text, when):
+        fanout_calls.append(([c.id for c in clusters], text, when))
+
+    runner_mod.send_medium_digest_if_due(budget, alerter, conn, clock["t"], fanout)
+
+    assert len(alerter.sent) == 1  # the ops-channel digest still goes out exactly as before
+    assert len(fanout_calls) == 1
+    assert fanout_calls[0][0] == ["m1"]
+    assert fanout_calls[0][1] == alerter.sent[0][0]  # the SAME rendered text, not a second copy
+
+
+def test_send_medium_digest_if_due_without_a_fanout_fn_behaves_exactly_as_before():
+    from tradebot.alerts import AlertBudget, Cluster
+
+    cluster = Cluster(
+        id="m1", ts_utc="2026-07-23T14:00:00+00:00", session="2026-07-23", symbol="TSLA",
+        kinds="gap", headlines="h", primary_headline="h", score=2.0, tier="medium",
+        close=100.0, atr14=1.0, trend="up", code_version="v1",
+    )
+    clock = {"t": datetime(2026, 7, 23, 13, 5, tzinfo=timezone.utc)}
+    budget = AlertBudget(now=lambda: clock["t"])
+    budget.evaluate(cluster)
+    clock["t"] += timedelta(hours=1, minutes=5)
+
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    runner_mod.send_medium_digest_if_due(budget, alerter, conn, clock["t"])  # no fanout fn — must not raise
+
+    assert len(alerter.sent) == 1
+
+
+# ---------------------------------------------------------------------- #
+# run_broad_scan — Stage 1 orchestration (universe -> bulk fetch -> cheap
+# screen -> promoted symbols). fetch_bars_fn is injected so this never
+# touches the real Alpaca adapter.
+# ---------------------------------------------------------------------- #
+
+
+def test_run_broad_scan_promotes_only_symbols_that_screen_as_unusual():
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+
+    def fake_asset(symbol):
+        return AssetInfo(symbol=symbol, exchange="NASDAQ", name=symbol, tradable=True, options_enabled=True, overnight_eligible=None, attributes=())
+
+    universe_mod.refresh_universe(
+        universe_conn, lambda: [fake_asset("QUIET"), fake_asset("LOUD")], datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(symbols, lookback_days):
+        assert set(symbols) == {"QUIET", "LOUD"}
+        quiet_bars = [Bar("QUIET", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)]
+        loud_bars = [Bar("LOUD", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        loud_bars.append(Bar("LOUD", datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        return {"QUIET": quiet_bars, "LOUD": loud_bars}
+
+    promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    assert promoted == ["LOUD"]
+
+
+def test_run_broad_scan_respects_the_promotion_limit():
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = [f"SYM{i}" for i in range(5)]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(fetched_symbols, lookback_days):
+        out = {}
+        for i, s in enumerate(fetched_symbols):
+            bars = [Bar(s, datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+            bars.append(Bar(s, datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000 * (i + 1))))
+            out[s] = bars
+        return out
+
+    promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars, promotion_limit=2)
+    assert len(promoted) == 2
+    assert promoted == ["SYM4", "SYM3"]  # strongest first

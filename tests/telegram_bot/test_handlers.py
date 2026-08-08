@@ -201,10 +201,13 @@ def test_ack_risk_button_states_beta_pricing_before_timezone():
 
 def test_completing_onboarding_sends_a_real_sample_alert():
     """The 'here's what you actually get' moment — a real historical
-    alert, not a mockup, right when onboarding finishes."""
+    alert, not a mockup, right when onboarding finishes (the 'custom'
+    quiet-hours path, the last of the two ways onboarding can finish —
+    see also callbacks.handle_speak_timing_button's 'always'/'market_hours'
+    branches, covered in test_callbacks.py)."""
     users_conn, journal_conn = _setup(onboarded=False)
-    db.set_onboarding_step(users_conn, 1, "limits")
-    reply = handlers._handle_limits_text(_ctx(users_conn, journal_conn), "5 200 10")
+    db.set_onboarding_step(users_conn, 1, "quiet_hours")
+    reply = handlers._handle_quiet_hours_text(_ctx(users_conn, journal_conn), "none")
     assert db.get_user(users_conn, 1).is_onboarded
     assert "you're set" in reply.text.lower()
     assert "what an alert actually looks like" in reply.text.lower()
@@ -678,8 +681,8 @@ def test_help_lists_commands_and_a_gambling_resource_line():
 
 def test_help_in_a_group_points_people_to_dm_the_bot():
     users_conn, journal_conn = _setup()
-    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username="KestrelBot"))
-    assert "@KestrelBot" in reply.text
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username="PerchBot"))
+    assert "@PerchBot" in reply.text
     assert "/start" in reply.text
     assert "DM" in reply.text
 
@@ -760,9 +763,12 @@ def test_halt_as_admin_engages_a_global_halt():
 
 def test_no_usage_hint_text_has_an_unescaped_angle_bracket():
     users_conn, journal_conn = _setup(onboarded=False)
-    db.set_onboarding_step(users_conn, 1, "limits")
+    db.set_onboarding_step(users_conn, 1, "quiet_hours")
     _assert_html_safe(handlers.handle_start(_ctx(users_conn, journal_conn)).text)
-    _assert_html_safe(handlers._handle_limits_text(_ctx(users_conn, journal_conn), "not three numbers").text)
+    _assert_html_safe(handlers._handle_quiet_hours_text(_ctx(users_conn, journal_conn), "not a time range").text)
+
+    users_conn, journal_conn = _setup()
+    _assert_html_safe(handlers.handle_limits(_ctx(users_conn, journal_conn)).text)  # the /limits usage hint itself
 
     users_conn, journal_conn = _setup()
     _assert_html_safe(handlers.handle_took(_ctx(users_conn, journal_conn)).text)

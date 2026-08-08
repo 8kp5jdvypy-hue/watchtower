@@ -152,6 +152,13 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _add_column_if_missing(conn, "users", "plan", "TEXT NOT NULL DEFAULT 'beta'")
     _add_column_if_missing(conn, "users", "founding_member", "INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(conn, "users", "waitlisted_at", "TEXT")
+    # How much signal a user wants (see onboarding's "how much signal do
+    # you want?" step) — 'quiet' raises the per-user HIGH-tier score
+    # floor above the global TIER_HIGH cutoff; 'balanced' (the default,
+    # including for every pre-existing row) is today's unchanged
+    # behavior; 'aggressive' also personally forwards the hourly MEDIUM
+    # digest, not just HIGH alerts. See tradebot.telegram_bot.delivery.
+    _add_column_if_missing(conn, "users", "alert_sensitivity", "TEXT NOT NULL DEFAULT 'balanced'")
     return conn
 
 
@@ -198,6 +205,7 @@ class User:
     plan: str
     founding_member: bool
     waitlisted_at: str | None
+    alert_sensitivity: str
 
     @property
     def is_onboarded(self) -> bool:
@@ -249,7 +257,7 @@ _USER_COLUMNS = (
     "quiet_hours_start, quiet_hours_end, tier, is_admin, paused_until, pause_reason, "
     "locked_until, lock_reason, max_trades_per_day, max_daily_loss, max_position_size, "
     "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct, "
-    "telegram_unreachable_at, plan, founding_member, waitlisted_at"
+    "telegram_unreachable_at, plan, founding_member, waitlisted_at, alert_sensitivity"
 )
 
 
@@ -259,6 +267,7 @@ def _row_to_user(row) -> User:
         tier, is_admin, paused_until, pause_reason, locked_until, lock_reason,
         max_trades, max_loss, max_size, pending_json, halted_session, onboarding_step,
         account_size, risk_per_trade_pct, telegram_unreachable_at, plan, founding_member, waitlisted_at,
+        alert_sensitivity,
     ) = row
     return User(
         telegram_user_id=uid, chat_id=chat_id, username=username, created_at=created_at,
@@ -269,7 +278,7 @@ def _row_to_user(row) -> User:
         max_position_size=max_size, pending_limits=json.loads(pending_json), halted_session=halted_session,
         onboarding_step=onboarding_step, account_size=account_size, risk_per_trade_pct=risk_per_trade_pct,
         telegram_unreachable_at=telegram_unreachable_at, plan=plan, founding_member=bool(founding_member),
-        waitlisted_at=waitlisted_at,
+        waitlisted_at=waitlisted_at, alert_sensitivity=alert_sensitivity,
     )
 
 
@@ -331,6 +340,18 @@ def set_quiet_hours(conn: sqlite3.Connection, telegram_user_id: int, start: str,
     conn.execute(
         "UPDATE users SET quiet_hours_start = ?, quiet_hours_end = ? WHERE telegram_user_id = ?",
         (start, end, telegram_user_id),
+    )
+    conn.commit()
+
+
+ALERT_SENSITIVITIES = ("quiet", "balanced", "aggressive")
+
+
+def set_alert_sensitivity(conn: sqlite3.Connection, telegram_user_id: int, sensitivity: str) -> None:
+    if sensitivity not in ALERT_SENSITIVITIES:
+        raise ValueError(f"unknown alert_sensitivity: {sensitivity!r} (expected one of {ALERT_SENSITIVITIES})")
+    conn.execute(
+        "UPDATE users SET alert_sensitivity = ? WHERE telegram_user_id = ?", (sensitivity, telegram_user_id)
     )
     conn.commit()
 

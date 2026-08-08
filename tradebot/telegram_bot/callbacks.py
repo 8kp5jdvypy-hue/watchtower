@@ -13,7 +13,13 @@ from tradebot.rendering import templates
 from tradebot.rendering.fields import ts
 from tradebot.telegram_bot import access, db, keyboards
 from tradebot.telegram_bot.context import CallbackReply
-from tradebot.telegram_bot.handlers import BETA_PRICING_NOTICE, _RESUME_ONBOARDING_TEXT, _resolve_detection, log_took
+from tradebot.telegram_bot.handlers import (
+    BETA_PRICING_NOTICE,
+    _RESUME_ONBOARDING_TEXT,
+    _resolve_detection,
+    finish_onboarding,
+    log_took,
+)
 
 
 # -------------------------------------------------------------------- #
@@ -112,10 +118,21 @@ def handle_outcome_button(ctx) -> CallbackReply:
 
 def handle_ack_risk_button(ctx) -> CallbackReply:
     db.set_risk_ack(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "timezone")
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "sensitivity")
     return CallbackReply(
         toast="Got it.",
-        edit_text=f"{BETA_PRICING_NOTICE}\n\n{_RESUME_ONBOARDING_TEXT['timezone']}",
+        edit_text=f"{BETA_PRICING_NOTICE}\n\n{_RESUME_ONBOARDING_TEXT['sensitivity']}",
+        edit_keyboard=keyboards.sensitivity_keyboard(),
+    )
+
+
+def handle_sensitivity_button(ctx) -> CallbackReply:
+    sensitivity = ctx.arg
+    db.set_alert_sensitivity(ctx.users_conn, ctx.user.telegram_user_id, sensitivity)
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "timezone")
+    return CallbackReply(
+        toast=f"{sensitivity.capitalize()}.",
+        edit_text=_RESUME_ONBOARDING_TEXT["timezone"],
         edit_keyboard=keyboards.timezone_keyboard(),
     )
 
@@ -123,12 +140,44 @@ def handle_ack_risk_button(ctx) -> CallbackReply:
 def handle_timezone_button(ctx) -> CallbackReply:
     tz_name = ctx.arg
     db.set_timezone(ctx.users_conn, ctx.user.telegram_user_id, tz_name)
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "quiet_hours")
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "speak_timing")
     return CallbackReply(
         toast=f"Timezone set to {tz_name}.",
-        edit_text=_RESUME_ONBOARDING_TEXT["quiet_hours"],
-        edit_keyboard=None,
+        edit_text=_RESUME_ONBOARDING_TEXT["speak_timing"],
+        edit_keyboard=keyboards.speak_timing_keyboard(),
     )
+
+
+# ET clock-time equivalents of "outside 9:30 AM-4:00 PM ET" for each of
+# keyboards.COMMON_TIMEZONES — all four are US zones that shift DST on
+# the same calendar dates ET does, so a fixed hour offset from ET is
+# exact, not approximate, for every one of them. "Market hours" in the
+# onboarding flow means exactly this window; a user who wants a different
+# window picks "Custom" and gets the typed quiet-hours prompt instead.
+_MARKET_HOURS_QUIET_WINDOW = {
+    "America/New_York": ("16:00", "09:30"),
+    "America/Chicago": ("15:00", "08:30"),
+    "America/Denver": ("14:00", "07:30"),
+    "America/Los_Angeles": ("13:00", "06:30"),
+}
+
+
+def handle_speak_timing_button(ctx) -> CallbackReply:
+    choice = ctx.arg
+    if choice == "custom":
+        db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "quiet_hours")
+        return CallbackReply(
+            toast="Got it.", edit_text=_RESUME_ONBOARDING_TEXT["quiet_hours"], edit_keyboard=None,
+        )
+    if choice == "always":
+        db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, None, None)
+    elif choice == "market_hours":
+        start, end = _MARKET_HOURS_QUIET_WINDOW.get(ctx.user.timezone, _MARKET_HOURS_QUIET_WINDOW["America/New_York"])
+        db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, start, end)
+    else:
+        return CallbackReply(toast="Unrecognized option.", show_alert=True)
+    reply = finish_onboarding(ctx)
+    return CallbackReply(toast="Done.", edit_text=reply.text, edit_keyboard=None)
 
 
 # -------------------------------------------------------------------- #
@@ -193,7 +242,9 @@ CALLBACK_HANDLERS = {
     "whynt": handle_whynt_button,
     "outcome": handle_outcome_button,
     "ack_risk": handle_ack_risk_button,
+    "sens": handle_sensitivity_button,
     "tz": handle_timezone_button,
+    "speak": handle_speak_timing_button,
     "pause": handle_pause_button,
     "wl": handle_watchlist_button,
 }
