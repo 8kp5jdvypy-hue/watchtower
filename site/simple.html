@@ -59,6 +59,58 @@ body{
 .ripple{position:absolute;border-radius:50%;transform:translate(-50%,-50%) scale(0);background:rgba(255,255,255,0.4);pointer-events:none;animation:ripple 0.6s ease-out forwards;mix-blend-mode:overlay;}
 @keyframes ripple{to{transform:translate(-50%,-50%) scale(1);opacity:0;}}
 
+/* ================= award layer ================= */
+/* preloader */
+body.is-loading{overflow:hidden;}
+.preloader{position:fixed;inset:0;z-index:200;background:var(--bg);display:flex;align-items:center;justify-content:center;transition:transform 1s cubic-bezier(.76,0,.24,1);animation:pl-safety 0.8s ease 3.6s forwards;}
+.preloader.done{transform:translateY(-100%);}
+@keyframes pl-safety{to{transform:translateY(-100%);}}
+.pl-inner{display:flex;align-items:center;gap:0.75rem;transform:translateY(0);}
+.pl-mark{width:42px;height:42px;animation:pl-bob 2s ease-in-out infinite;}
+.pl-mark path{fill:var(--accent);}
+@keyframes pl-bob{0%,100%{transform:translateY(0);}50%{transform:translateY(-6px);}}
+.pl-name{font-family:var(--display);font-weight:900;text-transform:uppercase;letter-spacing:0.04em;font-size:clamp(2.4rem,7vw,4rem);color:var(--text);}
+.pl-count{position:absolute;right:var(--edge);bottom:1.5rem;font-family:var(--mono);font-size:0.95rem;color:var(--text-dim);font-variant-numeric:tabular-nums;}
+.pl-bar{position:absolute;left:0;bottom:0;height:2px;width:100%;background:rgba(255,255,255,0.06);}
+.pl-bar span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-2));}
+
+/* film grain */
+.grain{position:fixed;inset:0;z-index:80;pointer-events:none;opacity:0.045;mix-blend-mode:overlay;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");background-size:130px 130px;}
+
+/* custom cursor */
+.cursor-dot,.cursor-ring{position:fixed;top:0;left:0;z-index:120;pointer-events:none;border-radius:50%;transform:translate(-50%,-50%);will-change:transform;opacity:0;transition:opacity 0.3s ease;}
+.has-cursor .cursor-dot,.has-cursor .cursor-ring{opacity:1;}
+.cursor-dot{width:6px;height:6px;background:var(--accent);}
+.cursor-ring{width:34px;height:34px;border:1px solid rgba(124,92,255,0.7);transition:width 0.25s ease,height 0.25s ease,background 0.25s ease,border-color 0.25s ease,opacity 0.3s ease;}
+.cursor-ring.hovering{width:58px;height:58px;background:rgba(124,92,255,0.12);border-color:transparent;}
+@media (pointer:fine){.has-cursor,.has-cursor *{cursor:none !important;}}
+
+/* kinetic marquee band */
+.marquee{overflow:hidden;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:linear-gradient(180deg,rgba(27,24,48,0.5),transparent);padding:1.2rem 0;}
+.marquee-track{display:inline-flex;white-space:nowrap;gap:2.6rem;width:max-content;animation:mq 28s linear infinite;font-family:var(--display);font-weight:900;text-transform:uppercase;font-size:clamp(1.7rem,4.6vw,3rem);letter-spacing:0.01em;color:transparent;-webkit-text-stroke:1px var(--text-dim);}
+.marquee-track span{display:inline-flex;align-items:center;gap:2.6rem;}
+.marquee-track b{color:var(--text);font-weight:900;-webkit-text-stroke:0;}
+.marquee-track .star{color:var(--accent);-webkit-text-stroke:0;font-size:0.8em;}
+@keyframes mq{to{transform:translateX(-50%);}}
+
+/* section index rail */
+.rail{position:fixed;right:1.5rem;top:50%;transform:translateY(-50%);z-index:40;display:flex;flex-direction:column;gap:1rem;}
+.rail a{display:flex;align-items:center;justify-content:flex-end;gap:0.55rem;font-family:var(--mono);font-size:0.64rem;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-dim);text-decoration:none;opacity:0.55;transition:opacity 0.25s ease,color 0.25s ease;}
+.rail a .rdot{width:6px;height:6px;border-radius:50%;background:currentColor;transition:transform 0.25s ease;flex:none;}
+.rail a .rlbl{opacity:0;transform:translateX(8px);transition:opacity 0.25s ease,transform 0.25s ease;}
+.rail a:hover{opacity:1;color:var(--text);}
+.rail a.active{opacity:1;color:var(--accent);}
+.rail a.active .rdot{transform:scale(1.9);}
+.rail a:hover .rlbl,.rail a.active .rlbl{opacity:1;transform:none;}
+@media (max-width:1100px){.rail{display:none;}}
+
+/* hero intro reveals — default VISIBLE (no-JS safe); hidden only while loading */
+.hline{display:block;overflow:hidden;padding-bottom:0.04em;}
+.hline-i{display:block;transition:transform 0.95s cubic-bezier(.16,1,.3,1);}
+.intro{transition:opacity 0.8s ease,transform 0.8s ease;}
+body.is-loading .hline-i{transform:translateY(112%);}
+body.is-loading .intro{opacity:0;transform:translateY(20px);}
+
 /* ---------------- ticker tape ---------------- */
 .ticker{border-bottom:1px solid var(--line);background:var(--panel);overflow:hidden;white-space:nowrap;}
 .ticker-track{display:inline-flex;gap:2.5rem;padding:0.65rem 0;animation:scroll 32s linear infinite;width:max-content;}
@@ -336,8 +388,28 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
 </head>
 <body>
 
+<div class="preloader" id="preloader" aria-hidden="true">
+  <div class="pl-inner">
+    <span class="pl-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></svg></span>
+    <span class="pl-name">Perch</span>
+  </div>
+  <span class="pl-count" id="plCount">0</span>
+  <div class="pl-bar"><span id="plBar"></span></div>
+</div>
+
+<div class="grain" aria-hidden="true"></div>
+<div class="cursor-ring" id="cursorRing" aria-hidden="true"></div>
+<div class="cursor-dot" id="cursorDot" aria-hidden="true"></div>
 <div class="aurora" aria-hidden="true"><span></span></div>
 <div class="progress" id="progress" aria-hidden="true"></div>
+
+<nav class="rail" id="rail" aria-label="Section navigation">
+  <a href="#top"><span class="rlbl">Live</span><span class="rdot"></span></a>
+  <a href="#watching"><span class="rlbl">Watching</span><span class="rdot"></span></a>
+  <a href="#how"><span class="rlbl">How</span><span class="rdot"></span></a>
+  <a href="#why"><span class="rlbl">Trust</span><span class="rdot"></span></a>
+  <a href="#join"><span class="rlbl">Join</span><span class="rdot"></span></a>
+</nav>
 
 <nav class="nav" id="nav">
   <div class="nav-inner wrap">
@@ -370,11 +442,14 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
   <path class="gap" d="M300 214 L262 336 M300 214 L300 340 M300 214 L338 336"/>
 </svg>
   <div class="hero-content">
-    <div class="eyebrow">Running live · alerts on Telegram</div>
-    <h1>Catch the moves that <span class="accent">matter</span>.</h1>
-    <p class="sub">Perch watches the market every minute of every session and pings your Telegram the second a name does something genuinely unusual. It never trades — it just makes sure the moment worth watching never gets past you.</p>
+    <div class="eyebrow intro" style="transition-delay:.05s">Running live · alerts on Telegram</div>
+    <h1>
+      <span class="hline"><span class="hline-i" style="transition-delay:.12s">Catch the moves</span></span>
+      <span class="hline"><span class="hline-i" style="transition-delay:.20s">that <span class="accent">matter</span>.</span></span>
+    </h1>
+    <p class="sub intro" style="transition-delay:.34s">Perch watches the market every minute of every session and pings your Telegram the second a name does something genuinely unusual. It never trades — it just makes sure the moment worth watching never gets past you.</p>
 
-    <div class="bot tilt" aria-label="Live sample of Perch alerts">
+    <div class="bot tilt intro" style="transition-delay:.44s" aria-label="Live sample of Perch alerts">
       <div class="bot-head">
         <span class="bot-badge" aria-hidden="true">
           <svg viewBox="0 0 24 24"><path d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></svg>
@@ -388,7 +463,7 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
       <div class="bot-foot"><span class="dot" aria-hidden="true"></span><span class="scan">Scanning SPY · QQQ · GOOGL · TSLA · BE · IONQ</span></div>
     </div>
 
-    <div class="signup-wrap">
+    <div class="signup-wrap intro" style="transition-delay:.54s">
       <form class="signup" id="heroForm" novalidate>
         <div class="field">
           <label for="heroEmail" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Email</label>
@@ -406,7 +481,7 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
         </a>
       </div>
     </div>
-    <p class="fine">Free during beta · No spam · Unsubscribe anytime</p>
+    <p class="fine intro" style="transition-delay:.62s">Free during beta · No spam · Unsubscribe anytime</p>
   </div>
   <div class="scroll-cue"><span>Scroll</span><span class="line"></span></div>
 </header>
@@ -419,6 +494,13 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
     <div class="stat reveal"><div class="stat-num">Seconds</div><div class="stat-lbl">from move to alert</div></div>
   </div>
 </section>
+
+<div class="marquee" aria-hidden="true">
+  <div class="marquee-track">
+    <span><b>Market alerts</b><span class="star">✦</span>On Telegram<span class="star">✦</span>Real-time<span class="star">✦</span>ATR-tuned<span class="star">✦</span><b>Never trades</b><span class="star">✦</span>Signal, not noise<span class="star">✦</span></span>
+    <span><b>Market alerts</b><span class="star">✦</span>On Telegram<span class="star">✦</span>Real-time<span class="star">✦</span>ATR-tuned<span class="star">✦</span><b>Never trades</b><span class="star">✦</span>Signal, not noise<span class="star">✦</span></span>
+  </div>
+</div>
 
 <section class="section" id="watching">
   <div class="wrap">
@@ -698,6 +780,93 @@ footer.site-foot{border-top:1px solid var(--line);background:var(--panel);}
     } else {
       nums.forEach(function(el){ el.textContent = el.getAttribute('data-count'); });
     }
+  })();
+
+  // ---- intro preloader: counter -> curtain lift -> hero reveal ----
+  (function(){
+    var pre = document.getElementById('preloader');
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(!pre){ document.body.classList.remove('is-loading'); return; }
+    pre.style.animation = 'none'; // JS drives it now; disable CSS safety-net
+    document.body.classList.add('is-loading');
+    var countEl = document.getElementById('plCount');
+    var barEl = document.getElementById('plBar');
+    function finish(){
+      pre.classList.add('done');
+      document.body.classList.remove('is-loading'); // triggers the hero intro
+      setTimeout(function(){ pre.style.display = 'none'; }, 1000);
+    }
+    if(reduce){
+      if(countEl) countEl.textContent = '100';
+      if(barEl) barEl.style.width = '100%';
+      setTimeout(finish, 250); return;
+    }
+    var dur = 1500, start = null;
+    function step(t){
+      if(!start) start = t;
+      var k = Math.min(1, (t - start) / dur);
+      var val = Math.round((1 - Math.pow(1 - k, 2)) * 100);
+      if(countEl) countEl.textContent = val;
+      if(barEl) barEl.style.width = val + '%';
+      if(k < 1) requestAnimationFrame(step); else setTimeout(finish, 220);
+    }
+    requestAnimationFrame(step);
+  })();
+
+  // ---- custom cursor (dot + lagging ring) ----
+  (function(){
+    var fine = window.matchMedia('(pointer: fine)').matches;
+    var dot = document.getElementById('cursorDot');
+    var ring = document.getElementById('cursorRing');
+    if(!fine || !dot || !ring) return;
+    document.documentElement.classList.add('has-cursor');
+    var mx = window.innerWidth/2, my = window.innerHeight/2, rx = mx, ry = my;
+    window.addEventListener('pointermove', function(e){
+      mx = e.clientX; my = e.clientY;
+      dot.style.transform = 'translate('+mx+'px,'+my+'px) translate(-50%,-50%)';
+    });
+    (function loop(){
+      rx += (mx - rx) * 0.2; ry += (my - ry) * 0.2;
+      ring.style.transform = 'translate('+rx.toFixed(1)+'px,'+ry.toFixed(1)+'px) translate(-50%,-50%)';
+      requestAnimationFrame(loop);
+    })();
+    document.querySelectorAll('a,button,input,.tilt,.ripple-host').forEach(function(el){
+      el.addEventListener('pointerenter', function(){ ring.classList.add('hovering'); });
+      el.addEventListener('pointerleave', function(){ ring.classList.remove('hovering'); });
+    });
+  })();
+
+  // ---- magnetic buttons ----
+  (function(){
+    var fine = window.matchMedia('(pointer: fine)').matches;
+    var reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(!fine || reduce) return;
+    document.querySelectorAll('.btn, .nav-cta').forEach(function(el){
+      el.addEventListener('pointermove', function(e){
+        var r = el.getBoundingClientRect();
+        var dx = (e.clientX - (r.left + r.width/2)) * 0.3;
+        var dy = (e.clientY - (r.top + r.height/2)) * 0.3;
+        el.style.transform = 'translate('+dx.toFixed(1)+'px,'+dy.toFixed(1)+'px)';
+      });
+      el.addEventListener('pointerleave', function(){ el.style.transform = ''; });
+    });
+  })();
+
+  // ---- section index rail: highlight the section in view ----
+  (function(){
+    var rail = document.getElementById('rail');
+    if(!rail || !('IntersectionObserver' in window)) return;
+    var links = {};
+    rail.querySelectorAll('a').forEach(function(a){ links[a.getAttribute('href').slice(1)] = a; });
+    var ids = Object.keys(links);
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          ids.forEach(function(id){ if(links[id]) links[id].classList.toggle('active', id === e.target.id); });
+        }
+      });
+    }, {rootMargin:'-45% 0px -45% 0px', threshold:0});
+    ids.forEach(function(id){ var s = document.getElementById(id); if(s) io.observe(s); });
   })();
 
   // ---- live bot feed: cycle through sample alerts as if arriving in real time ----
