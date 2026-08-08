@@ -27,6 +27,58 @@
 }
 .nav-cta:hover { filter: brightness(1.1); }
 
+.nav-burger {
+  display: none;
+  flex: none;
+  width: 34px; height: 34px;
+  background: none; border: none; cursor: pointer;
+  padding: 0; align-items: center; justify-content: center;
+  flex-direction: column; gap: 5px;
+}
+.nav-burger span {
+  display: block; width: 20px; height: 1.5px; background: var(--ink);
+  transition: transform 0.3s cubic-bezier(.2,.8,.2,1), opacity 0.3s ease;
+}
+.nav-burger.is-open span:nth-child(1) { transform: translateY(6.5px) rotate(45deg); }
+.nav-burger.is-open span:nth-child(2) { opacity: 0; }
+.nav-burger.is-open span:nth-child(3) { transform: translateY(-6.5px) rotate(-45deg); }
+
+.nav-mobile {
+  position: fixed; inset: 0; z-index: 99;
+  background: rgba(5,7,10,0.98);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2.2rem;
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.35s ease, visibility 0s linear 0.35s;
+}
+.nav-mobile.is-open { opacity: 1; visibility: visible; transition: opacity 0.35s ease; }
+
+.nav-mobile-links { display: flex; flex-direction: column; align-items: center; gap: 1.6rem; }
+.nav-mobile-links a {
+  font-family: var(--display); font-weight: 500; font-size: var(--step-2);
+  color: var(--ink); text-decoration: none;
+  opacity: 0; transform: translateY(10px);
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+.nav-mobile.is-open .nav-mobile-links a { opacity: 1; transform: none; }
+
+.nav-mobile-cta {
+  font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--bg); background: var(--cyan); padding: 0.9em 1.8em; border-radius: 2px; text-decoration: none;
+  opacity: 0; transform: translateY(10px);
+  transition: opacity 0.4s ease 0.2s, transform 0.4s ease 0.2s, filter 0.2s ease;
+}
+.nav-mobile.is-open .nav-mobile-cta { opacity: 1; transform: none; }
+.nav-mobile-cta:hover { filter: brightness(1.1); }
+
 @media (max-width: 700px) {
   .nav-links a:not(.nav-cta) { display: none; }
+  .nav-links .nav-cta { display: none; }
+  .nav-burger { display: flex; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-mobile { transition: none; }
+  .nav-mobile.is-open { transition: none; }
 }

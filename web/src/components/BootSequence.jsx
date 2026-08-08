@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { useReducedMotion } from '../hooks/usePrefs'
+import SignalGlyph from './SignalGlyph'
 import './BootSequence.css'
 
 const LINES = [
@@ -43,6 +44,7 @@ export default function BootSequence() {
             <span className="boot-line" key={i}>{l}</span>
           ))}
         </div>
+        <SignalGlyph className="boot-glyph" />
         <div className="boot-bar">
           <span className="boot-bar-fill" />
         </div>

@@ -11,6 +11,7 @@ import MarketContext from './components/MarketContext'
 import Manifesto from './components/Manifesto'
 import ProductDemo from './components/ProductDemo'
 import MarketCoverage from './components/MarketCoverage'
+import SignalGlyph from './components/SignalGlyph'
 import Waitlist from './components/Waitlist'
 import FinalCta from './components/FinalCta'
 import Footer from './components/Footer'
@@ -45,6 +46,7 @@ export default function App() {
         <Manifesto />
         <ProductDemo />
         <MarketCoverage />
+        <div className="section-divider"><SignalGlyph /></div>
         <Waitlist />
         <FinalCta />
       </main>

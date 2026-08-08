@@ -47,13 +47,20 @@
 .wl-chip:hover { border-color: var(--ink-faint); color: var(--ink); }
 .wl-chip.is-on { border-color: var(--cyan); color: var(--ink); background: rgba(52,226,255,0.08); }
 
-.wl-done { display: flex; align-items: center; gap: 1rem; justify-content: center; margin: 2.4rem 0 0; }
-.wl-done-mark {
-  width: 30px; height: 30px; border-radius: 50%; background: var(--cyan); color: #000;
-  display: flex; align-items: center; justify-content: center; font-weight: 700; flex: none;
+.wl-done {
+  display: flex; flex-direction: column; align-items: center; gap: 0.9rem;
+  margin: 2.4rem 0 0;
+  animation: wl-done-in 0.5s cubic-bezier(.2,.8,.2,1) both;
 }
-.wl-done-title { margin: 0; font-family: var(--mono); letter-spacing: 0.06em; color: var(--ink); text-align: left; }
-.wl-done-sub { margin: 0.2rem 0 0; color: var(--ink-dim); text-align: left; font-size: 0.9rem; }
+@keyframes wl-done-in { from { opacity: 0; transform: translateY(8px); } }
+.wl-done-glyph { width: 100px; height: 26px; }
+.wl-done-title { position: relative; margin: 0; font-family: var(--mono); letter-spacing: 0.06em; color: var(--ink); display: grid; }
+.wl-done-title span { grid-area: 1 / 1; transition: opacity 0.45s ease, transform 0.45s ease; }
+.wl-done-stage1 { opacity: 1; transform: none; }
+.wl-done-stage2 { opacity: 0; transform: translateY(6px); }
+.wl-done.is-welcomed .wl-done-stage1 { opacity: 0; transform: translateY(-6px); }
+.wl-done.is-welcomed .wl-done-stage2 { opacity: 1; transform: none; }
+.wl-done-sub { margin: 0; color: var(--ink-dim); font-size: 0.9rem; }
 
 .wl-error { color: var(--red); font-family: var(--mono); font-size: 0.8rem; margin: 1rem 0 0; }
 .wl-fine { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); margin: 2rem 0 0; letter-spacing: 0.03em; }

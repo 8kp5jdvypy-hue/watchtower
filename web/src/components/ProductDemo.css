@@ -23,4 +23,5 @@
 @media (max-width: 900px) {
   .pd-grid { grid-template-columns: 1fr; }
   .pd-stage { min-height: 260px; }
+  .pd-row { padding: 1.3rem 0.4rem; }
 }

@@ -13,8 +13,19 @@
 .mcv-tab.is-active { border-color: var(--cyan); color: var(--ink); background: rgba(52,226,255,0.06); }
 .mcv-soon { font-size: 0.62rem; letter-spacing: 0.06em; color: var(--ink-faint); border: 1px solid var(--line); border-radius: 3px; padding: 0.1em 0.4em; }
 
-.mcv-panel {
-  max-width: 640px; min-height: 5.5rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
-  padding: 1.6rem 0; border-top: 1px solid var(--line);
+.mcv-radar { max-width: 680px; padding: 1.6rem 0; border-top: 1px solid var(--line); }
+.mcv-desc { margin: 0 0 1.4rem; font-size: var(--step-1); color: var(--ink); line-height: 1.5; }
+
+.mcv-field { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-bottom: 1.2rem; min-height: 2.6rem; }
+.mcv-chip {
+  display: inline-flex; flex-direction: column; gap: 0.2rem;
+  border: 1px solid var(--line); border-radius: 4px; padding: 0.55em 0.9em;
+  background: rgba(255,255,255,0.02);
+  opacity: 0; transform: translateY(6px);
+  animation: mcv-in 0.4s ease both;
 }
-.mcv-panel p { margin: 0; font-size: var(--step-1); color: var(--ink); line-height: 1.5; }
+@keyframes mcv-in { to { opacity: 1; transform: none; } }
+.mcv-chip-sym { font-family: var(--display); font-weight: 600; font-size: 0.92rem; color: var(--ink); }
+.mcv-chip-state { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em; color: var(--ink-faint); }
+.mcv-chip.is-unusual { border-color: rgba(255,59,78,0.35); }
+.mcv-chip.is-unusual .mcv-chip-state { color: var(--red); }

@@ -1,4 +1,5 @@
 import PerchMark from './PerchMark'
+import SignalGlyph from './SignalGlyph'
 import './Footer.css'
 import './PerchMark.css'
 
@@ -12,6 +13,7 @@ export default function Footer() {
             <span>PERCH</span>
           </a>
           <p>Market intelligence for everyone.</p>
+          <SignalGlyph className="ft-glyph" />
         </div>
         <nav className="ft-nav">
           <a href="#field" data-cursor="link">What it watches</a>

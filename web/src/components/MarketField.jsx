@@ -10,7 +10,7 @@ const SYMBOLS = [
 ]
 const CHOSEN = 'NVDA'
 
-function useField(count) {
+function useField(count, isMobile) {
   return useMemo(() => {
     const rnd = (seed => () => {
       seed = (seed * 1103515245 + 12345) & 0x7fffffff
@@ -19,25 +19,41 @@ function useField(count) {
     const items = []
     for (let i = 0; i < count; i++) {
       const sym = SYMBOLS[i % SYMBOLS.length]
+      let left, top
+      if (isMobile) {
+        // A compact radar instead of a huge scattered field -- a portrait
+        // phone screen doesn't have the width to sell "thousands of tiny
+        // points" the way a wide desktop field does, so symbols orbit a
+        // center point instead. The 0.6 vertical compression roughly
+        // corrects for percentage-of-axis vs. a typical portrait aspect,
+        // so the ring reads as round rather than a tall ellipse.
+        const angle = (i / count) * Math.PI * 2 + rnd() * 0.4
+        const radius = 24 + rnd() * 18
+        left = 50 + Math.cos(angle) * radius
+        top = 50 + Math.sin(angle) * radius * 0.6
+      } else {
+        left = 4 + rnd() * 92
+        top = 6 + rnd() * 88
+      }
       items.push({
         sym,
-        left: 4 + rnd() * 92,
-        top: 6 + rnd() * 88,
+        left,
+        top,
         size: 0.72 + rnd() * 0.7,
         delay: rnd() * 4,
         isChosen: sym === CHOSEN && !items.some((it) => it.isChosen),
       })
     }
     return items
-  }, [count])
+  }, [count, isMobile])
 }
 
 export default function MarketField() {
   const reduced = useReducedMotion()
   const fine = useFinePointer()
   const isMobile = useIsMobile()
-  const count = isMobile ? 46 : 110
-  const items = useField(count)
+  const count = isMobile ? 34 : 110
+  const items = useField(count, isMobile)
   const rootRef = useRef(null)
   const fieldRef = useRef(null)
 
@@ -115,6 +131,7 @@ export default function MarketField() {
   return (
     <section className="market-field" ref={rootRef} id="field">
       <div className="mf-inner" ref={fieldRef}>
+        <div className="mf-radar-ring" aria-hidden="true" />
         {items.map((it, i) => (
           <span
             key={i}

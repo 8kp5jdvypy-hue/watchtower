@@ -5,11 +5,31 @@ import './MarketCoverage.css'
 // (equities + the ETFs already in its watch list). Everything else is
 // honestly labeled coming soon rather than implied.
 const CATEGORIES = [
-  { key: 'stocks', label: 'Stocks', status: 'live', desc: 'Unusual price, volume, and range activity — measured against what\'s normal for that name, not a fixed threshold.' },
-  { key: 'etfs', label: 'ETFs', status: 'live', desc: 'Sector and broad-market context, so a single name\'s move can be checked against what everything else is doing.' },
-  { key: 'crypto', label: 'Crypto', status: 'soon', desc: '24/7 market intelligence, for a market that never closes.' },
-  { key: 'options', label: 'Options', status: 'soon', desc: 'Unusual derivatives activity, as a signal about where attention is concentrating.' },
-  { key: 'market', label: 'Market', status: 'soon', desc: 'Broad market regime shifts — not just single names, but when conditions themselves change.' },
+  {
+    key: 'stocks', label: 'Stocks', status: 'live',
+    desc: 'Unusual price, volume, and range activity — measured against what\'s normal for that name, not a fixed threshold.',
+    symbols: [{ s: 'NVDA', d: 'UNUSUAL' }, { s: 'TSLA', d: 'NORMAL' }, { s: 'AAPL', d: 'NORMAL' }, { s: 'MSFT', d: 'NORMAL' }],
+  },
+  {
+    key: 'etfs', label: 'ETFs', status: 'live',
+    desc: 'Sector and broad-market context, so a single name\'s move can be checked against what everything else is doing.',
+    symbols: [{ s: 'SPY', d: 'NORMAL' }, { s: 'QQQ', d: 'NORMAL' }, { s: 'SMH', d: 'UNUSUAL' }, { s: 'XLK', d: 'NORMAL' }],
+  },
+  {
+    key: 'crypto', label: 'Crypto', status: 'soon',
+    desc: '24/7 market intelligence, for a market that never closes.',
+    symbols: [{ s: 'BTC', d: 'NORMAL' }, { s: 'ETH', d: 'NORMAL' }, { s: 'SOL', d: 'UNUSUAL' }],
+  },
+  {
+    key: 'options', label: 'Options', status: 'soon',
+    desc: 'Unusual derivatives activity, as a signal about where attention is concentrating.',
+    symbols: [{ s: 'NVDA 25C', d: 'NORMAL' }, { s: 'SPY 0DTE', d: 'NORMAL' }, { s: 'TSLA 30P', d: 'UNUSUAL' }],
+  },
+  {
+    key: 'market', label: 'Market', status: 'soon',
+    desc: 'Broad market regime shifts — not just single names, but when conditions themselves change.',
+    symbols: [{ s: 'BREADTH', d: 'NORMAL' }, { s: 'VOL REGIME', d: 'NORMAL' }, { s: 'CORRELATION', d: 'NORMAL' }],
+  },
 ]
 
 export default function MarketCoverage() {
@@ -20,7 +40,7 @@ export default function MarketCoverage() {
     <section className="market-coverage" id="coverage">
       <div className="wrap">
         <div className="section-head">
-          <span className="eyebrow"><span className="dot" /> COVERAGE</span>
+          <span className="eyebrow"><span className="dot" /> THE PERCH RADAR</span>
           <h2>One market isn't enough.</h2>
         </div>
 
@@ -40,9 +60,23 @@ export default function MarketCoverage() {
           ))}
         </div>
 
-        <div className="mcv-panel" role="tabpanel">
-          <p>{cat.desc}</p>
-          {cat.status === 'soon' && <span className="demo-tag">Coming soon</span>}
+        <div className="mcv-radar" role="tabpanel">
+          <p className="mcv-desc">{cat.desc}</p>
+
+          <div className="mcv-field" key={cat.key}>
+            {cat.symbols.map((sym, i) => (
+              <span
+                key={sym.s}
+                className={`mcv-chip${sym.d === 'UNUSUAL' ? ' is-unusual' : ''}`}
+                style={{ animationDelay: `${i * 0.05}s` }}
+              >
+                <span className="mcv-chip-sym">{sym.s}</span>
+                <span className="mcv-chip-state">{sym.d}</span>
+              </span>
+            ))}
+          </div>
+
+          <span className="demo-tag">{cat.status === 'soon' ? 'Coming soon' : 'Simulated market activity'}</span>
         </div>
       </div>
     </section>

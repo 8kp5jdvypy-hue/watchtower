@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import MagneticButton from './MagneticButton'
+import SignalGlyph from './SignalGlyph'
 import './Waitlist.css'
 
 const FORM_ENDPOINT = '' // point this at Formspree, Buttondown, or a real backend later
@@ -15,10 +16,20 @@ const WATCH_OPTIONS = [
 
 export default function Waitlist() {
   const [status, setStatus] = useState('idle') // idle | sending | done | error
+  const [welcomed, setWelcomed] = useState(false)
   const [email, setEmail] = useState('')
   const [watch, setWatch] = useState([])
   const sweepRef = useRef(null)
   const stageRef = useRef(null)
+
+  // The market visualization quiets, a signal pulse moves through, and only
+  // then does the final "welcome" copy arrive -- a small ceremony for what
+  // is, for the visitor, a real moment: they just asked to get in.
+  useEffect(() => {
+    if (status !== 'done') return
+    const id = setTimeout(() => setWelcomed(true), 1100)
+    return () => clearTimeout(id)
+  }, [status])
 
   function toggleWatch(key) {
     if (key === 'everything') {
@@ -100,12 +111,13 @@ export default function Waitlist() {
             </MagneticButton>
           </form>
         ) : (
-          <div className="wl-done">
-            <span className="wl-done-mark">✓</span>
-            <div>
-              <p className="wl-done-title">REQUEST RECEIVED. WELCOME TO PERCH.</p>
-              <p className="wl-done-sub">We'll let you know when your access is ready.</p>
-            </div>
+          <div className={`wl-done${welcomed ? ' is-welcomed' : ''}`}>
+            <SignalGlyph className="wl-done-glyph" />
+            <p className="wl-done-title">
+              <span className="wl-done-stage1">ACCESS REQUESTED.</span>
+              <span className="wl-done-stage2">WELCOME TO PERCH.</span>
+            </p>
+            <p className="wl-done-sub">We'll let you know when your access is ready.</p>
           </div>
         )}
         {status === 'error' && <p className="wl-error">Signup isn't wired up yet — check back soon.</p>}
