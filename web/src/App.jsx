@@ -27,9 +27,26 @@ export default function App() {
   // based on incomplete layout. One refresh after everything has mounted
   // and painted forces GSAP to recalculate every trigger against the final
   // DOM -- the standard fix for stacked pins across separate components.
+  //
+  // That first refresh fires ~2 frames after mount (~30ms) -- long before
+  // the self-hosted display:swap webfonts are done loading (measured
+  // ~500ms on a cold load). Every heading and paragraph on the page uses
+  // those fonts, so the swap reflows section heights out from under every
+  // trigger computed before it, and nothing re-measures afterward. The
+  // visible symptom is scroll-linked reveals firing at the wrong scroll
+  // position -- content that's supposed to animate in instead appears
+  // already-finished, which reads as the page "skipping." A second
+  // refresh once the fonts actually settle fixes it.
   useEffect(() => {
     const id = requestAnimationFrame(() => requestAnimationFrame(() => ScrollTrigger.refresh()))
-    return () => cancelAnimationFrame(id)
+    let cancelled = false
+    if (document.fonts?.ready) {
+      document.fonts.ready.then(() => { if (!cancelled) ScrollTrigger.refresh() })
+    }
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(id)
+    }
   }, [])
 
   return (

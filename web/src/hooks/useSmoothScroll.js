@@ -18,11 +18,16 @@ export function useSmoothScroll(enabled) {
       smoothWheel: true,
     })
     lenis.on('scroll', ScrollTrigger.update)
-    gsap.ticker.add((time) => lenis.raf(time * 1000))
+    const tick = (time) => lenis.raf(time * 1000)
+    gsap.ticker.add(tick)
     gsap.ticker.lagSmoothing(0)
     return () => {
       lenis.destroy()
-      gsap.ticker.remove(lenis.raf)
+      // Must remove the exact function reference passed to add() -- passing
+      // lenis.raf here (as before) removes a *different* function, so the
+      // real ticker callback stayed registered forever and kept calling
+      // .raf() on an already-destroyed Lenis instance on every frame.
+      gsap.ticker.remove(tick)
     }
   }, [enabled])
 }
