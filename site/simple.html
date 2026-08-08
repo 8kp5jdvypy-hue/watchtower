@@ -151,46 +151,39 @@ form.is-hidden{display:none;}
 .step h3{font-family:var(--display);font-weight:700;text-transform:uppercase;font-size:1.3rem;margin:0 0 0.5rem;color:var(--text);}
 .step p{font-size:0.94rem;color:var(--text-dim);margin:0;max-width:32ch;}
 
-/* ---------------- sample alert ---------------- */
-.alert-demo{position:relative;margin-top:clamp(2.4rem,6vw,3.4rem);max-width:540px;background:linear-gradient(180deg,var(--panel-2),#10151b);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 24px 60px -28px rgba(0,0,0,0.8),0 0 0 1px rgba(35,201,124,0.04);}
-/* gradient-glow hairline */
-.alert-demo::before{content:"";position:absolute;inset:0;border-radius:14px;padding:1px;background:linear-gradient(135deg,rgba(35,201,124,0.55),rgba(35,201,124,0.02) 42%,rgba(35,201,124,0.02) 60%,rgba(35,201,124,0.22));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;z-index:3;}
-/* one-time sheen sweep on reveal */
-.alert-demo::after{content:"";position:absolute;top:0;left:-70%;width:55%;height:100%;background:linear-gradient(100deg,transparent,rgba(255,255,255,0.06),transparent);transform:skewX(-18deg);pointer-events:none;opacity:0;z-index:2;}
-.alert-demo.is-visible::after{animation:sheen 1.5s ease 0.35s;}
-@keyframes sheen{0%{opacity:0;left:-70%;}25%{opacity:1;}100%{opacity:0;left:130%;}}
-
-.alert-head{position:relative;z-index:1;display:flex;align-items:center;gap:0.65rem;padding:0.85rem 1.15rem;border-bottom:1px solid var(--line);background:rgba(17,22,28,0.6);}
-.alert-badge{width:30px;height:30px;border-radius:8px;background:var(--up);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 14px 1px rgba(35,201,124,0.4);animation:badge-breathe 3s ease-in-out infinite;}
-.alert-badge svg{width:18px;height:18px;fill:#06110B;}
+/* ---------------- live bot feed ---------------- */
+.bot{position:relative;margin-top:2rem;max-width:540px;background:linear-gradient(180deg,var(--panel-2),#10151b);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 26px 64px -28px rgba(0,0,0,0.85),0 0 0 1px rgba(35,201,124,0.04);}
+.bot::before{content:"";position:absolute;inset:0;border-radius:14px;padding:1px;background:linear-gradient(135deg,rgba(35,201,124,0.55),rgba(35,201,124,0.02) 42%,rgba(35,201,124,0.02) 60%,rgba(35,201,124,0.22));-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;z-index:3;}
+.bot-head{position:relative;z-index:1;display:flex;align-items:center;gap:0.65rem;padding:0.85rem 1.15rem;border-bottom:1px solid var(--line);background:rgba(17,22,28,0.6);}
+.bot-badge{width:30px;height:30px;border-radius:8px;background:var(--up);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 0 14px 1px rgba(35,201,124,0.4);animation:badge-breathe 3s ease-in-out infinite;}
+.bot-badge svg{width:18px;height:18px;fill:#06110B;}
 @keyframes badge-breathe{0%,100%{box-shadow:0 0 12px 0 rgba(35,201,124,0.35);}50%{box-shadow:0 0 20px 3px rgba(35,201,124,0.55);}}
-.alert-who{font-family:var(--mono);font-size:0.82rem;color:var(--text);letter-spacing:0.02em;}
-.alert-who b{color:var(--up);font-weight:500;}
-.alert-time{margin-left:auto;font-family:var(--mono);font-size:0.7rem;color:var(--text-dim);font-variant-numeric:tabular-nums;}
-.alert-live{display:inline-flex;align-items:center;gap:0.4em;margin-left:auto;font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;color:var(--up);text-transform:uppercase;}
-.alert-live .dot{width:7px;height:7px;border-radius:50%;background:var(--up);box-shadow:0 0 8px 1px rgba(35,201,124,0.6);animation:pulse-dot 1.6s ease-in-out infinite;}
-.alert-live + .alert-time{margin-left:0.9rem;}
+.bot-who{font-family:var(--mono);font-size:0.82rem;color:var(--text);letter-spacing:0.02em;}
+.bot-who b{color:var(--up);font-weight:500;}
+.bot-live{display:inline-flex;align-items:center;gap:0.4em;margin-left:auto;font-family:var(--mono);font-size:0.66rem;letter-spacing:0.12em;color:var(--up);text-transform:uppercase;}
+.bot-live .dot{width:7px;height:7px;border-radius:50%;background:var(--up);box-shadow:0 0 8px 1px rgba(35,201,124,0.6);animation:pulse-dot 1.6s ease-in-out infinite;}
 
-.alert-body{position:relative;z-index:1;padding:1.05rem 1.15rem 1.25rem;min-height:104px;}
-/* typing indicator (overlay, shows first) */
-.alert-typing{position:absolute;top:1.15rem;left:1.2rem;display:inline-flex;align-items:center;gap:6px;padding:0.55rem 0.75rem;background:var(--panel);border-radius:12px;opacity:0;}
-.alert-typing span{width:7px;height:7px;border-radius:50%;background:var(--text-dim);}
-.alert-demo.is-visible .alert-typing{animation:typing-life 1.7s ease forwards;}
-.alert-demo.is-visible .alert-typing span{animation:typing-bounce 1s ease-in-out infinite;}
-.alert-demo.is-visible .alert-typing span:nth-child(2){animation-delay:0.16s;}
-.alert-demo.is-visible .alert-typing span:nth-child(3){animation-delay:0.32s;}
-@keyframes typing-life{0%{opacity:0;transform:translateY(4px) scale(0.96);}14%{opacity:1;transform:none;}72%{opacity:1;transform:none;}100%{opacity:0;transform:translateY(-4px) scale(0.98);}}
+.bot-feed{position:relative;z-index:1;padding:1.1rem 1.15rem;min-height:132px;}
+.bot-time{font-family:var(--mono);font-size:0.68rem;color:var(--text-dim);margin-bottom:0.55rem;font-variant-numeric:tabular-nums;}
+.bot-typing{display:inline-flex;align-items:center;gap:6px;padding:0.6rem 0.8rem;background:var(--panel);border-radius:12px;}
+.bot-typing span{width:7px;height:7px;border-radius:50%;background:var(--text-dim);animation:typing-bounce 1s ease-in-out infinite;}
+.bot-typing span:nth-child(2){animation-delay:0.16s;}
+.bot-typing span:nth-child(3){animation-delay:0.32s;}
 @keyframes typing-bounce{0%,65%,100%{transform:translateY(0);opacity:0.45;}30%{transform:translateY(-4px);opacity:1;}}
-/* the message itself (fades in after typing) */
-.alert-msg{opacity:0;}
-.alert-demo.is-visible .alert-msg{animation:msg-in 0.6s cubic-bezier(.2,.7,.2,1) 1.4s forwards;}
+.bot-msg{opacity:0;transform:translateY(10px);}
+.bot-msg.in{animation:msg-in 0.55s cubic-bezier(.2,.7,.2,1) forwards;}
 @keyframes msg-in{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
-.alert-msg p{margin:0;font-size:0.98rem;line-height:1.5;color:var(--text);}
-.alert-msg b{color:var(--text);}
-.alert-msg .muted{color:var(--text-dim);font-size:0.85rem;margin-top:0.6rem;}
-.alert-hl{color:var(--up);font-weight:600;font-variant-numeric:tabular-nums;}
-.alert-demo.is-visible .alert-hl{animation:hl-glow 1.4s ease 1.95s;}
-@keyframes hl-glow{0%,100%{text-shadow:none;}45%{text-shadow:0 0 14px rgba(35,201,124,0.65);}}
+.bot-msg p{margin:0;font-size:0.98rem;line-height:1.5;color:var(--text);}
+.bot-msg .muted{color:var(--text-dim);font-size:0.85rem;margin-top:0.55rem;}
+.bot-sym{font-weight:700;color:var(--up);}
+.bot-hl{color:var(--up);font-weight:600;font-variant-numeric:tabular-nums;}
+.bot-msg.down .bot-sym,.bot-msg.down .bot-hl{color:var(--down);}
+.bot-msg.in .bot-hl{animation:hl-glow 1.3s ease 0.5s;}
+@keyframes hl-glow{0%,100%{text-shadow:none;}45%{text-shadow:0 0 14px rgba(35,201,124,0.6);}}
+
+.bot-foot{position:relative;z-index:1;display:flex;align-items:center;gap:0.5em;padding:0.7rem 1.15rem;border-top:1px solid var(--line);background:rgba(10,14,18,0.5);font-family:var(--mono);font-size:0.68rem;letter-spacing:0.03em;color:var(--text-dim);}
+.bot-foot .dot{width:6px;height:6px;border-radius:50%;background:var(--up);box-shadow:0 0 8px 1px rgba(35,201,124,0.55);animation:pulse-dot 1.6s ease-in-out infinite;flex:none;}
+.bot-foot .scan{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 
 /* ---------------- footer signup ---------------- */
 .footer-cta{background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line);}
@@ -205,9 +198,7 @@ footer.site-foot b{color:var(--text);}
   .reveal{opacity:1;transform:none;}
   .chart-line path{stroke-dashoffset:0;}
   .spark path{stroke-dashoffset:0;}
-  .alert-msg{opacity:1 !important;transform:none !important;}
-  .alert-typing{display:none !important;}
-  .alert-demo::after{display:none !important;}
+  .bot-msg{opacity:1 !important;transform:none !important;}
 }
 @media (max-width:640px){
   .signup{flex-direction:column;}
@@ -236,15 +227,22 @@ footer.site-foot b{color:var(--text);}
   <path class="gap" d="M300 214 L262 336 M300 214 L300 340 M300 214 L338 336"/>
 </svg>
   <div class="hero-content">
-    <div class="eyebrow">Live market alerts on Telegram</div>
+    <div class="eyebrow">Running live · alerts on Telegram</div>
     <h1>Catch the moves that <span class="accent">matter</span>.</h1>
     <p class="sub">Kestrel watches the market every minute of every session and pings your Telegram the second a name does something genuinely unusual. It never trades — it just makes sure the moment worth watching never gets past you.</p>
 
-    <div class="chart-wrap">
-      <svg class="chart-line" viewBox="0 0 270 70" preserveAspectRatio="none">
-        <path d="M0,60 L30,48 L60,55 L90,30 L120,38 L150,18 L180,26 L210,10 L240,20 L270,4"></path>
-        <circle cx="270" cy="4" r="3"></circle>
-      </svg>
+    <div class="bot" aria-label="Live sample of Kestrel alerts">
+      <div class="bot-head">
+        <span class="bot-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></svg>
+        </span>
+        <span class="bot-who"><b>Kestrel</b> · Telegram</span>
+        <span class="bot-live"><span class="dot"></span>Live</span>
+      </div>
+      <div class="bot-feed" id="botFeed" aria-live="polite">
+        <div class="bot-typing" aria-hidden="true"><span></span><span></span><span></span></div>
+      </div>
+      <div class="bot-foot"><span class="dot" aria-hidden="true"></span><span class="scan">Scanning SPY · QQQ · GOOGL · TSLA · BE · IONQ</span></div>
     </div>
 
     <div class="signup-wrap">
@@ -336,24 +334,6 @@ footer.site-foot b{color:var(--text);}
       <div class="step reveal"><div class="step-num">02</div><h3>Detect</h3><p>It measures each move against what's normal for that specific name, so you hear about the signal — not the noise.</p></div>
       <div class="step reveal"><div class="step-num">03</div><h3>Alert</h3><p>You get a plain-English ping on Telegram the moment it happens. What you do next is up to you.</p></div>
     </div>
-
-    <div class="alert-demo reveal">
-      <div class="alert-head">
-        <span class="alert-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24"><path d="M12 3 C10 5 8.5 8 8.5 11 C8.5 13.5 10 15.5 12 16.6 C14 15.5 15.5 13.5 15.5 11 C15.5 8 14 5 12 3 Z"/></svg>
-        </span>
-        <span class="alert-who"><b>Kestrel</b> · Telegram</span>
-        <span class="alert-live"><span class="dot"></span>Live</span>
-        <span class="alert-time">2:14 PM ET</span>
-      </div>
-      <div class="alert-body">
-        <div class="alert-typing" aria-hidden="true"><span></span><span></span><span></span></div>
-        <div class="alert-msg">
-          <p><b>SPY</b> just broke its 20-day range on <span class="alert-hl">2.3&times; average volume</span> — the first time all week.</p>
-          <p class="muted">Not advice. Just the heads-up, so you get to decide while it still matters.</p>
-        </div>
-      </div>
-    </div>
   </div>
 </section>
 
@@ -393,6 +373,53 @@ footer.site-foot b{color:var(--text);}
   var TELEGRAM_URL = ""; // your bot link, e.g. "https://t.me/YourKestrelBot"
 
   document.getElementById('year').textContent = new Date().getFullYear();
+
+  // ---- live bot feed: cycle through sample alerts as if arriving in real time ----
+  (function(){
+    var feed = document.getElementById('botFeed');
+    if(!feed) return;
+    var alerts = [
+      {sym:'TSLA', dir:'up', time:'10:47 AM ET',
+       text:'just expanded to <span class="bot-hl">2.4&times; its normal range</span> in the last 15 minutes.',
+       muted:'First move this size since the open.'},
+      {sym:'QQQ', dir:'down', time:'11:02 AM ET',
+       text:'broke the session low on the <span class="bot-hl">heaviest volume</span> since the bell.',
+       muted:'Sellers stepping in — worth a glance.'},
+      {sym:'GOOGL', dir:'up', time:'11:19 AM ET',
+       text:'reclaimed its opening range after <span class="bot-hl">two hours</span> below it.',
+       muted:'A quiet trend flip, not a headline.'},
+      {sym:'IONQ', dir:'up', time:'11:33 AM ET',
+       text:'pushed <span class="bot-hl">3 ATR</span> above the open on rising volume.',
+       muted:'Momentum, not a one-bar blip.'}
+    ];
+    var reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function paint(a){
+      feed.innerHTML =
+        '<div class="bot-time">'+a.time+'</div>'+
+        '<div class="bot-msg '+a.dir+'"><p><span class="bot-sym">'+a.sym+'</span> '+a.text+'</p>'+
+        '<p class="muted">'+a.muted+'</p></div>';
+      var m = feed.querySelector('.bot-msg');
+      // next frame so the entrance animation actually plays
+      requestAnimationFrame(function(){ m.classList.add('in'); });
+    }
+    function typing(){
+      feed.innerHTML = '<div class="bot-typing" aria-hidden="true"><span></span><span></span><span></span></div>';
+    }
+
+    if(reduced){ paint(alerts[0]); return; }
+
+    var i = 0;
+    function step(){
+      typing();
+      setTimeout(function(){
+        paint(alerts[i % alerts.length]);
+        i++;
+        setTimeout(step, 3800);
+      }, 1150);
+    }
+    setTimeout(step, 700);
+  })();
 
   // Wire the "See it live on Telegram" buttons, or hide them until a link exists.
   ['heroTelegram','footerTelegram'].forEach(function(id){
