@@ -4,7 +4,11 @@ import MagneticButton from './MagneticButton'
 import SignalGlyph from './SignalGlyph'
 import './Waitlist.css'
 
-const FORM_ENDPOINT = '' // point this at Formspree, Buttondown, or a real backend later
+// FormSubmit.co -- no account signup required. The first submission ever
+// sent here triggers a one-time confirmation email to the destination
+// address; click the link in it once and every submission after that
+// delivers automatically. Swap the address if you want a different inbox.
+const FORM_ENDPOINT = 'https://formsubmit.co/ajax/dthmtmnw78@privaterelay.appleid.com'
 
 const WATCH_OPTIONS = [
   { key: 'stocks', label: 'Stocks' },
@@ -46,7 +50,7 @@ export default function Waitlist() {
     e.preventDefault()
     if (!email || !e.target.checkValidity()) return
     if (!FORM_ENDPOINT) {
-      setStatus('error')
+      setStatus('unconfigured')
       return
     }
     setStatus('sending')
@@ -60,7 +64,16 @@ export default function Waitlist() {
         headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, watch }),
       })
-      if (!res.ok) throw new Error('bad status')
+      // FormSubmit.co answers with HTTP 200 even when it hasn't actually
+      // delivered anything yet -- e.g. before its one-time destination-
+      // email activation is confirmed, the body carries success:"false"
+      // with the real status. Trusting res.ok alone would show visitors
+      // a confident "welcome to Perch" for a submission that silently
+      // went nowhere, so the response body is what actually decides this.
+      const data = await res.json().catch(() => null)
+      if (!res.ok || data?.success === 'false' || data?.success === false) {
+        throw new Error(data?.message || 'submission not accepted')
+      }
       setStatus('done')
     } catch {
       setStatus('error')
@@ -125,7 +138,8 @@ export default function Waitlist() {
             <p className="wl-done-sub">We'll let you know when your access is ready.</p>
           </div>
         )}
-        {status === 'error' && <p className="wl-error">Signup isn't wired up yet — check back soon.</p>}
+        {status === 'unconfigured' && <p className="wl-error">Signup isn't wired up yet — check back soon.</p>}
+        {status === 'error' && <p className="wl-error">Something went wrong. Please try again in a moment.</p>}
 
         <p className="wl-fine">No spam. No fabricated waitlist numbers. Unsubscribe anytime.</p>
       </div>
