@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
-import { KESTREL } from './PerchMark'
+import { KESTREL_MARK_SRC } from './PerchMark'
 import './MarketField.css'
 
 const SYMBOLS = [
@@ -147,25 +147,11 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* The Perch kestrel mark, same path data as PerchMark.jsx (nav/
-            footer/favicon) and kestrelTexture.js (the hero). One drawing,
-            reused everywhere -- the existing scroll timeline (opacity/
-            position/scale below) is untouched, only the artwork changed. */}
-        <svg className="mf-kestrel" viewBox="30 0 260 260" aria-hidden="true">
-          <g fill="none">
-            <path d={KESTREL.perch} />
-            {KESTREL.tail.map((d, i) => <path key={`t${i}`} d={d} />)}
-            {KESTREL.legs.map((d, i) => <path key={`l${i}`} d={d} />)}
-            {KESTREL.talons.map((d, i) => <path key={`ta${i}`} d={d} />)}
-            <path className="mfk-fill" d={KESTREL.body} />
-            <path d={KESTREL.wing} />
-            {KESTREL.feathers.map((d, i) => <path key={`f${i}`} d={d} />)}
-            <circle className="mfk-fill" cx={KESTREL.skull.cx} cy={KESTREL.skull.cy} r={KESTREL.skull.r} />
-            <path className="mfk-fill" d={KESTREL.beak} />
-          </g>
-          <circle className="mfk-eye" cx={KESTREL.eye.cx} cy={KESTREL.eye.cy} r={KESTREL.eye.r} />
-          <circle className="mfk-eye" cx={KESTREL.nostril.cx} cy={KESTREL.nostril.cy} r={KESTREL.nostril.r} />
-        </svg>
+        {/* The Perch kestrel mark -- same asset as PerchMark.jsx (nav/
+            footer/favicon) and the hero's WebGL texture. The existing
+            scroll timeline (opacity/position/scale below) is untouched,
+            only the artwork changed. */}
+        <img className="mf-kestrel" src={KESTREL_MARK_SRC} alt="" aria-hidden="true" />
         <div className="mf-funnel" aria-hidden="true">
           <span className="mf-funnel-num">0</span>
           <span className="mf-funnel-lbl">MARKET EVENTS</span>
