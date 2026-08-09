@@ -146,22 +146,27 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* "The Windhover," tucked into a stoop -- same silhouette family as
-            the hero (kestrelTexture.js) and the nav logo (PerchMark.jsx),
-            wings pinned back for the dive rather than raised for the hover.
-            The body+head path is identical to the hero's; only the wings
-            and tail change for the tucked pose. */}
-        <svg className="mf-kestrel" viewBox="0 0 260 260" aria-hidden="true">
-          <g transform="rotate(38 130 130)">
-            <path d="M96 118 C90 96 96 74 114 62 C110 48 116 32 132 26 C146 21 160 32 156 52
-                     C148 68 134 74 126 96 C132 114 138 132 138 150 C138 166 130 180 116 184
-                     C104 187 94 180 90 168 C82 178 70 186 56 188 C66 172 78 150 88 132
-                     C90 126 93 122 96 118 Z" />
-            <path opacity="0.88" d="M118 86 C112 72 114 58 122 50 C130 58 130 70 124 82
-                     C122 85 120 86 118 86 Z" />
-            <path d="M108 100 C100 118 96 140 100 160 C110 156 118 142 120 126
-                     C124 140 132 152 142 158 C146 144 140 122 124 102 C118 96 112 96 108 100 Z" />
-            <path d="M90 168 C82 190 80 208 86 220 C94 210 98 196 96 182 Z" />
+        {/* "The Windhover," diving -- the exact same silhouette as the hero
+            (kestrelTexture.js), just rotated into a steep dive angle rather
+            than a separate "tucked wing" redraw (that attempt read as a
+            seal, not a bird -- reusing an already-verified shape is safer
+            than inventing a new one). */}
+        <svg className="mf-kestrel" viewBox="0 0 300 300" aria-hidden="true">
+          <g transform="rotate(65 140 140)">
+            <path opacity="0.88" d="M160 115 C180 106 202 102 218 110
+                     C216 118 202 124 186 126 C194 134 192 144 184 148
+                     C170 140 160 128 156 118 Z" />
+            <path d="M166 122 C200 110 240 105 270 120
+                     C268 132 250 142 225 144 C240 154 248 168 240 178
+                     C215 170 190 152 172 134 C170 130 168 126 166 122 Z" />
+            <path d="M135 70 C125 55 132 40 148 38 C160 36 172 42 170 52
+                     C180 48 188 52 184 60 C176 62 168 64 162 70
+                     C170 85 174 105 168 125 C164 155 156 185 144 208
+                     C138 220 130 222 124 214 C118 200 118 180 120 155
+                     C120 120 122 90 135 70 Z" />
+            <path d="M134 202 C126 222 124 238 132 250 C140 240 144 226 142 214
+                     C146 226 152 238 160 246 C166 232 162 216 150 200
+                     C144 204 140 204 134 202 Z" />
           </g>
         </svg>
         <div className="mf-funnel" aria-hidden="true">

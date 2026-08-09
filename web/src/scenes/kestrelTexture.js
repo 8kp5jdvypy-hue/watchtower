@@ -1,15 +1,14 @@
 import * as THREE from 'three'
 
-// "The Windhover" -- redesigned (see PerchMark.jsx and MarketField.jsx for
-// the same silhouette family used consistently across the hero, the
-// mid-page dive moment, and the nav/footer logo). A kestrel mid-hover:
-// body pitched nose-down, one dominant sickle-shaped near wing swept up
-// and back, a smaller foreshortened far wing hinting depth, tail fanned
-// as an air brake. One continuous body+head+beak path (the previous
-// version's separately-drawn, self-overlapping head and mirrored wings
-// were what made it read as broken: a front-view wing spread on a
-// profile-view head). Procedurally drawn to an offscreen canvas, no
-// external image/model asset.
+// "The Windhover," redesigned again -- the previous version's wings
+// attached right next to the head and both swept the same direction,
+// which read as ears on a rabbit rather than wings on a bird. Wings now
+// attach at the shoulder, well below a small distinct head, and sweep
+// outward and back (not upward) -- unambiguous as a wing-on-a-body
+// silhouette. Same silhouette family as PerchMark.jsx (nav/footer logo,
+// reverted to its original pre-redesign glyph) and MarketField.jsx (the
+// mid-page dive moment, wings tucked instead of spread). Procedurally
+// drawn to an offscreen canvas, no external image/model asset.
 export function makeKestrelTexture() {
   const size = 1024
   const canvas = document.createElement('canvas')
@@ -23,7 +22,7 @@ export function makeKestrelTexture() {
 
   ctx.save()
   ctx.translate(cx, cy)
-  ctx.scale(1.4, 1.4)
+  ctx.scale(1.3, 1.3)
 
   // soft atmospheric glow behind the bird
   const glow = ctx.createRadialGradient(0, 0, 10, 0, 0, size * 0.3)
@@ -34,53 +33,54 @@ export function makeKestrelTexture() {
   ctx.arc(0, 0, size * 0.3, 0, Math.PI * 2)
   ctx.fill()
 
-  // far wing -- smaller, foreshortened, tucked behind the body
+  // far wing -- smaller, tucked behind, attached at the shoulder
   ctx.fillStyle = 'rgba(6, 9, 13, 0.88)'
   ctx.beginPath()
-  ctx.moveTo(-22, -44)
-  ctx.bezierCurveTo(-30, -64, -28, -86, -14, -100)
-  ctx.bezierCurveTo(-2, -90, 0, -72, -8, -54)
-  ctx.bezierCurveTo(-12, -48, -18, -44, -22, -44)
+  ctx.moveTo(20, -25)
+  ctx.bezierCurveTo(40, -34, 62, -38, 78, -30)
+  ctx.bezierCurveTo(76, -22, 62, -16, 46, -14)
+  ctx.bezierCurveTo(54, -6, 52, 4, 44, 8)
+  ctx.bezierCurveTo(30, 0, 20, -12, 16, -22)
   ctx.closePath()
   ctx.fill()
 
   ctx.fillStyle = 'rgba(6, 9, 13, 1)'
 
-  // body + head + hooked beak -- one continuous silhouette, no seams
+  // near wing -- attached at the shoulder (well below the head), swept
+  // outward and back, not upward -- the fix for the "bunny ears" read
   ctx.beginPath()
-  ctx.moveTo(-44, -12)
-  ctx.bezierCurveTo(-50, -34, -44, -56, -26, -68)
-  ctx.bezierCurveTo(-30, -82, -24, -98, -8, -104)
-  ctx.bezierCurveTo(6, -109, 20, -98, 16, -78)
-  ctx.bezierCurveTo(8, -62, -6, -56, -14, -34)
-  ctx.bezierCurveTo(-8, -16, -2, 2, -2, 20)
-  ctx.bezierCurveTo(-2, 36, -10, 50, -24, 54)
-  ctx.bezierCurveTo(-36, 57, -46, 50, -50, 38)
-  ctx.bezierCurveTo(-58, 48, -70, 56, -84, 58)
-  ctx.bezierCurveTo(-74, 42, -62, 20, -52, 2)
-  ctx.bezierCurveTo(-50, -4, -47, -8, -44, -12)
+  ctx.moveTo(26, -18)
+  ctx.bezierCurveTo(60, -30, 100, -35, 130, -20)
+  ctx.bezierCurveTo(128, -8, 110, 2, 85, 4)
+  ctx.bezierCurveTo(100, 14, 108, 28, 100, 38)
+  ctx.bezierCurveTo(75, 30, 50, 12, 32, -6)
+  ctx.bezierCurveTo(30, -10, 28, -14, 26, -18)
   ctx.closePath()
   ctx.fill()
 
-  // near wing -- one clean sickle, sharp single tip, swept up and back
+  // body + head + hooked beak, one continuous silhouette
   ctx.beginPath()
-  ctx.moveTo(2, -60)
-  ctx.bezierCurveTo(30, -70, 60, -78, 90, -80)
-  ctx.quadraticCurveTo(106, -76, 98, -64)
-  ctx.bezierCurveTo(68, -50, 36, -44, 8, -48)
-  ctx.bezierCurveTo(18, -32, 22, -16, 16, -2)
-  ctx.bezierCurveTo(-4, -16, -14, -40, 2, -60)
+  ctx.moveTo(-5, -70)
+  ctx.bezierCurveTo(-15, -85, -8, -100, 8, -102)
+  ctx.bezierCurveTo(20, -104, 32, -98, 30, -88)
+  ctx.bezierCurveTo(40, -92, 48, -88, 44, -80)
+  ctx.bezierCurveTo(36, -78, 28, -76, 22, -70)
+  ctx.bezierCurveTo(30, -55, 34, -35, 28, -15)
+  ctx.bezierCurveTo(24, 15, 16, 45, 4, 68)
+  ctx.bezierCurveTo(-2, 80, -10, 82, -16, 74)
+  ctx.bezierCurveTo(-22, 60, -22, 40, -20, 15)
+  ctx.bezierCurveTo(-20, -20, -18, -50, -5, -70)
   ctx.closePath()
   ctx.fill()
 
-  // tail -- forked, angled down as an air brake
+  // tail -- small fork at the back
   ctx.beginPath()
-  ctx.moveTo(-50, 38)
-  ctx.bezierCurveTo(-62, 68, -66, 94, -56, 112)
-  ctx.bezierCurveTo(-46, 98, -42, 78, -44, 60)
-  ctx.bezierCurveTo(-40, 78, -32, 96, -22, 106)
-  ctx.bezierCurveTo(-14, 88, -18, 64, -34, 42)
-  ctx.bezierCurveTo(-40, 46, -46, 44, -50, 38)
+  ctx.moveTo(-6, 62)
+  ctx.bezierCurveTo(-14, 82, -16, 98, -8, 110)
+  ctx.bezierCurveTo(0, 100, 4, 86, 2, 74)
+  ctx.bezierCurveTo(6, 86, 12, 98, 20, 106)
+  ctx.bezierCurveTo(26, 92, 22, 76, 10, 60)
+  ctx.bezierCurveTo(4, 64, 0, 64, -6, 62)
   ctx.closePath()
   ctx.fill()
 

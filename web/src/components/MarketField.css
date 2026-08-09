@@ -32,7 +32,7 @@
 .mf-caption p { margin: 0.7rem 0 0; font-family: var(--display); font-size: var(--step-2); color: var(--ink); }
 
 .mf-kestrel {
-  position: absolute; left: 22%; top: 38%; width: 260px; height: 260px;
+  position: absolute; left: 22%; top: 38%; width: 300px; height: 300px;
   fill: #0d1420;
   stroke: #7fe8ff;
   stroke-width: 0.6;
