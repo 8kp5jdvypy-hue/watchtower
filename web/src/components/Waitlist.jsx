@@ -8,7 +8,7 @@ import './Waitlist.css'
 // sent here triggers a one-time confirmation email to the destination
 // address; click the link in it once and every submission after that
 // delivers automatically. Swap the address if you want a different inbox.
-const FORM_ENDPOINT = 'https://formsubmit.co/ajax/meow4me2cool4me@icloud.com'
+const FORM_ENDPOINT = 'https://formsubmit.co/ajax/anthony.creds@gmail.com'
 
 const WATCH_OPTIONS = [
   { key: 'stocks', label: 'Stocks' },
