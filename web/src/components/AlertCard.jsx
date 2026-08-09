@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react'
+import PerchMark from './PerchMark'
 import { useFinePointer, useReducedMotion } from '../hooks/usePrefs'
 import './AlertCard.css'
+import './PerchMark.css'
 
 // data shape: { symbol, kind, detail, time, meterPct, meterVal, figs: [{label,val}],
 // contexts: [{label,text}], why: [string] } -- one object per illustrative example,
@@ -39,7 +41,13 @@ export default function AlertCard({ data, visible }) {
       onPointerLeave={onLeave}
     >
       <div className="ac-head">
-        <span className="eyebrow"><span className="dot" /> PERCH DETECTED</span>
+        <span className="ac-head-id">
+          {/* A small, static identity anchor -- this card only ever shows
+              an already-confirmed signal, so there's no state to animate
+              through here (that happens upstream, in AlertSequence). */}
+          <PerchMark size={15} state="confirmed" accent={false} />
+          <span className="eyebrow"><span className="dot" /> PERCH DETECTED</span>
+        </span>
         <span className="demo-tag">Demo</span>
       </div>
       <div className="ac-body">

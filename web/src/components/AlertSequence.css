@@ -19,6 +19,27 @@
   overflow: hidden;
 }
 
+/* A quiet corner presence, not a mascot -- opacity/color transitions
+   only (the state hooks in PerchMark.css), never position or scale, so
+   it never competes with the field/context/payoff content doing the
+   actual storytelling underneath it. */
+.as-perch-badge {
+  position: absolute;
+  top: 1.1rem; right: 1.1rem;
+  z-index: 5;
+  color: var(--ink-dim);
+  transition: color 0.4s ease;
+}
+.as-perch-badge.pm-state-scanning,
+.as-perch-badge.pm-state-signal,
+.as-perch-badge.pm-state-confirmed,
+.as-perch-badge.pm-state-alert {
+  color: var(--cyan);
+}
+@media (max-width: 760px) {
+  .as-perch-badge { top: 0.85rem; right: 0.85rem; }
+}
+
 /* ---------- Beat 1-3, 5: the field ---------- */
 .as-field { position: absolute; inset: 0; opacity: 0; }
 .as-sym {
@@ -156,4 +177,11 @@
   .as-payoff { position: static; padding: 1rem clamp(1.25rem, 5vw, 3.5rem) 1.5rem; }
   .as-signal-label { opacity: 1; }
   .as-stat { opacity: 1; }
+  /* The badge's state normally tracks the (skipped, for reduced-motion)
+     GSAP timeline -- its class never changes from the idle it mounts
+     with, so both color and filter need setting directly here to match
+     "alert" -- otherwise it'd sit dim and glow-free beside content
+     that's otherwise showing its fully-arrived "signal detected" state,
+     which reads as wrong/inconsistent. */
+  .as-perch-badge { color: var(--cyan); filter: drop-shadow(0 0 8px rgba(52, 226, 255, 0.55)); }
 }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { buildCandles } from '../scenes/candleData'
+import { PerchMarkGlyph, PERCH_MARK_VIEWBOX } from './PerchMark'
 import { useReducedMotion, useIsMobile } from '../hooks/usePrefs'
 import './AlertSequence.css'
 
@@ -97,6 +98,23 @@ export default function AlertSequence() {
       const bars = gsap.utils.toArray('.as-bar')
       const stats = gsap.utils.toArray('.as-stat')
       const payoff = rootRef.current.querySelector('.as-payoff')
+      const mark = rootRef.current.querySelector('.as-perch-badge')
+
+      // The Perch mark itself sits outside .as-field/.as-context/.as-payoff
+      // (which crossfade against each other all through this timeline) so
+      // it can stay a stable, persistent presence -- "Perch is watching
+      // this whole thing unfold" -- while its own state visibly tracks the
+      // beat: idle at rest, scanning once something looks off, signal once
+      // Perch is actively paying attention, confirmed as context checks
+      // out, alert exactly when SIGNAL DETECTED lands.
+      const setMarkState = (state) => {
+        if (!mark) return
+        mark.dataset.state = state
+        // classList, not className -- on an SVG element className is an
+        // SVGAnimatedString, not a plain string, so .replace() throws.
+        Array.from(mark.classList).forEach((c) => { if (c.startsWith('pm-state-')) mark.classList.remove(c) })
+        mark.classList.add(`pm-state-${state}`)
+      }
 
       const tl = gsap.timeline({
         scrollTrigger: {
@@ -125,6 +143,7 @@ export default function AlertSequence() {
       // Beat 2 -- one name starts to separate from the noise. The status
       // reads SCANNING (neutral) until it doesn't.
       tl.set(statusPill, { innerText: 'SCANNING' }, 0.05)
+        .call(() => setMarkState('scanning'), null, 0.05)
         .to(chosen, { color: 'var(--amber)', scale: 1.15, duration: 0.14 }, 0.14)
         .set(statusPill, { innerText: 'UNUSUAL ACTIVITY' }, 0.16)
         .to(statusPill, { color: 'var(--amber)', duration: 0.1 }, 0.16)
@@ -134,6 +153,7 @@ export default function AlertSequence() {
       // attention landing exactly where the anomaly is.
       tl.fromTo([ring1, ring2], { scale: 0.2, opacity: 0.5 },
         { scale: 5.5, opacity: 0, duration: 0.26, stagger: 0.08, ease: 'power1.out' }, 0.24)
+        .call(() => setMarkState('signal'), null, 0.24)
         .to(chosen, { scale: 1.3, duration: 0.1 }, 0.26)
 
       // Beat 4 -- context, checked one line at a time: the name, then its
@@ -153,6 +173,7 @@ export default function AlertSequence() {
       // focal point. The context layer and the payoff layer occupy the
       // same space, so one has to be gone before the other arrives.
       tl.to(context, { opacity: 0, duration: 0.1 }, 0.7)
+        .call(() => setMarkState('confirmed'), null, 0.7)
         .to(chosen, { left: '50%', top: '38%', scale: 1.6, color: 'var(--cyan)', duration: 0.22, ease: 'power2.inOut' }, 0.7)
         .to(field, { opacity: 0, duration: 0.1 }, 0.86)
         .set(payoff, { opacity: 1 }, 0.78)
@@ -162,6 +183,7 @@ export default function AlertSequence() {
       tl.fromTo(point, { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.05 }, 0.8)
         .fromTo(line, { scaleX: 0 }, { scaleX: 1, duration: 0.06, transformOrigin: 'left center' }, 0.83)
         .fromTo(signalLabel, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 0.08 }, 0.87)
+        .call(() => setMarkState('alert'), null, 0.87)
         .fromTo(bars, { scaleY: 0 }, { scaleY: 1, duration: 0.1, stagger: 0.006, ease: 'power2.out', transformOrigin: 'bottom' }, 0.88)
         .fromTo(stats, { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.07, stagger: 0.03 }, 0.93)
     }, rootRef)
@@ -181,6 +203,18 @@ export default function AlertSequence() {
         </div>
 
         <div className="as-stage">
+          {/* Perch's own presence through the sequence -- deliberately a
+              sibling of the field/context/payoff layers, not inside any
+              of them, so it stays put while they crossfade against each
+              other. Its state (idle -> scanning -> signal -> confirmed
+              -> alert) is driven by the timeline above, in step with the
+              beat, not on a separate animation loop of its own.
+              PerchMarkGlyph directly (not <PerchMark>): its color needs
+              to track the CSS `color` property below via currentColor,
+              which PerchMark's fixed-variant fill doesn't support. */}
+          <svg className="as-perch-badge perch-mark pm-state-idle" width={24} height={24} viewBox={PERCH_MARK_VIEWBOX} data-state="idle" aria-hidden="true">
+            <PerchMarkGlyph fill="currentColor" accent={false} />
+          </svg>
           <div className="as-field" ref={fieldRef}>
             <span
               className="as-ring as-ring-1"
