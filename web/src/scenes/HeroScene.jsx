@@ -56,11 +56,16 @@ function ParticleLayer({ count, depth, spread, size, speed, reduced }) {
   )
 }
 
-function Kestrel({ reduced, heroRootRef }) {
+function Kestrel({ reduced, heroRootRef, isMobile }) {
   const groupRef = useRef(null)
   const matRef = useRef(null)
   const texture = useMemo(() => makeKestrelTexture(), [])
   const invalidate = useThree((s) => s.invalidate)
+  // The camera's horizontal FOV in world space shrinks a lot on a narrow
+  // portrait viewport for the same vertical FOV -- x=2.1 sits comfortably
+  // in frame on a wide desktop aspect ratio but lands off-screen on
+  // mobile, so the bird was rendering completely invisible there.
+  const baseX = isMobile ? 0.85 : 2.1
   // Mutable, not React state -- this changes on every scrub tick and has
   // no business triggering a re-render; useFrame reads it directly.
   const dive = useRef({ t: 0 })
@@ -97,9 +102,9 @@ function Kestrel({ reduced, heroRootRef }) {
     groupRef.current.position.y = 0.4 + hover - d * 2.6
     if (!reduced) {
       groupRef.current.rotation.z = state.pointer.x * -0.05 - d * 0.9
-      groupRef.current.position.x = 2.1 + state.pointer.x * 0.18 + d * 1.1
+      groupRef.current.position.x = baseX + state.pointer.x * 0.18 + d * 1.1
     }
-    const s = 1 - d * 0.4
+    const s = (isMobile ? 0.82 : 1) - d * 0.4
     groupRef.current.scale.setScalar(s)
     if (matRef.current) {
       matRef.current.time = t
@@ -108,7 +113,7 @@ function Kestrel({ reduced, heroRootRef }) {
   })
 
   return (
-    <group ref={groupRef} position={[2.1, 0.4, -3]}>
+    <group ref={groupRef} position={[baseX, 0.4, -3]}>
       <Billboard>
         <mesh scale={[4.6, 4.6, 1]}>
           <planeGeometry args={[1, 1]} />
@@ -155,7 +160,7 @@ export default function HeroScene({ reduced, isMobile, active, heroRootRef }) {
       {!isMobile && (
         <ParticleLayer count={PARTICLE_COUNT_NEAR} depth={6} spread={14} size={0.05} speed={2.2} reduced={reduced} />
       )}
-      <Kestrel reduced={reduced} heroRootRef={heroRootRef} />
+      <Kestrel reduced={reduced} heroRootRef={heroRootRef} isMobile={isMobile} />
       {!reduced && !isMobile && (
         <EffectComposer multisampling={0}>
           <Bloom intensity={0.4} luminanceThreshold={0.25} luminanceSmoothing={0.4} mipmapBlur radius={0.6} />

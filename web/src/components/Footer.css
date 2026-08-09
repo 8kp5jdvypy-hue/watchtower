@@ -10,3 +10,11 @@
 .ft-base { border-top: 1px solid var(--line); padding-top: 1.2rem; display: flex; flex-direction: column; gap: 0.9rem; }
 .ft-disclaimer { margin: 0; max-width: 68ch; font-family: var(--mono); font-size: 0.68rem; color: var(--ink-faint); line-height: 1.7; }
 .ft-base > span { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); line-height: 1.6; }
+
+/* Below ~480px, ft-nav's 4 links were squeezed into equal flex columns
+   narrower than their own words, wrapping each label internally and
+   landing at uneven heights -- reads as scattered, not a list. Stack
+   them as a plain left-aligned column instead. */
+@media (max-width: 480px) {
+  .ft-nav { flex-direction: column; align-items: flex-start; gap: 1rem; }
+}
