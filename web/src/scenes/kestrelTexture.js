@@ -1,19 +1,23 @@
 import * as THREE from 'three'
-import { FALCON_PATHS } from '../components/PerchMark'
+import { KESTREL } from '../components/PerchMark'
 
-// The Perch falcon mark, same polygon data as PerchMark.jsx (the nav/
-// footer/favicon icon) and MarketField.jsx (the mid-page dive), baked to a
-// texture for the hero's WebGL billboard. Deliberately a plain dark
-// silhouette here, not a fully bloomed glow -- the brand direction is a
-// refined mark with a restrained cyan accent, not a neon centerpiece. No
-// external image/model asset; drawn procedurally to an offscreen canvas.
-function drawPolygon(ctx, pointStr) {
-  const pts = pointStr.split(' ').map((p) => p.split(',').map(Number))
-  ctx.beginPath()
-  ctx.moveTo(pts[0][0], pts[0][1])
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1])
-  ctx.closePath()
-  ctx.fill()
+// The Perch kestrel mark, baked to a texture for the hero's WebGL
+// billboard -- same path data as PerchMark.jsx (nav/footer/favicon) and
+// MarketField.jsx (the mid-page dive), so every instance of the bird on
+// the site is the same drawing. Line-art: thin cyan strokes, only a very
+// subtle fill, no external image/model asset.
+function drawSvgPath(ctx, d) {
+  const tokens = d.match(/[MLCQZ]|-?\d*\.?\d+/g)
+  let i = 0
+  const num = () => parseFloat(tokens[i++])
+  while (i < tokens.length) {
+    const cmd = tokens[i++]
+    if (cmd === 'M') ctx.moveTo(num(), num())
+    else if (cmd === 'L') ctx.lineTo(num(), num())
+    else if (cmd === 'C') ctx.bezierCurveTo(num(), num(), num(), num(), num(), num())
+    else if (cmd === 'Q') ctx.quadraticCurveTo(num(), num(), num(), num())
+    else if (cmd === 'Z') ctx.closePath()
+  }
 }
 
 export function makeKestrelTexture() {
@@ -29,24 +33,45 @@ export function makeKestrelTexture() {
 
   ctx.save()
   ctx.translate(cx, cy)
-  ctx.scale(1.9, 1.9)
+  ctx.scale(1.7, 1.7)
+  ctx.translate(-153, -136) // recenter the mark's own coordinate space
 
-  // faint atmospheric glow -- subtle, not the mark's primary light source
+  // faint atmospheric glow behind the mark
   const glow = ctx.createRadialGradient(0, 0, 10, 0, 0, size * 0.24)
-  glow.addColorStop(0, 'rgba(180, 220, 255, 0.14)')
-  glow.addColorStop(1, 'rgba(180, 220, 255, 0)')
+  glow.addColorStop(0, 'rgba(52, 226, 255, 0.1)')
+  glow.addColorStop(1, 'rgba(52, 226, 255, 0)')
   ctx.fillStyle = glow
   ctx.beginPath()
-  ctx.arc(0, 0, size * 0.24, 0, Math.PI * 2)
+  ctx.arc(153, 136, size * 0.24, 0, Math.PI * 2)
   ctx.fill()
 
-  ctx.fillStyle = 'rgba(6, 9, 13, 0.88)'
-  drawPolygon(ctx, FALCON_PATHS.farWing)
+  ctx.lineWidth = 3.2
+  ctx.lineCap = 'round'
+  ctx.lineJoin = 'round'
+  ctx.strokeStyle = 'rgba(52, 226, 255, 0.95)'
+  ctx.fillStyle = 'rgba(52, 226, 255, 0.06)'
 
-  ctx.fillStyle = 'rgba(6, 9, 13, 1)'
-  drawPolygon(ctx, FALCON_PATHS.nearWing)
-  drawPolygon(ctx, FALCON_PATHS.body)
-  drawPolygon(ctx, FALCON_PATHS.tail)
+  // perch line
+  ctx.beginPath(); drawSvgPath(ctx, KESTREL.perch); ctx.stroke()
+  // tail, legs, talons
+  for (const d of [...KESTREL.tail, ...KESTREL.legs, ...KESTREL.talons]) {
+    ctx.beginPath(); drawSvgPath(ctx, d); ctx.stroke()
+  }
+  // body (subtle fill + stroke)
+  ctx.beginPath(); drawSvgPath(ctx, KESTREL.body); ctx.fill(); ctx.stroke()
+  // wing (stroke only)
+  ctx.beginPath(); drawSvgPath(ctx, KESTREL.wing); ctx.stroke()
+  // wing feather lines
+  for (const d of KESTREL.feathers) {
+    ctx.beginPath(); drawSvgPath(ctx, d); ctx.stroke()
+  }
+  // skull + beak
+  ctx.beginPath(); ctx.arc(KESTREL.skull.cx, KESTREL.skull.cy, KESTREL.skull.r, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+  ctx.beginPath(); drawSvgPath(ctx, KESTREL.beak); ctx.fill(); ctx.stroke()
+  // eye + nostril
+  ctx.fillStyle = 'rgba(52, 226, 255, 1)'
+  ctx.beginPath(); ctx.arc(KESTREL.eye.cx, KESTREL.eye.cy, KESTREL.eye.r, 0, Math.PI * 2); ctx.fill()
+  ctx.beginPath(); ctx.arc(KESTREL.nostril.cx, KESTREL.nostril.cy, KESTREL.nostril.r, 0, Math.PI * 2); ctx.fill()
 
   ctx.restore()
 

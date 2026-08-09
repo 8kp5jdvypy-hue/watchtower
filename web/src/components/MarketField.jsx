@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
+import { KESTREL } from './PerchMark'
 import './MarketField.css'
 
 const SYMBOLS = [
@@ -146,16 +147,24 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* The Perch falcon mark, diving -- same polygon data as PerchMark
-            (nav/footer/favicon) and kestrelTexture.js (the hero), rotated
-            into a dive angle. One shape, reused everywhere. */}
-        <svg className="mf-kestrel" viewBox="0 0 190 178" aria-hidden="true">
-          <g transform="rotate(100 95 89)">
-            <polygon opacity="0.88" points="64,44 10,10 54,64" />
-            <polygon points="82,60 180,36 102,108 76,78" />
-            <polygon points="118,18 86,66 40,140 70,52" />
-            <polygon points="40,140 14,168 52,154" />
+        {/* The Perch kestrel mark, same path data as PerchMark.jsx (nav/
+            footer/favicon) and kestrelTexture.js (the hero). One drawing,
+            reused everywhere -- the existing scroll timeline (opacity/
+            position/scale below) is untouched, only the artwork changed. */}
+        <svg className="mf-kestrel" viewBox="30 0 260 260" aria-hidden="true">
+          <g fill="none">
+            <path d={KESTREL.perch} />
+            {KESTREL.tail.map((d, i) => <path key={`t${i}`} d={d} />)}
+            {KESTREL.legs.map((d, i) => <path key={`l${i}`} d={d} />)}
+            {KESTREL.talons.map((d, i) => <path key={`ta${i}`} d={d} />)}
+            <path className="mfk-fill" d={KESTREL.body} />
+            <path d={KESTREL.wing} />
+            {KESTREL.feathers.map((d, i) => <path key={`f${i}`} d={d} />)}
+            <circle className="mfk-fill" cx={KESTREL.skull.cx} cy={KESTREL.skull.cy} r={KESTREL.skull.r} />
+            <path className="mfk-fill" d={KESTREL.beak} />
           </g>
+          <circle className="mfk-eye" cx={KESTREL.eye.cx} cy={KESTREL.eye.cy} r={KESTREL.eye.r} />
+          <circle className="mfk-eye" cx={KESTREL.nostril.cx} cy={KESTREL.nostril.cy} r={KESTREL.nostril.r} />
         </svg>
         <div className="mf-funnel" aria-hidden="true">
           <span className="mf-funnel-num">0</span>

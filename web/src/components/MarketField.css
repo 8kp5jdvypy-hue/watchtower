@@ -32,18 +32,20 @@
 .mf-caption p { margin: 0.7rem 0 0; font-family: var(--display); font-size: var(--step-2); color: var(--ink); }
 
 .mf-kestrel {
-  position: absolute; left: 22%; top: 38%; width: 230px; height: 215px;
-  fill: #0d1420;
-  stroke: #7fe8ff;
-  stroke-width: 0.5;
-  /* A refined silhouette with a quiet edge accent, not a full glow --
-     one restrained shadow, not the previous three-layer bloom stack. */
-  filter: drop-shadow(0 0 10px rgba(52,226,255,0.35)) drop-shadow(0 4px 30px rgba(0,0,0,0.7));
+  position: absolute; left: 22%; top: 38%; width: 220px; height: 220px;
+  stroke: var(--cyan);
+  stroke-width: 2.4px;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 4px rgba(52,226,255,0.7)) drop-shadow(0 4px 24px rgba(0,0,0,0.6));
   opacity: 0;
   pointer-events: none;
   z-index: 3;
   will-change: transform, opacity;
 }
+.mfk-fill { fill: rgba(52,226,255,0.05); }
+.mfk-eye { fill: var(--cyan); filter: drop-shadow(0 0 3px rgba(52,226,255,0.9)); }
 
 .mf-funnel {
   position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
