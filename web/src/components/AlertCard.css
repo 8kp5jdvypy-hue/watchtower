@@ -39,7 +39,7 @@
 .ac-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .ac-body { display: flex; flex-direction: column; position: relative; }
 .ac-symbol { font-family: var(--display); font-weight: 600; font-size: var(--step-3); color: var(--ink); letter-spacing: -0.01em; }
-.ac-kind { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--red); margin-top: 0.3rem; }
+.ac-kind { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); margin-top: 0.3rem; }
 .ac-detail { font-size: 0.92rem; color: var(--ink-dim); margin: 0.7rem 0 0; line-height: 1.5; }
 
 /* Quiet, continuous "data is moving" cue -- only animates while the card

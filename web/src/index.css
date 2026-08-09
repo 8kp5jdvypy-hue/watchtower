@@ -33,6 +33,11 @@
   --cyan-dim: #1a7d8f;
   --violet: #b26bff;
   --red: #ff3b4e;
+  /* Reserved for "unusual / worth a second look" inside the alert
+     experience specifically -- cyan stays the one color that means
+     "Perch noticed", amber means "this is the anomaly", never used as
+     a general brand color. 11.44:1 against --bg. */
+  --amber: #ffb454;
 
   --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;

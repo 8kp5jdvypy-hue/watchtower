@@ -6,10 +6,9 @@ import Nav from './components/Nav'
 import CustomCursor from './components/CustomCursor'
 import Hero from './components/Hero'
 import MarketField from './components/MarketField'
-import SignalVisualization from './components/SignalVisualization'
-import MarketContext from './components/MarketContext'
+import AlertSequence from './components/AlertSequence'
 import Manifesto from './components/Manifesto'
-import ProductDemo from './components/ProductDemo'
+import AlertReveal from './components/AlertReveal'
 import MarketCoverage from './components/MarketCoverage'
 import SignalGlyph from './components/SignalGlyph'
 import Waitlist from './components/Waitlist'
@@ -58,10 +57,9 @@ export default function App() {
       <main>
         <Hero />
         <MarketField />
-        <SignalVisualization />
-        <MarketContext />
+        <AlertSequence />
         <Manifesto />
-        <ProductDemo />
+        <AlertReveal />
         <MarketCoverage />
         <div className="section-divider"><SignalGlyph /></div>
         <Waitlist />

@@ -1,0 +1,73 @@
+.alert-reveal { padding: clamp(5rem, 12vw, 9rem) 0; background: var(--bg-1); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ar-sub { color: var(--ink-dim); margin: 0.8rem 0 0; display: flex; align-items: center; gap: 0.7em; flex-wrap: wrap; }
+
+.ar-tabs { display: flex; gap: 0.6rem; margin: 2.2rem 0 2.4rem; }
+.ar-tab {
+  font-family: var(--mono); font-size: 0.82rem; letter-spacing: 0.04em;
+  color: var(--ink-dim); background: transparent; border: 1px solid var(--line);
+  border-radius: 999px; padding: 0.6em 1.3em; cursor: pointer;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.ar-tab:hover { border-color: var(--ink-faint); color: var(--ink); }
+.ar-tab.is-active { border-color: var(--cyan); color: var(--ink); background: rgba(52,226,255,0.06); }
+
+.ar-grid { display: grid; grid-template-columns: 1fr auto; gap: clamp(2rem, 5vw, 4rem); align-items: center; }
+.ar-card-frame { justify-self: start; }
+
+/* ---------- phone mockup ---------- */
+.ar-phone { justify-self: center; }
+.ar-phone-frame {
+  width: 240px; height: 490px;
+  border: 8px solid #0e1319;
+  border-radius: 38px;
+  background: #05070a;
+  position: relative;
+  box-shadow: 0 40px 90px -30px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.04);
+  overflow: hidden;
+}
+.ar-phone-notch {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  width: 70px; height: 18px; border-radius: 10px; background: #0e1319; z-index: 2;
+}
+.ar-phone-screen {
+  position: absolute; inset: 0;
+  background: radial-gradient(ellipse 100% 60% at 50% 0%, #10141b, #05070a 70%);
+  padding: 40px 12px 0;
+}
+.ar-phone-notif {
+  background: rgba(16,20,27,0.92);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.9rem 1rem 1rem;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 16px 40px -14px rgba(0,0,0,0.6), 0 0 0 1px rgba(52,226,255,0.08);
+}
+.ar-notif-head { display: flex; align-items: center; gap: 0.4rem; }
+.ar-notif-brand { font-family: var(--display); font-weight: 600; font-size: 0.74rem; letter-spacing: 0.03em; color: var(--ink); }
+.ar-notif-time { margin-left: auto; font-family: var(--mono); font-size: 0.62rem; color: var(--ink-faint); }
+.ar-notif-title { margin-top: 0.55rem; font-family: var(--display); font-weight: 600; font-size: 0.86rem; color: var(--cyan); letter-spacing: -0.005em; }
+.ar-notif-body { margin-top: 0.3rem; font-size: 0.76rem; line-height: 1.45; color: var(--ink-dim); }
+
+.ar-close {
+  margin-top: clamp(2.5rem, 6vw, 4rem);
+  text-align: center;
+  font-family: var(--display); font-weight: 500; font-size: var(--step-1);
+  color: var(--ink-dim);
+}
+.ar-close a {
+  color: var(--cyan); text-decoration: none; font-weight: 600;
+  border-bottom: 1px solid rgba(52,226,255,0.35);
+  padding-bottom: 0.1em;
+  transition: border-color 0.2s ease, opacity 0.2s ease;
+}
+.ar-close a:hover { border-color: var(--cyan); }
+
+@media (max-width: 900px) {
+  .ar-grid { grid-template-columns: 1fr; justify-items: center; text-align: center; }
+  .ar-card-frame { justify-self: center; }
+  .ar-phone { margin-top: 1rem; }
+}
+@media (max-width: 480px) {
+  .ar-phone-frame { width: 208px; height: 424px; }
+}

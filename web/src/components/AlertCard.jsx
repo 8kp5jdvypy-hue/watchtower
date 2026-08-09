@@ -2,13 +2,10 @@ import { useRef, useState } from 'react'
 import { useFinePointer, useReducedMotion } from '../hooks/usePrefs'
 import './AlertCard.css'
 
-const WHY = [
-  'Volume is 3.1× the 20-day average for this time of day',
-  'Price range expanded to 2.3 ATR, well outside its normal band',
-  'The move diverges from its sector and the broader market today',
-]
-
-export default function AlertCard({ symbol, kind = 'Unusual volume', detail, time, visible }) {
+// data shape: { symbol, kind, detail, time, meterPct, meterVal, figs: [{label,val}],
+// contexts: [{label,text}], why: [string] } -- one object per illustrative example,
+// so the NVDA/AMD/SPY switcher can swap the whole card's content at once.
+export default function AlertCard({ data, visible }) {
   const cardRef = useRef(null)
   const fine = useFinePointer()
   const reduced = useReducedMotion()
@@ -30,6 +27,8 @@ export default function AlertCard({ symbol, kind = 'Unusual volume', detail, tim
     cardRef.current.style.setProperty('--rx', 0)
     cardRef.current.style.setProperty('--ry', 0)
   }
+
+  const { symbol, kind, detail, time, meterPct, meterVal, figs, contexts, why } = data
 
   return (
     <div
@@ -54,19 +53,21 @@ export default function AlertCard({ symbol, kind = 'Unusual volume', detail, tim
         <div className="ac-expand-in">
           <div className="ac-meter">
             <span className="ac-meter-label">Signal strength</span>
-            <div className="ac-meter-track"><span className="ac-meter-fill" style={{ '--pct': '82%' }} /></div>
-            <span className="ac-meter-val">5.0 / 6</span>
+            <div className="ac-meter-track"><span className="ac-meter-fill" style={{ '--pct': meterPct }} /></div>
+            <span className="ac-meter-val">{meterVal}</span>
           </div>
           <div className="ac-fig-row">
-            <div className="ac-fig"><span>Volume</span><b>3.1× avg</b></div>
-            <div className="ac-fig"><span>Rel. strength</span><b>+3.9% vs SOXX</b></div>
+            {figs.map((f) => (
+              <div className="ac-fig" key={f.label}><span>{f.label}</span><b>{f.val}</b></div>
+            ))}
           </div>
-          <p className="ac-context"><b>Market context —</b> Outperforming its sector and the broader market today, not just moving with everything else.</p>
-          <p className="ac-context"><b>Historical context —</b> Volume expansions of this size in this name have preceded continued directional moves, demo data.</p>
+          {contexts.map((c) => (
+            <p className="ac-context" key={c.label}><b>{c.label} —</b> {c.text}</p>
+          ))}
           <div className="ac-why">
             <span className="ac-why-label">Why Perch noticed</span>
             <ul>
-              {WHY.map((w) => <li key={w}>{w}</li>)}
+              {why.map((w) => <li key={w}>{w}</li>)}
             </ul>
           </div>
         </div>
