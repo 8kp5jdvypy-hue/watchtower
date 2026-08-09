@@ -40,6 +40,12 @@ export default function Hero() {
 
   useEffect(() => {
     if (!rootRef.current) return
+    // Reduced-motion users never see BootSequence's overlay (it returns
+    // null immediately), so the headline is already visible in its final
+    // state on first paint -- running this timeline anyway would snap it
+    // hidden and replay the reveal on top of content the user can already
+    // read, the opposite of what "reduced motion" asked for.
+    if (reduced) return
     const ctx = gsap.context(() => {
       // Boot sequence holds the stage for ~1.3s before its own fade starts
       // (see BootSequence) -- the reveal begins right as that fade does, so
@@ -53,7 +59,7 @@ export default function Hero() {
         .to('.hero-fade', { opacity: 1, y: 0, duration: 0.9, stagger: 0.08 }, '-=0.6')
     }, rootRef)
     return () => ctx.revert()
-  }, [])
+  }, [reduced])
 
   return (
     <header className="hero" ref={rootRef} id="top">

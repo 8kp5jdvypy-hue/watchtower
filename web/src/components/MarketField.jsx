@@ -146,27 +146,15 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* "The Windhover," diving -- the exact same silhouette as the hero
-            (kestrelTexture.js), just rotated into a steep dive angle rather
-            than a separate "tucked wing" redraw (that attempt read as a
-            seal, not a bird -- reusing an already-verified shape is safer
-            than inventing a new one). */}
-        <svg className="mf-kestrel" viewBox="0 0 300 300" aria-hidden="true">
-          <g transform="rotate(65 140 140)">
-            <path opacity="0.88" d="M160 115 C180 106 202 102 218 110
-                     C216 118 202 124 186 126 C194 134 192 144 184 148
-                     C170 140 160 128 156 118 Z" />
-            <path d="M166 122 C200 110 240 105 270 120
-                     C268 132 250 142 225 144 C240 154 248 168 240 178
-                     C215 170 190 152 172 134 C170 130 168 126 166 122 Z" />
-            <path d="M135 70 C125 55 132 40 148 38 C160 36 172 42 170 52
-                     C180 48 188 52 184 60 C176 62 168 64 162 70
-                     C170 85 174 105 168 125 C164 155 156 185 144 208
-                     C138 220 130 222 124 214 C118 200 118 180 120 155
-                     C120 120 122 90 135 70 Z" />
-            <path d="M134 202 C126 222 124 238 132 250 C140 240 144 226 142 214
-                     C146 226 152 238 160 246 C166 232 162 216 150 200
-                     C144 204 140 204 134 202 Z" />
+        {/* The Perch falcon mark, diving -- same polygon data as PerchMark
+            (nav/footer/favicon) and kestrelTexture.js (the hero), rotated
+            into a dive angle. One shape, reused everywhere. */}
+        <svg className="mf-kestrel" viewBox="0 0 190 178" aria-hidden="true">
+          <g transform="rotate(100 95 89)">
+            <polygon opacity="0.88" points="64,44 10,10 54,64" />
+            <polygon points="82,60 180,36 102,108 76,78" />
+            <polygon points="118,18 86,66 40,140 70,52" />
+            <polygon points="40,140 14,168 52,154" />
           </g>
         </svg>
         <div className="mf-funnel" aria-hidden="true">

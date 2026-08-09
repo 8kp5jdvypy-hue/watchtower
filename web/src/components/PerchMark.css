@@ -1,4 +1,2 @@
 .perch-mark { display: block; flex: none; }
-.pm-bird, .pm-legs { fill: var(--ink); stroke: var(--ink); stroke-width: 6; }
-.pm-line { stroke: var(--ink-faint); stroke-width: 5; }
-.pm-tip { fill: var(--cyan); filter: drop-shadow(0 0 4px rgba(52,226,255,0.8)); }
+.pm-accent { stroke: var(--cyan); stroke-width: 5; stroke-linecap: round; }

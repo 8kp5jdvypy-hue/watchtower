@@ -64,6 +64,11 @@ export default function Waitlist() {
       setStatus('done')
     } catch {
       setStatus('error')
+      // The submit animation darkens the stage and never reverses it on
+      // its own -- only the success path was accounted for. Without this,
+      // a failed submission (or a retry) leaves the form permanently
+      // behind a blacked-out overlay.
+      gsap.to(stageRef.current, { '--dark': 0, duration: 0.4, ease: 'power2.out' })
     }
   }
 

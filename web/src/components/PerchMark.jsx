@@ -1,29 +1,50 @@
-export default function PerchMark({ size = 26, className = '' }) {
+import './PerchMark.css'
+
+// The Perch falcon mark -- a single reusable component, every usage across
+// the site (nav, footer, hero texture source, favicon, boot sequence) draws
+// from this same polygon data so the identity is actually consistent.
+// Deliberately geometric rather than illustrative: straight-edged facets
+// reading as an aerodynamic, diving falcon rather than a literal bird
+// illustration -- abstract enough to avoid ever being mistaken for another
+// animal, sharp enough to read as "aerospace/fintech" rather than "mascot."
+//
+// variant: 'ink' (default, near-white -- for dark backgrounds) | 'cyan' |
+// 'dark' (near-black -- for light backgrounds)
+// accent: show the single thin cyan leading-edge line (default true).
+// Silhouette is intentionally ~90% of the mark; the accent is the other 10%.
+export const FALCON_PATHS = {
+  farWing: '-8,-38 -62,-72 -18,-18',
+  nearWing: '10,-22 108,-46 30,26 4,-4',
+  body: '46,-64 14,-16 -32,58 -2,-30',
+  tail: '-32,58 -58,86 -20,72',
+  accent: '10,-22 108,-46',
+}
+
+const FILL = {
+  ink: 'var(--ink)',
+  cyan: 'var(--cyan)',
+  dark: 'var(--bg)',
+}
+
+export default function PerchMark({ size = 26, className = '', variant = 'ink', accent = true }) {
+  const fill = FILL[variant] || FILL.ink
   return (
     <svg
       className={`perch-mark ${className}`}
-      width={size * 2.6}
+      width={size}
       height={size}
-      viewBox="0 0 260 100"
+      viewBox="-72 -82 190 178"
       aria-hidden="true"
     >
-      <path
-        className="pm-bird"
-        d="M64 14 L54 10 Q52 2 42 3 Q30 4 26 14 Q20 24 6 32 Q4 34 8 34
-           Q22 33 30 30 Q34 40 44 40 Q56 38 58 26 Q60 18 64 14 Z"
-        transform="translate(10,6) scale(1.1)"
-      />
-      <g className="pm-legs" transform="translate(10,6) scale(1.1)" strokeLinecap="round">
-        <path d="M38 39 V50" /><path d="M46 39 V50" />
+      <g fill={fill}>
+        <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
+        <polygon points={FALCON_PATHS.nearWing} />
+        <polygon points={FALCON_PATHS.body} />
+        <polygon points={FALCON_PATHS.tail} />
+        {accent && variant !== 'cyan' && (
+          <polyline className="pm-accent" points={FALCON_PATHS.accent} fill="none" />
+        )}
       </g>
-      <path
-        className="pm-line"
-        d="M4 64 L30 66 L52 61 L78 63 L100 54 L125 57 L150 46 L175 49 L200 38 L225 41 L260 28"
-        fill="none"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle className="pm-tip" cx="260" cy="28" r="4" />
     </svg>
   )
 }

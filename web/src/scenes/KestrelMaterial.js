@@ -10,7 +10,7 @@ const KestrelMaterial = shaderMaterial(
   {
     map: null,
     rimColor: new THREE.Color('#7fe8ff'),
-    rimStrength: 1.6,
+    rimStrength: 0.5,
     time: 0,
     texel: 1 / 1024,
     fade: 1,
@@ -40,9 +40,11 @@ const KestrelMaterial = shaderMaterial(
       float aRight = texture2D(map, vUv + vec2(t, 0.0)).a;
       float edge = clamp(abs(tex.a - aUp) + abs(tex.a - aDown) + abs(tex.a - aLeft) + abs(tex.a - aRight), 0.0, 1.0);
 
-      float pulse = 0.82 + 0.18 * sin(time * 1.1);
-      vec3 color = tex.rgb + rimColor * edge * rimStrength * pulse;
-      float alpha = clamp(tex.a + edge * 0.85, 0.0, 1.0);
+      // A restrained, static edge accent -- no constant pulsing, no full-
+      // body glow. The mark reads as a refined silhouette; the rim is a
+      // quiet accent, not the point.
+      vec3 color = tex.rgb + rimColor * edge * rimStrength;
+      float alpha = clamp(tex.a + edge * 0.4, 0.0, 1.0);
       gl_FragColor = vec4(color, alpha * fade);
     }
   `

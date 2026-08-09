@@ -31,7 +31,13 @@ export default function Nav() {
     }
     onScroll()
     window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      // Without this, a scroll event that schedules the rAF right before
+      // unmount still fires after, touching a possibly-stale barRef and
+      // calling setState on an unmounted component.
+      if (raf) cancelAnimationFrame(raf)
+    }
   }, [])
 
   // Lock background scroll while the mobile menu is open, and let Escape

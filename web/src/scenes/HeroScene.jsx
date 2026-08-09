@@ -158,7 +158,7 @@ export default function HeroScene({ reduced, isMobile, active, heroRootRef }) {
       <Kestrel reduced={reduced} heroRootRef={heroRootRef} />
       {!reduced && !isMobile && (
         <EffectComposer multisampling={0}>
-          <Bloom intensity={0.85} luminanceThreshold={0.15} luminanceSmoothing={0.4} mipmapBlur radius={0.7} />
+          <Bloom intensity={0.4} luminanceThreshold={0.25} luminanceSmoothing={0.4} mipmapBlur radius={0.6} />
           <Vignette eskil={false} offset={0.25} darkness={0.9} />
         </EffectComposer>
       )}
