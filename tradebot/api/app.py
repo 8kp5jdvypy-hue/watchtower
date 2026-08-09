@@ -12,16 +12,16 @@ manage or expire). A magic-link token from tradebot.accounts is what
 proves the person controls that email address, once, at verify time;
 after that the cookie is what keeps them signed in.
 
-Run in production under gunicorn using its factory support (see
-docker-compose.yml's `api` service): `gunicorn --factory
-tradebot.api.app:create_app -b 0.0.0.0:8000`. create_app() is a factory,
-not a module-level `app` object, on purpose — it opens real sqlite
-connections to data/users.db and data/journal.db as a side effect, and
-that must only happen when something actually intends to serve
-requests, never just from importing this module (e.g. in tests that
-only want create_app itself to call with tmp_path databases). Running
-this file directly (`python -m tradebot.api.app`) uses Flask's dev
-server, for local development only.
+Run in production under gunicorn (see docker-compose.yml's `api`
+service): `gunicorn tradebot.api.wsgi:app -b 0.0.0.0:8000`. create_app()
+here is a factory, not a module-level `app` object, on purpose — it
+opens real sqlite connections to data/users.db and data/journal.db as a
+side effect, and that must only happen when something actually intends
+to serve requests, never just from importing this module (e.g. in tests
+that only want create_app itself to call with tmp_path databases). See
+tradebot/api/wsgi.py for the module that actually instantiates it for
+gunicorn. Running this file directly (`python -m tradebot.api.app`)
+uses Flask's dev server, for local development only.
 """
 from __future__ import annotations
 

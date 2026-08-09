@@ -72,7 +72,7 @@ services:
 
   api:
     build: .
-    command: gunicorn --factory tradebot.api.app:create_app -b 0.0.0.0:8000 --workers 2
+    command: gunicorn tradebot.api.wsgi:app -b 0.0.0.0:8000 --workers 2
     env_file: .env
     volumes:
       - ./data:/app/data
