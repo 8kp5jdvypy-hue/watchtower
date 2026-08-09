@@ -58,6 +58,30 @@ def test_session_bounds_rejects_non_trading_day():
         session_bounds(date(2026, 7, 25))  # a Saturday
 
 
+def test_run_live_idles_cleanly_on_a_non_trading_day_instead_of_crashing(monkeypatch):
+    """Regression test: run_live() used to call session_bounds() (which
+    raises ValueError for a non-trading day) before any other check, so a
+    process supervisor that starts it unconditionally every day — as
+    docker-compose.yml's `restart: unless-stopped` does, with no backoff
+    — would crash-loop all weekend. It must idle and return cleanly
+    instead."""
+    saturday_utc = datetime(2026, 8, 8, 15, 0, tzinfo=timezone.utc)  # a real Saturday
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return saturday_utc
+
+    monkeypatch.setattr(runner_mod, "datetime", _FrozenDatetime)
+    sleep_calls = []
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    stats = runner_mod.run_live(ConsoleAlerter())
+
+    assert stats.session_date == saturday_utc.astimezone(runner_mod.ET).date()
+    assert sleep_calls == [runner_mod.OFF_SESSION_IDLE_SECONDS]
+
+
 def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
     start = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
     stats = HeartbeatStats(start_time=start, session_date=date(2026, 7, 23))

@@ -91,6 +91,13 @@ WEEKLY_RECAP_STATE_FILE = REPO_ROOT / "data" / "weekly_recap_state.json"
 ET = ZoneInfo("America/New_York")
 STALENESS_SECONDS = 90
 BAR_MINUTES = 5
+# How long run_live() idles before returning on a non-trading day, so a
+# process supervisor with no restart backoff (Docker's `restart:
+# unless-stopped`, see docker-compose.yml) doesn't spin in a tight
+# restart loop all weekend. Bare-metal deployments don't hit this path
+# at all — scripts/watchdog.sh simply never starts the runner outside
+# market hours in the first place.
+OFF_SESSION_IDLE_SECONDS = 1800
 
 CALENDAR = ecals.get_calendar("XNYS")
 
@@ -843,6 +850,16 @@ def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime,
 def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False) -> HeartbeatStats:
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
+    if not CALENDAR.is_session(session_date):
+        # Weekend/holiday: nothing to scan. session_bounds() would raise
+        # ValueError for a date with no session — that's correct for
+        # callers who only ever pass a real trading day (run_replay), but
+        # run_live() itself gets started unconditionally by `docker
+        # compose`'s restart policy, every day, including non-trading
+        # ones. Idle and return cleanly instead of crashing.
+        logger.info("not a trading session (%s) — idling %ds", session_date, OFF_SESSION_IDLE_SECONDS)
+        time.sleep(OFF_SESSION_IDLE_SECONDS)
+        return HeartbeatStats(start_time=now, session_date=session_date)
     open_ts, close_ts = session_bounds(session_date)
 
     # A halt has no in-process "resume" moment (see tradebot.incidents'
