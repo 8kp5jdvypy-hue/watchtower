@@ -64,6 +64,18 @@ Four required today (`tradebot/vendors/alpaca.py`,
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — the bot's own token and the
   ops channel it posts summaries/heartbeats to.
 
+Two more, needed once the web dashboard's magic-link login goes live
+(`tradebot/email_sender.py`) — until both are set, magic links are
+logged instead of emailed (`DevEmailSender`), which is fine for local
+dev but not for a real user trying to sign in from perchmarkets.com:
+
+- `RESEND_API_KEY` — from the Resend dashboard.
+- `RESEND_FROM_EMAIL` — must be an address on a domain verified in
+  Resend (e.g. `login@perchmarkets.com`); verification means adding the
+  DNS records Resend gives you to perchmarkets.com's zone (in Cloudflare,
+  since that's already where the marketing site's DNS lives) — a
+  one-time manual step, not something any script here does.
+
 Rotation: generate the new credential at the provider first, update
 `.env` on the VPS, then `docker compose up -d` (recreates the affected
 containers only; unaffected services are left running). There is no

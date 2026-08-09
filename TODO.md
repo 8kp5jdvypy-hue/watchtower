@@ -50,6 +50,15 @@ Tick a box with `[x]` as you go.
   because it wasn't running before the open — the whole point of the
   wake + auto-start above.)
 
+## For the web dashboard (Phase 6, in progress)
+
+- [ ] **Create a Resend account** and verify perchmarkets.com (or a
+  subdomain of it, e.g. `mail.perchmarkets.com`) for sending — this adds
+  DNS records in Cloudflare, where the domain is already managed. Then
+  set `RESEND_API_KEY` / `RESEND_FROM_EMAIL` in `.env`. See
+  `docs/DEPLOYMENT.md` → Secrets. Until this is done, magic-link sign-in
+  works in dev/tests (logs the link) but can't actually email anyone.
+
 ## Before the social-media launch
 
 - [ ] **DM the bot `/start` from your own Telegram account** (not a

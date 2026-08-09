@@ -120,6 +120,44 @@ CREATE TABLE IF NOT EXISTS feedback (
     message TEXT NOT NULL,
     ts_utc TEXT NOT NULL
 );
+
+-- Perch-native identity (see tradebot.accounts). A Telegram user, a web
+-- login, and (later) a mobile login all resolve to one of these rows via
+-- linked_identities — this table, not `users`, is the root of "who is
+-- this" once more than one surface exists. `email` is nullable: an
+-- account created by linking Telegram first (the common case today, via
+-- the one-time migration) has no email until its owner logs into the
+-- web dashboard and claims one. SQLite's UNIQUE index treats each NULL
+-- as distinct, so any number of email-less accounts can coexist.
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    plan TEXT NOT NULL DEFAULT 'beta',
+    founding_member INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Many identities -> one account. provider is 'telegram' today;
+-- 'apple'/'google' land whenever mobile does, same shape, no schema
+-- change needed.
+CREATE TABLE IF NOT EXISTS linked_identities (
+    account_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_user_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (provider, provider_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_linked_identities_account ON linked_identities(account_id);
+
+-- Passwordless web login. A token is single-use (consumed_at) and
+-- short-lived (expires_at) — see tradebot.accounts.verify_magic_link_token.
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    token TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+);
 """
 
 

@@ -714,7 +714,8 @@ def handle_events(ctx: HandlerContext) -> Reply:
 
 
 def handle_tiers(ctx: HandlerContext) -> Reply:
-    plan_line = f"Your plan: {html.escape(ctx.user.plan)}"
+    plan = access.resolve_plan(ctx.users_conn, ctx.user)
+    plan_line = f"Your plan: {html.escape(plan)}"
     if ctx.user.founding_member:
         plan_line += " (founding member)"
     lines = ["<b>Plans</b>", "", plan_line, "", BETA_PRICING_NOTICE]
