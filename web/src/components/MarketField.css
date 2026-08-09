@@ -32,8 +32,12 @@
 .mf-caption p { margin: 0.7rem 0 0; font-family: var(--display); font-size: var(--step-2); color: var(--ink); }
 
 .mf-kestrel {
-  position: absolute; left: 22%; top: 38%; width: 240px; height: auto;
-  filter: drop-shadow(0 4px 24px rgba(0,0,0,0.6));
+  position: absolute; left: 22%; top: 38%; width: 260px; height: 260px;
+  fill: #0d1420;
+  stroke: #7fe8ff;
+  stroke-width: 0.5;
+  /* A refined silhouette with a quiet edge accent, not a full glow. */
+  filter: drop-shadow(0 0 10px rgba(52,226,255,0.35)) drop-shadow(0 4px 30px rgba(0,0,0,0.7));
   opacity: 0;
   pointer-events: none;
   z-index: 3;

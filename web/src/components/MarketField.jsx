@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
-import { KESTREL_MARK_SRC } from './PerchMark'
+import { FALCON_PATHS } from './PerchMark'
 import './MarketField.css'
 
 const SYMBOLS = [
@@ -147,11 +147,18 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* The Perch kestrel mark -- same asset as PerchMark.jsx (nav/
-            footer/favicon) and the hero's WebGL texture. The existing
-            scroll timeline (opacity/position/scale below) is untouched,
-            only the artwork changed. */}
-        <img className="mf-kestrel" src={KESTREL_MARK_SRC} alt="" aria-hidden="true" />
+        {/* The Perch falcon mark, diving -- same polygon data as PerchMark
+            (nav/footer/favicon) and kestrelTexture.js (the hero), rotated
+            into a dive angle. Wings-spread by construction, so the same
+            shape that sits still in the hero reads as flight here. */}
+        <svg className="mf-kestrel" viewBox="-110 -110 220 220" aria-hidden="true">
+          <g transform="rotate(65)">
+            <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
+            <polygon points={FALCON_PATHS.nearWing} />
+            <polygon points={FALCON_PATHS.body} />
+            <polygon points={FALCON_PATHS.tail} />
+          </g>
+        </svg>
         <div className="mf-funnel" aria-hidden="true">
           <span className="mf-funnel-num">0</span>
           <span className="mf-funnel-lbl">MARKET EVENTS</span>

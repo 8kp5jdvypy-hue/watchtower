@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { useReducedMotion } from '../hooks/usePrefs'
-import { KESTREL_MARK_SRC } from './PerchMark'
+import { FALCON_PATHS } from './PerchMark'
 import './BootSequence.css'
 
 // "The Full Stop" -- 24 points of noise (the market) pulled into a single
@@ -112,10 +112,17 @@ export default function BootSequence() {
         <span className="boot-word">PERCH</span>
         <span className="boot-dot-wrap">
           <span className="boot-ring" />
-          {/* The kestrel mark itself locks in here -- same asset as the
-              nav/footer icon -- rather than a generic dot, so "the
+          {/* The falcon mark itself locks in here -- same polygon data as
+              the nav/footer icon -- rather than a generic dot, so "the
               signal" and "the brand mark" are visibly the same thing. */}
-          <img className="boot-dot" ref={dotRef} src={KESTREL_MARK_SRC} alt="" />
+          <svg className="boot-dot" ref={dotRef} viewBox="-72 -82 190 178" aria-hidden="true">
+            <g fill="currentColor">
+              <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
+              <polygon points={FALCON_PATHS.nearWing} />
+              <polygon points={FALCON_PATHS.body} />
+              <polygon points={FALCON_PATHS.tail} />
+            </g>
+          </svg>
         </span>
       </div>
     </div>

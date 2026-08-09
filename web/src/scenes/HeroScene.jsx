@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
-import { Billboard, useTexture } from '@react-three/drei'
+import { Billboard } from '@react-three/drei'
 import { EffectComposer, Bloom, Vignette } from '@react-three/postprocessing'
 import gsap from 'gsap'
 // ScrollTrigger is registered once, app-wide, by useSmoothScroll.js -- no
 // need to re-register it here, just use the `scrollTrigger:` tween config.
-import { KESTREL_MARK_SRC } from '../components/PerchMark'
+import { makeKestrelTexture } from './kestrelTexture'
 import { makeSoftDotTexture } from './particleTexture'
 import { useThrottledInvalidate } from '../hooks/useThrottledInvalidate'
+import './KestrelMaterial'
 
 // Cut hard from the previous pass: fewer points, no chromatic aberration
 // (real GPU cost for the least essential effect), and everything now
@@ -58,9 +59,7 @@ function ParticleLayer({ count, depth, spread, size, speed, reduced }) {
 function Kestrel({ reduced, heroRootRef }) {
   const groupRef = useRef(null)
   const matRef = useRef(null)
-  // The client's own reference artwork, loaded as a real texture -- see
-  // PerchMark.jsx for the same asset used everywhere else the mark appears.
-  const texture = useTexture(KESTREL_MARK_SRC)
+  const texture = useMemo(() => makeKestrelTexture(), [])
   const invalidate = useThree((s) => s.invalidate)
   // Mutable, not React state -- this changes on every scrub tick and has
   // no business triggering a re-render; useFrame reads it directly.
@@ -102,7 +101,10 @@ function Kestrel({ reduced, heroRootRef }) {
     }
     const s = 1 - d * 0.4
     groupRef.current.scale.setScalar(s)
-    if (matRef.current) matRef.current.opacity = 1 - d
+    if (matRef.current) {
+      matRef.current.time = t
+      matRef.current.fade = 1 - d
+    }
   })
 
   return (
@@ -111,7 +113,7 @@ function Kestrel({ reduced, heroRootRef }) {
         <mesh scale={[4.6, 4.6, 1]}>
           <planeGeometry args={[1, 1]} />
           {/* eslint-disable-next-line react/no-unknown-property */}
-          <meshBasicMaterial
+          <kestrelMaterial
             ref={matRef}
             map={texture}
             transparent
