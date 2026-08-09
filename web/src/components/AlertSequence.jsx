@@ -102,7 +102,13 @@ export default function AlertSequence() {
         scrollTrigger: {
           trigger: rootRef.current,
           start: 'top top',
-          end: '+=340%',
+          // 340% made this the longest pin on the site by a wide margin
+          // (MarketField is 140%, the old SignalVisualization was 220%)
+          // -- it read as dragging relative to everything around it.
+          // Tightened to sit closer to that established pace; the beat
+          // choreography below is all relative fractions, so this just
+          // compresses the whole thing to be quicker per pixel scrolled.
+          end: '+=200%',
           scrub: 0.6,
           pin: true,
         },
