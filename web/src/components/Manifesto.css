@@ -27,3 +27,15 @@
 @media (max-width: 760px) {
   .manifesto h2 { font-size: var(--step-4); }
 }
+
+/* "YOU DECIDE." and its three supporting lines only ever appear via a
+   scroll-scrubbed timeline -- skipped entirely for reduced-motion users,
+   who would otherwise see just "WE WATCH." and nothing else on one of the
+   site's clearest trust statements. Freeze it on the timeline's resting
+   frame: WE WATCH. dimmed back to secondary, YOU DECIDE. and the three
+   lines all present. */
+@media (prefers-reduced-motion: reduce) {
+  .man-watch { opacity: 0.15; }
+  .man-decide { opacity: 1; }
+  .man-lines p { opacity: 1; }
+}

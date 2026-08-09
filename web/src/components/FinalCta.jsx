@@ -13,7 +13,7 @@ export default function FinalCta() {
           BE THERE<br />WHEN IT MOVES.
         </h2>
         <p>Request early access to Perch.</p>
-        <MagneticButton as="a" href="#waitlist">Join the waitlist</MagneticButton>
+        <MagneticButton as="a" href="#waitlist">Request access</MagneticButton>
       </div>
     </section>
   )

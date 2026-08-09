@@ -5,6 +5,16 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger'
 
 gsap.registerPlugin(ScrollTrigger)
 
+// A mobile browser's address bar showing/hiding as you scroll fires a
+// real `resize` event even though nothing the user asked for changed --
+// ScrollTrigger's default auto-refresh-on-resize would recompute every
+// pinned section's start/end against that transient height change, which
+// can jump a pin mid-scroll. This is GSAP's own documented flag for
+// exactly that case: resize events on touch devices are ignored, while
+// an actual orientation change (which fires its own event) still
+// refreshes correctly.
+ScrollTrigger.config({ ignoreMobileResize: true })
+
 // Lenis drives real scroll; ScrollTrigger drives our scroll-linked animation.
 // Respects prefers-reduced-motion by simply not smoothing — the browser's
 // native (instant, no inertia) scroll takes over, and ScrollTrigger still

@@ -21,7 +21,12 @@
   --line: #1c222c;
   --ink: #eef2f6;
   --ink-dim: #8b95a3;
-  --ink-faint: #4d5563;
+  /* 2.68:1 against --bg at the old #4d5563 -- fails WCAG AA (4.5:1) for
+     the actual body text it's used on (footer disclaimer, demo-tag
+     labels, fine print). Lightened to clear AA with some margin while
+     staying visibly dimmer than --ink-dim, so the ink/ink-dim/ink-faint
+     hierarchy still reads correctly. */
+  --ink-faint: #737f94;
 
   /* signal is the exception, not the rule */
   --cyan: #34e2ff;

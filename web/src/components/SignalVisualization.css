@@ -43,3 +43,16 @@
   .sig-stats { grid-template-columns: repeat(2, 1fr); }
   .sig-chart { height: 180px; }
 }
+
+/* The NORMAL -> UNUSUAL -> SIGNAL DETECTED state label and the stats row
+   are only ever shown by the scroll-scrubbed timeline, which reduced-
+   motion users never run -- they'd otherwise see a floating candle chart
+   with no label and no numbers at all. Freeze it on the timeline's own
+   final frame (arrived, not mid-transition): SIGNAL DETECTED, the stats
+   visible, the symbol in its alert color. The bars themselves need no
+   fix -- they carry no default hidden state in CSS. */
+@media (prefers-reduced-motion: reduce) {
+  .sig-state:nth-child(3) { opacity: 1; }
+  .sig-symbol { color: var(--red); }
+  .sig-stat { opacity: 1; }
+}

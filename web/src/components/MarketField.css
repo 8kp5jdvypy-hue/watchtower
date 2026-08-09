@@ -79,3 +79,19 @@
   .mf-funnel-num { font-size: var(--step-3); }
   .mf-radar-ring { display: block; }
 }
+
+/* This section's whole story (the funnel count, the caption, the kestrel)
+   is told entirely by a scroll-scrubbed GSAP timeline that never runs for
+   reduced-motion users -- everything above defaults to opacity: 0 and
+   just stays that way, leaving only a field of flickering ticker symbols
+   with no payoff. The funnel counter's digits are mutated by GSAP
+   directly (innerText), so there's no sensible static number to freeze it
+   on -- it stays hidden. The caption and kestrel are plain, pre-written
+   content, so they're safe to reveal at rest: the noise, the one signal
+   already picked out in cyan by its own static CSS class, and the line
+   that explains why. */
+@media (prefers-reduced-motion: reduce) {
+  .mf-sym { animation: none; opacity: 0.5; }
+  .mf-caption { opacity: 1; }
+  .mf-kestrel { opacity: 0.55; }
+}
