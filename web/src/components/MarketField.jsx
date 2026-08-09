@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
-import { FALCON_PATHS } from './PerchMark'
+import { PerchMarkGlyph } from './PerchMark'
 import './MarketField.css'
 
 const SYMBOLS = [
@@ -147,16 +147,15 @@ export default function MarketField() {
             {it.sym}
           </span>
         ))}
-        {/* The Perch falcon mark, diving -- same polygon data as PerchMark
+        {/* The Perch falcon mark, diving -- same glyph as PerchMark
             (nav/footer/favicon) and kestrelTexture.js (the hero), rotated
             into a dive angle. Wings-spread by construction, so the same
-            shape that sits still in the hero reads as flight here. */}
+            shape that sits still in the hero reads as flight here.
+            fill={null}: this element's fill/stroke are set on the outer
+            <svg> in CSS (.mf-kestrel) and inherited down, not set here. */}
         <svg className="mf-kestrel" viewBox="-110 -110 220 220" aria-hidden="true">
           <g transform="rotate(65)">
-            <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
-            <polygon points={FALCON_PATHS.nearWing} />
-            <polygon points={FALCON_PATHS.body} />
-            <polygon points={FALCON_PATHS.tail} />
+            <PerchMarkGlyph fill={null} accent={false} />
           </g>
         </svg>
         <div className="mf-funnel" aria-hidden="true">

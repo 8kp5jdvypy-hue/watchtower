@@ -7,6 +7,14 @@ import { FALCON_PATHS } from '../components/PerchMark'
 // silhouette here, not a fully bloomed glow -- the brand direction is a
 // refined mark with a restrained cyan accent, not a neon centerpiece. No
 // external image/model asset; drawn procedurally to an offscreen canvas.
+//
+// This is the one place that can't share PerchMarkGlyph -- that's SVG
+// JSX, this is imperative Canvas 2D feeding a Three.js GPU texture, a
+// different rendering path by necessity (the hero mesh needs a texture,
+// not a DOM node). When the final mark replaces FALCON_PATHS, the
+// drawPolygon() calls below need their own update -- or, better, a
+// follow-up refactor to draw a loaded SVG/image instead of hand-drawn
+// path commands. See BRAND.md §6.
 function drawPolygon(ctx, pointStr) {
   const pts = pointStr.split(' ').map((p) => p.split(',').map(Number))
   ctx.beginPath()

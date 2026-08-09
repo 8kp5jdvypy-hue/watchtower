@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import gsap from 'gsap'
 import { useReducedMotion } from '../hooks/usePrefs'
-import { FALCON_PATHS } from './PerchMark'
+import { PerchMarkGlyph, PERCH_MARK_VIEWBOX } from './PerchMark'
 import './BootSequence.css'
 
 // "The Full Stop" -- 24 points of noise (the market) pulled into a single
@@ -112,16 +112,14 @@ export default function BootSequence() {
         <span className="boot-word">PERCH</span>
         <span className="boot-dot-wrap">
           <span className="boot-ring" />
-          {/* The falcon mark itself locks in here -- same polygon data as
-              the nav/footer icon -- rather than a generic dot, so "the
-              signal" and "the brand mark" are visibly the same thing. */}
-          <svg className="boot-dot" ref={dotRef} viewBox="-72 -82 190 178" aria-hidden="true">
-            <g fill="currentColor">
-              <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
-              <polygon points={FALCON_PATHS.nearWing} />
-              <polygon points={FALCON_PATHS.body} />
-              <polygon points={FALCON_PATHS.tail} />
-            </g>
+          {/* The falcon mark itself locks in here -- the exact same glyph
+              as the nav/footer icon, via PerchMarkGlyph -- rather than a
+              generic dot, so "the signal" and "the brand mark" are
+              visibly the same thing. Own <svg> wrapper (not the full
+              PerchMark component) because this element itself is the
+              GSAP animation target. */}
+          <svg className="boot-dot" ref={dotRef} viewBox={PERCH_MARK_VIEWBOX} aria-hidden="true">
+            <PerchMarkGlyph fill="currentColor" accent={false} />
           </svg>
         </span>
       </div>

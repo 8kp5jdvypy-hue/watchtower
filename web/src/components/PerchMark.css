@@ -1,2 +1,28 @@
 .perch-mark { display: block; flex: none; }
 .pm-accent { stroke: var(--cyan); stroke-width: 5; stroke-linecap: round; }
+
+/* Motion-state hooks, prepared for the future professionally-designed
+   mark -- see PERCH_MARK_STATES in PerchMark.jsx. `idle` is the current,
+   unchanged baseline; nothing in the app passes any other state today,
+   so these are dormant until a future caller opts in. Kept deliberately
+   restrained -- cyan means "Perch noticed," never a permanent glow, and
+   none of this should read as louder than the rim-light already used on
+   the hero kestrel.
+     scanning  -- the faintest cyan presence, attention is forming
+     signal    -- a little brighter, something is emerging
+     confirmed -- one brief, controlled bloom on arrival, then settles
+     alert     -- the mark becomes the visual anchor, still restrained */
+.pm-state-idle { filter: none; }
+.pm-state-scanning { filter: drop-shadow(0 0 3px rgba(52, 226, 255, 0.25)); }
+.pm-state-signal { filter: drop-shadow(0 0 6px rgba(52, 226, 255, 0.4)); }
+.pm-state-confirmed { animation: pm-bloom 0.6s ease-out both; }
+.pm-state-alert { filter: drop-shadow(0 0 8px rgba(52, 226, 255, 0.55)); }
+
+@keyframes pm-bloom {
+  0% { filter: drop-shadow(0 0 0 rgba(52, 226, 255, 0)); }
+  40% { filter: drop-shadow(0 0 14px rgba(52, 226, 255, 0.7)); }
+  100% { filter: drop-shadow(0 0 6px rgba(52, 226, 255, 0.4)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pm-state-confirmed { animation: none; filter: drop-shadow(0 0 6px rgba(52, 226, 255, 0.4)); }
+}
