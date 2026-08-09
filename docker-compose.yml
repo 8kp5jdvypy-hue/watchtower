@@ -1,13 +1,12 @@
-# Production stack for a single VPS. Three services, one image (see
-# Dockerfile) — mirrors what scripts/start.sh runs on bare metal, but
-# supervised by Docker instead of pidfiles: `restart: unless-stopped`
-# is this deployment's watchdog, so scripts/watchdog.sh and the
-# LaunchAgent plists are the macOS-laptop equivalent and are not used
-# here.
-#
-# `api` is not listed yet — it doesn't exist until Phase 6 (web
-# dashboard + internal API). Add it here as a fourth service, same
-# pattern, once tradebot/api/ exists.
+# Production stack for a single VPS. Four services on the scanner/bot
+# side, one image (see Dockerfile) — mirrors what scripts/start.sh runs
+# on bare metal, but supervised by Docker instead of pidfiles:
+# `restart: unless-stopped` is this deployment's watchdog, so
+# scripts/watchdog.sh and the LaunchAgent plists are the macOS-laptop
+# equivalent and are not used here. `caddy` is the fifth service — the
+# only thing with a port published to the host — terminating TLS for
+# api.perchmarkets.com and reverse-proxying to `api`. See
+# docs/DEPLOYMENT.md for the DNS record `api` needs.
 #
 # Usage:
 #   docker compose up -d --build
@@ -70,3 +69,35 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  api:
+    build: .
+    command: gunicorn --factory tradebot.api.app:create_app -b 0.0.0.0:8000 --workers 2
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - worker
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:

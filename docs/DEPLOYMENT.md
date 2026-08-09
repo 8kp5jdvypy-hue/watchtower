@@ -1,6 +1,6 @@
 # Deployment
 
-Perch runs on a single VPS: Docker Compose for the three long-running
+Perch runs on a single VPS: Docker Compose for the long-running
 processes, systemd for making sure Compose itself survives a reboot,
 and a nightly cron-equivalent (systemd timer) for backups. This
 replaces the macOS-laptop + LaunchAgent setup described in the main
@@ -8,27 +8,23 @@ README, which was fine for development but is a single point of
 failure with no auto-restart across a machine restart and no offsite
 backup.
 
-This is Phase 4 of the Perch build. `tradebot/api/` (Phase 6) doesn't
-exist yet — add it to `docker-compose.yml` as a fourth service, same
-shape as the three below, once it does.
-
 ## What's here
 
 | File | Purpose |
 |---|---|
-| `Dockerfile` | One image for all three processes (they share code/deps; only the command differs) |
+| `Dockerfile` | One image for worker/bot/runner/api (they share code/deps; only the command differs) |
 | `requirements.txt` | Pinned direct dependencies for the image |
-| `docker-compose.yml` | worker / bot / runner services, `restart: unless-stopped`, a heartbeat healthcheck on the runner |
+| `docker-compose.yml` | worker / bot / runner / api / caddy services, `restart: unless-stopped`, a heartbeat healthcheck on the runner |
+| `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |
 | `scripts/backup.sh` | `.backup`-based dump of `journal.db`/`users.db`/`universe.db`, gzipped, rotated after 14 days by default |
 
 ## First-time VPS setup
 
-Sizing: this is a light workload (three Python processes, SQLite, no
-Postgres) — a 2 vCPU / 4GB VPS is comfortable headroom for hundreds of
-users; resize later if the web dashboard (Phase 6) or Postgres
-migration changes that.
+Sizing: this is a light workload (a handful of Python processes, SQLite,
+no Postgres) — a 2 vCPU / 4GB VPS is comfortable headroom for hundreds
+of users; resize later if a Postgres migration changes that.
 
 1. Provision a VPS (any provider), Ubuntu 22.04+ or Debian 12+.
 2. Install Docker + Compose plugin and sqlite3 (the last is for the
@@ -42,18 +38,29 @@ migration changes that.
    systemd unit files if you use a different path).
 5. Place `.env` at `/opt/perch/.env` (see **Secrets** below) — never
    committed, already covered by `.gitignore`.
-6. `cp systemd/perch.service systemd/perch-backup.* /etc/systemd/system/`
+6. **DNS, before the stack comes up**: point `api.perchmarkets.com` at
+   the VPS's IP (an A record in Cloudflare, the same place
+   perchmarkets.com's other DNS already lives). Set this record to
+   **DNS only** (grey cloud, not proxied) — Caddy needs to complete its
+   own ACME (Let's Encrypt) challenge and terminate TLS itself; routing
+   it through Cloudflare's proxy first would fight that. `app.` (the
+   dashboard, once it's deployed) is separate — that one *should* stay
+   proxied through Cloudflare, since it's a static site on Cloudflare
+   Pages, not something this VPS serves.
+7. `cp systemd/perch.service systemd/perch-backup.* /etc/systemd/system/`
    then:
    ```bash
    systemctl daemon-reload
    systemctl enable --now perch.service
    systemctl enable --now perch-backup.timer
    ```
-7. Verify: `docker compose ps`, `docker compose logs -f runner`, and
-   the existing `scripts/status.sh` checklist from the README (still
-   valid — it reads `data/heartbeat.json` and `data/incidents.jsonl`,
-   which are bind-mounted the same way whether the processes run bare
-   or in containers).
+8. Verify: `docker compose ps`, `docker compose logs -f runner`,
+   `docker compose logs caddy` (should show a successful certificate
+   issuance for `api.perchmarkets.com`), `curl https://api.perchmarkets.com/healthz`
+   (`{"ok": true}`), and the existing `scripts/status.sh` checklist from
+   the README (still valid — it reads `data/heartbeat.json` and
+   `data/incidents.jsonl`, which are bind-mounted the same way whether
+   the processes run bare or in containers).
 
 ## Secrets
 
@@ -75,6 +82,31 @@ dev but not for a real user trying to sign in from perchmarkets.com:
   DNS records Resend gives you to perchmarkets.com's zone (in Cloudflare,
   since that's already where the marketing site's DNS lives) — a
   one-time manual step, not something any script here does.
+
+Three more, for the `api` service (`tradebot/api/app.py`) — required
+for a real deployment; the code falls back to insecure dev defaults if
+they're unset, which is only fine for local development:
+
+- `SESSION_SECRET_KEY` — signs the login session cookie. Generate one
+  with `python3 -c "import secrets; print(secrets.token_hex(32))"` and
+  never reuse the built-in dev default in production.
+- `FRONTEND_URL` — where `/auth/magic-link/verify` redirects after a
+  successful login, and the only origin the API's CORS headers allow.
+  Set to `https://app.perchmarkets.com` once the dashboard is deployed
+  there (Phase 6); until then, magic-link login has nowhere real to
+  redirect to.
+- `SESSION_COOKIE_DOMAIN` — set to `.perchmarkets.com` so the session
+  cookie `api.perchmarkets.com` sets is also sent on requests from
+  `app.perchmarkets.com`. Leave unset for local development (host-only
+  cookie).
+
+Local dev over plain `http://localhost` needs one more override: the
+session cookie is `Secure` by default (required in production, since
+Caddy always terminates real TLS), and browsers won't store a `Secure`
+cookie on a non-HTTPS origin other than `localhost`/`127.0.0.1`. Set
+`SESSION_COOKIE_SECURE=0` when running `tradebot/api/app.py` locally
+against a non-localhost hostname; leave it unset (defaults to on)
+everywhere else.
 
 Rotation: generate the new credential at the provider first, update
 `.env` on the VPS, then `docker compose up -d` (recreates the affected
@@ -122,8 +154,10 @@ image actually changed.
 
 ## Known gap
 
-There is currently no automated TLS-terminating reverse proxy in this
-compose file — not needed yet, because nothing here serves HTTP.
-Add one (e.g. Caddy or nginx, as its own compose service) when the
-Phase 6 internal API and web dashboard exist and need a public,
-TLS-covered endpoint.
+The web dashboard itself (`web-app/`, a static Vite/React app talking
+only to `api.perchmarkets.com`) doesn't exist yet — this covers the
+backend (`tradebot/api/`) and its public, TLS-covered endpoint. Once
+the dashboard is built, deploy it to Cloudflare Pages (same place the
+marketing site already lives) at `app.perchmarkets.com`, and set
+`FRONTEND_URL`/`SESSION_COOKIE_DOMAIN` above so the API will accept
+requests from it.

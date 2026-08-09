@@ -50,7 +50,12 @@ Tick a box with `[x]` as you go.
   because it wasn't running before the open — the whole point of the
   wake + auto-start above.)
 
-## For the web dashboard (Phase 6, in progress)
+## For the web dashboard (Phase 6 — backend + frontend both built, not deployed yet)
+
+`tradebot/api/` (the backend) and `web-app/` (the dashboard: Today /
+Watchlist / Recent Signals / Performance / My Activity) are both built
+and tested — 598 tests passing, plus a real end-to-end HTTP smoke test
+of the login flow. Three things left, all only-you-can-do:
 
 - [ ] **Create a Resend account** and verify perchmarkets.com (or a
   subdomain of it, e.g. `mail.perchmarkets.com`) for sending — this adds
@@ -58,6 +63,16 @@ Tick a box with `[x]` as you go.
   set `RESEND_API_KEY` / `RESEND_FROM_EMAIL` in `.env`. See
   `docs/DEPLOYMENT.md` → Secrets. Until this is done, magic-link sign-in
   works in dev/tests (logs the link) but can't actually email anyone.
+
+- [ ] **Point `api.perchmarkets.com` at the VPS** (DNS-only, not
+  proxied — see `docs/DEPLOYMENT.md`'s setup step 6) once the VPS
+  exists, so Caddy can issue a real TLS cert and `docker compose up`
+  brings up a live `api`/`caddy` pair.
+
+- [ ] **Deploy `web-app/`** to a new Cloudflare Workers/Pages project
+  (`perch-dashboard`, separate from the marketing site's `watchtower`
+  project) at `app.perchmarkets.com`, with `VITE_API_URL=https://api.perchmarkets.com`
+  set as a build-time env var. See `web-app/README.md`.
 
 ## Before the social-media launch
 
