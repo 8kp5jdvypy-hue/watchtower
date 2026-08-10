@@ -26,13 +26,14 @@ uses Flask's dev server, for local development only.
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, g, jsonify, redirect, request, session
 
-from tradebot import accounts, config
+from tradebot import accounts, config, funnel_events
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import tier_performance
@@ -115,6 +116,34 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     @app.route("/healthz")
     def healthz():
         return jsonify({"ok": True})
+
+    @app.route("/events", methods=["POST"])
+    def track_event():
+        # Sent via navigator.sendBeacon as a text/plain body (see
+        # web/src/analytics.js and web-app/src/analytics.js) on purpose:
+        # a "simple" cross-origin POST skips the CORS preflight, so this
+        # works from both perchmarkets.com and app.perchmarkets.com
+        # without extending `allowed_origins` above — and since the
+        # client never reads the response (fire-and-forget), no
+        # Access-Control-Allow-Origin is needed here at all. Always
+        # answer 204 regardless of what was sent: a public,
+        # unauthenticated endpoint should never behave observably
+        # differently for a malformed request than a valid one.
+        try:
+            payload = json.loads(request.get_data(as_text=True) or "{}")
+        except ValueError:
+            return "", 204
+        if not isinstance(payload, dict):
+            return "", 204
+        props = payload.get("props")
+        funnel_events.record_event(
+            app.users_conn,
+            event=str(payload.get("event") or ""),
+            anon_id=str(payload.get("anon_id") or ""),
+            account_id=session.get("account_id"),
+            props=props if isinstance(props, dict) else None,
+        )
+        return "", 204
 
     @app.route("/auth/magic-link/request", methods=["POST"])
     def request_magic_link():
