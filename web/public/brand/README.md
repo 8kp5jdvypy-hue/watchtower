@@ -1,11 +1,14 @@
-# /public/brand — future Perch mark assets
+# /public/brand — Perch brand assets
 
 This directory is prepared for the final, professionally designed Perch
-mark. **Nothing has been placed here yet** — the current site still runs
-entirely on the placeholder geometric mark defined in
-`src/components/PerchMark.jsx` (`FALCON_PATHS`). See `../../BRAND.md` for
-the full audit of where that placeholder is used today and exactly what
-changes when real files land here.
+mark, plus the one thing that has landed so far: `og-landing.png`, the
+Open Graph / Twitter Card share image referenced from `index.html`.
+It's a static PNG export of the same placeholder mark defined in
+`src/components/PerchMark.jsx` (`FALCON_PATHS`) composed on the site's
+real palette — not a new logo, not a screenshot of the page. See
+`../../BRAND.md` for the full audit of where the placeholder mark is
+used today and exactly what changes when a real vector mark lands
+here.
 
 ## Expected files
 
