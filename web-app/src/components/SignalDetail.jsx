@@ -226,7 +226,6 @@ export default function SignalDetail({ id, onClose }) {
 
             <div className="sd-foot">
               <span>{absoluteTime(data.ts_utc)}</span>
-              <span>{data.session}</span>
             </div>
           </>
         )}

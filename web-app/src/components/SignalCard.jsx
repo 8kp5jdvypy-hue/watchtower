@@ -56,10 +56,7 @@ export default function SignalCard({ signal, onView }) {
       </div>
 
       <div className="sc-foot">
-        <span className="sc-foot-meta">
-          <span className="sc-time">{relativeTime(signal.ts_utc)}</span>
-          {signal.score != null && <span className="sc-score">score {signal.score.toFixed(2)}</span>}
-        </span>
+        <span className="sc-time">{relativeTime(signal.ts_utc)}</span>
         {onView && (
           <button type="button" className="sc-view" onClick={() => onView(signal.id)}>
             View signal <span aria-hidden="true">→</span>
