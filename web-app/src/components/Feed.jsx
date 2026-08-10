@@ -1,13 +1,15 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
+import SignalDetail from './SignalDetail'
 import './Views.css'
 
 export default function Feed() {
   const fetchFeed = useCallback(() => api.signalsFeed(20), [])
   const { data, error, loading } = useApiData(fetchFeed)
+  const [openId, setOpenId] = useState(null)
 
   return (
     <div className="view">
@@ -24,7 +26,10 @@ export default function Feed() {
           <p>Perch is watching. Nothing has crossed the threshold since it started tracking.</p>
         </div>
       )}
-      {data && data.signals.map((signal) => <SignalCard key={signal.id} signal={signal} />)}
+      {data && data.signals.map((signal) => (
+        <SignalCard key={signal.id} signal={signal} onView={setOpenId} />
+      ))}
+      {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>
   )
 }

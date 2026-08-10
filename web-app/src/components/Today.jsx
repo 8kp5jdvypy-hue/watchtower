@@ -4,6 +4,7 @@ import { useApiData } from '../hooks/useApiData'
 import { useMarketClock } from '../hooks/useMarketClock'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
+import SignalDetail from './SignalDetail'
 import './Views.css'
 import './WelcomeBanner.css'
 
@@ -17,6 +18,7 @@ export default function Today({ account }) {
   const fetchToday = useCallback(() => api.signalsToday(), [])
   const { data, error, loading } = useApiData(fetchToday)
   const clock = useMarketClock()
+  const [openId, setOpenId] = useState(null)
 
   // Shown once per account, on this browser -- the first time Today
   // ever renders with real data, not a multi-step tour, just enough
@@ -81,7 +83,10 @@ export default function Today({ account }) {
           <p>Nothing HIGH or MEDIUM tier has crossed the threshold yet today. That's not a bug — it's Perch deciding there's nothing worth interrupting you for.</p>
         </div>
       )}
-      {data && data.signals.map((signal) => <SignalCard key={signal.id} signal={signal} />)}
+      {data && data.signals.map((signal) => (
+        <SignalCard key={signal.id} signal={signal} onView={setOpenId} />
+      ))}
+      {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>
   )
 }

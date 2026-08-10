@@ -59,10 +59,25 @@
 }
 
 .sc-foot {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
   margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px solid var(--line);
   font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
 }
+.sc-foot-meta { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
+.sc-view {
+  flex: none;
+  background: none;
+  border: 1px solid rgba(52, 226, 255, 0.25);
+  color: var(--cyan);
+  border-radius: 5px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.sc-view:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
 
 @media (prefers-reduced-motion: reduce) {
   .signal-card { animation: none; }

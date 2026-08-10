@@ -32,6 +32,7 @@ export const api = {
   watchlist: () => request('/watchlist'),
   signalsToday: () => request('/signals/today'),
   signalsFeed: (limit = 20) => request(`/signals/feed?limit=${limit}`),
+  signalDetail: (id) => request(`/signals/${encodeURIComponent(id)}`),
   performance: () => request('/performance'),
   activity: () => request('/activity'),
 }

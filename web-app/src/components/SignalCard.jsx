@@ -30,7 +30,7 @@ function relativeTime(tsUtc) {
 // gives us -- no fabricated "importance score" beyond what's real. High
 // tier gets the stronger cyan treatment (the brief's "very important:
 // cyan edge/bloom"); medium stays quieter.
-export default function SignalCard({ signal }) {
+export default function SignalCard({ signal, onView }) {
   const isHigh = signal.tier === 'high'
   return (
     <div className={`signal-card${isHigh ? ' is-high' : ''}`}>
@@ -56,8 +56,15 @@ export default function SignalCard({ signal }) {
       </div>
 
       <div className="sc-foot">
-        <span className="sc-time">{relativeTime(signal.ts_utc)}</span>
-        {signal.score != null && <span className="sc-score">score {signal.score.toFixed(2)}</span>}
+        <span className="sc-foot-meta">
+          <span className="sc-time">{relativeTime(signal.ts_utc)}</span>
+          {signal.score != null && <span className="sc-score">score {signal.score.toFixed(2)}</span>}
+        </span>
+        {onView && (
+          <button type="button" className="sc-view" onClick={() => onView(signal.id)}>
+            View signal <span aria-hidden="true">→</span>
+          </button>
+        )}
       </div>
     </div>
   )
