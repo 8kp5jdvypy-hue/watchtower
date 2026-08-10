@@ -1,6 +1,7 @@
 import PerchMark from './PerchMark'
 import SignalGlyph from './SignalGlyph'
 import { SIGNUP_URL, LOGIN_URL } from '../config'
+import { track, withRef } from '../analytics'
 import './Footer.css'
 import './PerchMark.css'
 
@@ -20,8 +21,8 @@ export default function Footer() {
           <a href="#field" data-cursor="link">What it watches</a>
           <a href="#coverage" data-cursor="link">Coverage</a>
           <a href="#demo" data-cursor="link">The interface</a>
-          <a href={LOGIN_URL} data-cursor="link">Log in</a>
-          <a href={SIGNUP_URL} data-cursor="link">Sign up</a>
+          <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'footer' })}>Log in</a>
+          <a href={withRef(SIGNUP_URL)} data-cursor="link" onClick={() => track('signup_cta_click', { source: 'footer' })}>Sign up</a>
         </nav>
       </div>
       <div className="wrap ft-base">

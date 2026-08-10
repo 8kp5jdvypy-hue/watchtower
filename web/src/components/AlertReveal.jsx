@@ -4,6 +4,7 @@ import AlertCard from './AlertCard'
 import PerchMark from './PerchMark'
 import { useReducedMotion } from '../hooks/usePrefs'
 import { SIGNUP_URL } from '../config'
+import { track, withRef } from '../analytics'
 import './AlertReveal.css'
 
 // Three compact, illustrative examples -- the point isn't more sections,
@@ -153,7 +154,7 @@ export default function AlertReveal() {
 
         <p className="ar-close">
           You don't have to watch everything. Perch does.{' '}
-          <a href={SIGNUP_URL} data-cursor="link">Sign up →</a>
+          <a href={withRef(SIGNUP_URL)} data-cursor="link" onClick={() => track('signup_cta_click', { source: 'alert_reveal' })}>Sign up →</a>
         </p>
       </div>
     </section>

@@ -1,5 +1,6 @@
 import MagneticButton from './MagneticButton'
 import { SIGNUP_URL } from '../config'
+import { track, withRef } from '../analytics'
 import './Pricing.css'
 
 // Same real feature list as the dashboard's own Settings/plan section
@@ -36,7 +37,7 @@ export default function Pricing() {
               <li key={f}><span aria-hidden="true">✓</span>{f}</li>
             ))}
           </ul>
-          <MagneticButton as="a" href={SIGNUP_URL} className="pr-cta">Sign up</MagneticButton>
+          <MagneticButton as="a" href={withRef(SIGNUP_URL)} className="pr-cta" onClick={() => track('signup_cta_click', { source: 'pricing' })}>Sign up</MagneticButton>
         </div>
 
         <p className="pr-trust">

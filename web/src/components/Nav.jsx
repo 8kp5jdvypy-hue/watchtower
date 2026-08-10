@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import PerchMark from './PerchMark'
 import { SIGNUP_URL, LOGIN_URL } from '../config'
+import { track, withRef } from '../analytics'
 import './Nav.css'
 import './PerchMark.css'
 
@@ -71,8 +72,8 @@ export default function Nav() {
           </a>
           <div className="nav-links">
             <a href="#demo" data-cursor="link">Interface</a>
-            <a href={LOGIN_URL} data-cursor="link">Log in</a>
-            <a href={SIGNUP_URL} className="nav-cta" data-cursor="cta">Sign up</a>
+            <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'nav' })}>Log in</a>
+            <a href={withRef(SIGNUP_URL)} className="nav-cta" data-cursor="cta" onClick={() => track('signup_cta_click', { source: 'nav' })}>Sign up</a>
           </div>
           <button
             className={`nav-burger${menuOpen ? ' is-open' : ''}`}
@@ -100,15 +101,21 @@ export default function Nav() {
             </a>
           ))}
           <a
-            href={LOGIN_URL}
+            href={withRef(LOGIN_URL)}
             data-cursor="link"
             style={{ transitionDelay: `${LINKS.length * 0.05}s` }}
             tabIndex={menuOpen ? 0 : -1}
+            onClick={() => { track('login_cta_click', { source: 'nav_mobile' }); setMenuOpen(false) }}
           >
             Log in
           </a>
         </div>
-        <a href={SIGNUP_URL} className="nav-mobile-cta" onClick={() => setMenuOpen(false)} tabIndex={menuOpen ? 0 : -1}>
+        <a
+          href={withRef(SIGNUP_URL)}
+          className="nav-mobile-cta"
+          onClick={() => { track('signup_cta_click', { source: 'nav_mobile' }); setMenuOpen(false) }}
+          tabIndex={menuOpen ? 0 : -1}
+        >
           Sign up
         </a>
       </div>

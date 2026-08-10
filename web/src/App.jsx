@@ -17,10 +17,18 @@ import FinalCta from './components/FinalCta'
 import Footer from './components/Footer'
 import { useSmoothScroll } from './hooks/useSmoothScroll'
 import { useReducedMotion } from './hooks/usePrefs'
+import { track } from './analytics'
 
 export default function App() {
   const reduced = useReducedMotion()
   useSmoothScroll(!reduced)
+
+  // Once per real page load -- not per section scrolled into view, this
+  // is the top of the funnel (see tradebot/funnel_events.py's
+  // ALLOWED_EVENTS), not a scroll-depth tracker.
+  useEffect(() => {
+    track('landing_view')
+  }, [])
 
   // Each section creates its own ScrollTrigger pin independently. A pin
   // created before a later sibling's pin-spacer exists caches a start/end

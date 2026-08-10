@@ -5,6 +5,7 @@ import HeroScene from '../scenes/HeroScene'
 import MagneticButton from './MagneticButton'
 import { useReducedMotion, useIsMobile } from '../hooks/usePrefs'
 import { SIGNUP_URL } from '../config'
+import { track, withRef } from '../analytics'
 import './Hero.css'
 
 function useEtClock() {
@@ -96,7 +97,7 @@ export default function Hero() {
         </p>
 
         <div className="hero-fade hero-cta">
-          <MagneticButton as="a" href={SIGNUP_URL}>Sign up</MagneticButton>
+          <MagneticButton as="a" href={withRef(SIGNUP_URL)} onClick={() => track('signup_cta_click', { source: 'hero' })}>Sign up</MagneticButton>
           <a className="hero-scroll-hint" href="#field" data-cursor="link">
             <span>See how Perch works</span>
             <span className="hero-scroll-line" />
