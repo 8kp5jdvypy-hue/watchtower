@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import './Views.css'
 
 function pct(value) {
   return value == null ? '—' : `${(value * 100).toFixed(1)}%`
@@ -18,10 +19,10 @@ export default function Performance() {
 
   return (
     <div className="view">
-      <h1>Performance</h1>
+      <span className="view-eyebrow"><span className="dot" /> PERFORMANCE</span>
+      <h1>Real, backfilled outcomes.</h1>
       <p className="view-subtitle">
-        Real, backfilled outcomes from the journal — not a prediction, a base rate. Nothing below is
-        reported until there's enough history behind it.
+        A base rate from the journal, not a prediction. Nothing here is reported until there's enough history behind it.
       </p>
 
       {tiers.length === 0 && <p className="empty-state">Not enough history yet to report tier performance.</p>}
@@ -39,7 +40,7 @@ export default function Performance() {
 
       {record && (
         <>
-          <h1 style={{ marginTop: '1.5rem' }}>HIGH-tier track record</h1>
+          <h1 style={{ marginTop: '1.75rem', fontSize: '1.1rem' }}>HIGH-tier track record</h1>
           <div className="stat-grid">
             <div className="stat-tile">
               <div className="stat-tile-label">Hit rate</div>

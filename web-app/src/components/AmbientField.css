@@ -1,0 +1,25 @@
+.ambient-field {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.ambient-sym {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-faint);
+  opacity: 0.14;
+  animation: af-flicker 7s ease-in-out infinite;
+}
+@keyframes af-flicker { 0%, 100% { opacity: 0.16; } 50% { opacity: 0.05; } }
+
+@media (max-width: 640px) {
+  /* Half the density on small screens -- odd-indexed symbols hidden --
+     keeps it a background texture instead of visual noise competing
+     with the (already tighter) mobile layout. */
+  .ambient-sym:nth-child(odd) { display: none; }
+}

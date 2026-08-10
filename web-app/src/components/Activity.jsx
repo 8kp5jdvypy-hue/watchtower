@@ -1,6 +1,8 @@
 import { useCallback } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import PerchMark from './PerchMark'
+import './Views.css'
 
 function pct(value) {
   return value == null ? '—' : `${(value * 100).toFixed(0)}%`
@@ -16,11 +18,12 @@ export default function Activity() {
   if (data && data.stats === null) {
     return (
       <div className="view">
-        <h1>My Activity</h1>
-        <p className="empty-state">
-          Link your Telegram account (DM the bot <code>/start</code>, then use the same email here) to see
-          your personal trade log and stats.
-        </p>
+        <span className="view-eyebrow"><span className="dot" /> MY ACTIVITY</span>
+        <div className="quiet-state">
+          <PerchMark size={30} state="idle" />
+          <h2>Not linked yet.</h2>
+          <p>DM the bot <code>/start</code> on Telegram, then use the same email here, to see your personal trade log and stats.</p>
+        </div>
       </div>
     )
   }
@@ -30,8 +33,9 @@ export default function Activity() {
 
   return (
     <div className="view">
-      <h1>My Activity</h1>
-      <p className="view-subtitle">Your own trade log — logged via /took and /closed in Telegram.</p>
+      <span className="view-eyebrow"><span className="dot" /> MY ACTIVITY</span>
+      <h1>Your own trade log.</h1>
+      <p className="view-subtitle">Logged via /took and /closed in Telegram.</p>
 
       <div className="stat-grid">
         <div className="stat-tile">
@@ -50,7 +54,11 @@ export default function Activity() {
       </div>
 
       {trades.length === 0 ? (
-        <p className="empty-state">No trades logged yet.</p>
+        <div className="quiet-state">
+          <PerchMark size={26} state="idle" />
+          <h2>No trades logged yet.</h2>
+          <p>Log a trade with /took in Telegram after you act on a signal, and it'll show up here.</p>
+        </div>
       ) : (
         trades.slice(0, 20).map((trade) => (
           <div className="card" key={trade.id}>

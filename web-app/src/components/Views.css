@@ -1,0 +1,55 @@
+.view {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  padding: 1.75rem 1.5rem 3rem;
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.view-eyebrow {
+  display: inline-flex; align-items: center; gap: 0.55em;
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--cyan); margin: 0 0 0.6rem;
+}
+.view-eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px 1px var(--cyan); }
+
+.view h1 {
+  font-family: var(--display); font-weight: 600; letter-spacing: -0.01em;
+  font-size: 1.5rem; margin: 0 0 0.3rem; color: var(--ink);
+}
+.view-subtitle { color: var(--ink-dim); font-size: 0.88rem; margin: 0 0 1.6rem; line-height: 1.5; }
+
+/* The "beautiful when nothing is happening" quiet state -- present the
+   mark, say plainly that watching-and-finding-nothing is the point, not
+   a blank "no data" box. */
+.quiet-state {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  gap: 0.9rem; padding: 3.5rem 1.5rem; color: var(--ink-dim);
+}
+.quiet-state .perch-mark { opacity: 0.55; }
+.quiet-state h2 {
+  font-family: var(--display); font-weight: 600; font-size: 1.05rem;
+  color: var(--ink); margin: 0; letter-spacing: -0.005em;
+}
+.quiet-state p { margin: 0; font-size: 0.86rem; max-width: 34ch; line-height: 1.55; }
+
+.empty-state { color: var(--ink-dim); font-size: 0.88rem; padding: 1.5rem 0; text-align: center; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+.stat-tile { background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 0.95rem 1.05rem; }
+.stat-tile-label { color: var(--ink-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.4rem; font-family: var(--mono); }
+.stat-tile-value { font-family: var(--display); font-size: 1.35rem; font-weight: 600; color: var(--ink); }
+.stat-tile .headline { color: var(--ink-faint); font-size: 0.78rem; margin-top: 0.2rem; }
+
+.card { background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1.1rem; margin-bottom: 0.7rem; }
+.card-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.symbol { font-family: var(--display); font-weight: 600; font-size: 0.98rem; color: var(--ink); }
+.headline { color: var(--ink-dim); font-size: 0.83rem; margin-top: 0.2rem; }
+.trend-up { color: var(--up); }
+.trend-down { color: var(--down); }
+
+@media (max-width: 640px) {
+  .view { padding: 1.5rem 1.1rem 2.5rem; }
+}

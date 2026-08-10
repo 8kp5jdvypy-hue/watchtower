@@ -1,0 +1,46 @@
+.login-shell {
+  position: relative;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse 70% 55% at 50% 30%, #0a0f16, var(--bg) 70%);
+  padding: 1.5rem;
+}
+.login-card {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2.75rem 2.25rem;
+  width: 100%;
+  max-width: 360px;
+  text-align: center;
+}
+.login-mark { margin: 0 auto 1.1rem; }
+.login-card h1 {
+  margin: 0 0 0.4rem;
+  font-family: var(--display); font-weight: 600; letter-spacing: -0.01em;
+  font-size: 1.5rem; color: var(--ink);
+}
+.login-card p { color: var(--ink-dim); font-size: 0.9rem; margin: 0 0 1.75rem; }
+
+.login-form { display: flex; flex-direction: column; gap: 0.75rem; }
+.login-form input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.75rem 0.95rem; color: var(--ink); font-size: 0.95rem;
+  transition: border-color 0.2s ease;
+}
+.login-form input:focus { outline: none; border-color: var(--cyan); }
+.login-form button {
+  background: var(--cyan); color: var(--bg); border: none; border-radius: 6px;
+  padding: 0.75rem; font-weight: 600; cursor: pointer; font-size: 0.95rem;
+  font-family: var(--display); letter-spacing: 0.01em;
+  transition: opacity 0.2s ease;
+}
+.login-form button:hover { opacity: 0.9; }
+.login-form button:disabled { opacity: 0.55; cursor: default; }
+
+.login-error { color: var(--down); font-size: 0.85rem; }
+.login-success { color: var(--cyan); font-size: 0.9rem; line-height: 1.5; }

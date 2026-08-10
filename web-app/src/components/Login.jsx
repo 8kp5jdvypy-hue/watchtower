@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { api } from '../api'
+import PerchMark from './PerchMark'
+import AmbientField from './AmbientField'
+import './Login.css'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -18,7 +21,9 @@ export default function Login() {
 
   return (
     <div className="login-shell">
+      <AmbientField />
       <div className="login-card">
+        <PerchMark size={30} className="login-mark" />
         <h1>Perch</h1>
         <p>The market moves. Perch notices.</p>
         {status === 'sent' ? (
