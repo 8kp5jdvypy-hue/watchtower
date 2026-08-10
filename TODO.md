@@ -26,19 +26,16 @@ Mac (2026-08-10):
 
 ## Left before the dashboard is fully live
 
-- [ ] **Create a Resend account** and verify perchmarkets.com (or a
-  subdomain of it, e.g. `mail.perchmarkets.com`) for sending — this adds
-  DNS records in Cloudflare, where the domain is already managed. Then
-  set `RESEND_API_KEY` / `RESEND_FROM_EMAIL` in `.env` **on the server**
-  (`/opt/perch/.env`) and run `docker compose up -d` there to pick it
-  up. See `docs/DEPLOYMENT.md` → Secrets. Until this is done, magic-link
-  sign-in works (the link just isn't emailed to anyone yet).
+- [x] **Deploy `web-app/`** to its own Cloudflare Workers project
+  (`perch-dashboard`) — live at `app.perchmarkets.com` (2026-08-10).
 
-- [ ] **Deploy `web-app/`** to a new Cloudflare Workers/Pages project
-  (`perch-dashboard`, separate from the marketing site's `watchtower`
-  project) at `app.perchmarkets.com`, with
-  `VITE_API_URL=https://api.perchmarkets.com` set as a build-time env
-  var. See `web-app/README.md`.
+- [ ] **Finish Resend domain verification**, then set `RESEND_API_KEY` /
+  `RESEND_FROM_EMAIL=login@perchmarkets.com` in `.env` **on the server**
+  (`/opt/perch/.env`) and run `docker compose up -d` there to pick it
+  up. DNS records are already added and resolving correctly — just
+  waiting on Resend's own dashboard to show verified. See
+  `docs/DEPLOYMENT.md` → Secrets. Until this is done, magic-link sign-in
+  works (the link just isn't emailed to anyone yet).
 
 ## Before the social-media launch
 
