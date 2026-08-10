@@ -50,7 +50,15 @@ DEFAULT_BACKOFF_BASE_SECONDS = 1.0
 DEFAULT_BACKOFF_CAP_SECONDS = 60.0
 DEFAULT_IDLE_SLEEP_SECONDS = 1.0
 
-HEARTBEAT_STALE_SECONDS = 5 * 60
+# runner.py writes a heartbeat once per bar (BAR_MINUTES=5, i.e. every
+# 300s) — a stale threshold equal to that cadence has zero margin, so a
+# single normal-length processing iteration pushes the gap just past the
+# threshold and pages on an otherwise healthy system. Confirmed live: a
+# 2026-08-10 validation run paged 12 times in 68 minutes with 0 real
+# incidents. 900s (matches the "> 15m" staleness convention already used
+# by scripts/status.sh and docker-compose.yml's healthcheck) gives 3x
+# headroom over the runner's normal cadence.
+HEARTBEAT_STALE_SECONDS = 15 * 60
 HEARTBEAT_CHECK_INTERVAL_SECONDS = 30
 PAGE_REPEAT_INTERVAL_SECONDS = 15 * 60
 
