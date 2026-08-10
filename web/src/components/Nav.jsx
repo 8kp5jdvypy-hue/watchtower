@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import PerchMark from './PerchMark'
+import { SIGNUP_URL, LOGIN_URL } from '../config'
 import './Nav.css'
 import './PerchMark.css'
 
@@ -7,7 +8,7 @@ const LINKS = [
   { href: '#field', label: 'What it watches' },
   { href: '#demo', label: 'Interface' },
   { href: '#coverage', label: 'Markets' },
-  { href: '#waitlist', label: 'Access' },
+  { href: '#value', label: 'Why Perch' },
 ]
 
 export default function Nav() {
@@ -70,7 +71,8 @@ export default function Nav() {
           </a>
           <div className="nav-links">
             <a href="#demo" data-cursor="link">Interface</a>
-            <a href="#waitlist" className="nav-cta" data-cursor="cta">Request access</a>
+            <a href={LOGIN_URL} data-cursor="link">Log in</a>
+            <a href={SIGNUP_URL} className="nav-cta" data-cursor="cta">Sign up</a>
           </div>
           <button
             className={`nav-burger${menuOpen ? ' is-open' : ''}`}
@@ -97,9 +99,17 @@ export default function Nav() {
               {l.label}
             </a>
           ))}
+          <a
+            href={LOGIN_URL}
+            data-cursor="link"
+            style={{ transitionDelay: `${LINKS.length * 0.05}s` }}
+            tabIndex={menuOpen ? 0 : -1}
+          >
+            Log in
+          </a>
         </div>
-        <a href="#waitlist" className="nav-mobile-cta" onClick={() => setMenuOpen(false)} tabIndex={menuOpen ? 0 : -1}>
-          Request access
+        <a href={SIGNUP_URL} className="nav-mobile-cta" onClick={() => setMenuOpen(false)} tabIndex={menuOpen ? 0 : -1}>
+          Sign up
         </a>
       </div>
     </>

@@ -1,0 +1,54 @@
+.value {
+  position: relative;
+  padding: clamp(6rem, 14vw, 10rem) 0;
+  background: var(--bg);
+  text-align: center;
+  overflow: hidden;
+}
+.value-inner { max-width: 720px; margin: 0 auto; }
+
+.value-watch-label {
+  font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--ink-faint); margin: 2.4rem 0 1.3rem;
+}
+.value-watch-list {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem 0.7rem;
+}
+.value-watch-list li {
+  font-family: var(--mono); font-size: 0.86rem; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 0.5em 1em;
+}
+/* Each item a little fainter than the last -- the list doesn't have a
+   comfortable stopping point, and the fade says that without more copy. */
+.value-watch-list li:nth-child(1) { opacity: 1; }
+.value-watch-list li:nth-child(2) { opacity: 0.92; }
+.value-watch-list li:nth-child(3) { opacity: 0.84; }
+.value-watch-list li:nth-child(4) { opacity: 0.76; }
+.value-watch-list li:nth-child(5) { opacity: 0.68; }
+.value-watch-list li:nth-child(6) { opacity: 0.6; }
+.value-watch-list li:nth-child(7) { opacity: 0.52; }
+.value-watch-etc {
+  border: none !important; color: var(--ink-faint) !important; font-style: italic;
+  opacity: 0.44 !important; padding: 0.5em 0.2em !important;
+}
+
+.value-or {
+  font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.15em;
+  color: var(--ink-faint); margin: 2.2rem 0;
+}
+
+.value-headline {
+  font-family: var(--display); font-weight: 600; letter-spacing: -0.02em;
+  font-size: var(--step-4); line-height: 1.05; margin: 0 0 2rem; color: var(--ink);
+  text-shadow: 0 0 60px rgba(52,226,255,0.22);
+}
+
+.value-lines p {
+  font-family: var(--display); font-weight: 500; font-size: var(--step-0);
+  color: var(--ink-dim); margin: 0.5rem 0;
+}
+
+@media (max-width: 640px) {
+  .value-watch-list li { font-size: 0.78rem; padding: 0.45em 0.85em; }
+}

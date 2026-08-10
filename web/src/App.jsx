@@ -11,7 +11,8 @@ import Manifesto from './components/Manifesto'
 import AlertReveal from './components/AlertReveal'
 import MarketCoverage from './components/MarketCoverage'
 import SignalGlyph from './components/SignalGlyph'
-import Waitlist from './components/Waitlist'
+import ProductValue from './components/ProductValue'
+import Pricing from './components/Pricing'
 import FinalCta from './components/FinalCta'
 import Footer from './components/Footer'
 import { useSmoothScroll } from './hooks/useSmoothScroll'
@@ -62,7 +63,8 @@ export default function App() {
         <AlertReveal />
         <MarketCoverage />
         <div className="section-divider"><SignalGlyph /></div>
-        <Waitlist />
+        <ProductValue />
+        <Pricing />
         <FinalCta />
       </main>
       <Footer />

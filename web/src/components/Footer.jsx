@@ -1,5 +1,6 @@
 import PerchMark from './PerchMark'
 import SignalGlyph from './SignalGlyph'
+import { SIGNUP_URL, LOGIN_URL } from '../config'
 import './Footer.css'
 import './PerchMark.css'
 
@@ -19,7 +20,8 @@ export default function Footer() {
           <a href="#field" data-cursor="link">What it watches</a>
           <a href="#coverage" data-cursor="link">Coverage</a>
           <a href="#demo" data-cursor="link">The interface</a>
-          <a href="#waitlist" data-cursor="link">Waitlist</a>
+          <a href={LOGIN_URL} data-cursor="link">Log in</a>
+          <a href={SIGNUP_URL} data-cursor="link">Sign up</a>
         </nav>
       </div>
       <div className="wrap ft-base">

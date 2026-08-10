@@ -1,5 +1,6 @@
 import PerchMark from './PerchMark'
 import MagneticButton from './MagneticButton'
+import { SIGNUP_URL } from '../config'
 import './FinalCta.css'
 import './PerchMark.css'
 
@@ -12,8 +13,8 @@ export default function FinalCta() {
         <h2>
           BE THERE<br />WHEN IT MOVES.
         </h2>
-        <p>Request early access to Perch.</p>
-        <MagneticButton as="a" href="#waitlist">Request access</MagneticButton>
+        <p>Create your Perch account — no card required.</p>
+        <MagneticButton as="a" href={SIGNUP_URL}>Sign up</MagneticButton>
       </div>
     </section>
   )
