@@ -134,6 +134,50 @@ def test_run_live_idles_cleanly_on_a_non_trading_day_instead_of_crashing(monkeyp
     assert sleep_calls == [runner_mod.OFF_SESSION_IDLE_SECONDS]
 
 
+def test_run_live_does_not_resend_the_close_report_on_a_restart_after_close(monkeypatch, tmp_path):
+    """Regression test for a real live incident (2026-08-10): Docker's
+    `restart: unless-stopped` restarts run_live() on ANY exit, including
+    the clean one at the end of a normal trading day. Without a
+    same-session guard on the close side (the open side already has one
+    — see maybe_send_session_open_messages' docstring), every restart
+    landing after today's close fell straight through the while loop's
+    first `loop_start >= close_ts` check and resent the full close report
+    (log summary + heartbeat) again — a fast, unthrottled restart loop
+    that spammed Telegram once per restart for hours."""
+    trading_day = date(2026, 7, 23)
+    open_ts, close_ts = runner_mod.session_bounds(trading_day)
+    after_close = close_ts + timedelta(minutes=5)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return after_close
+
+    monkeypatch.setattr(runner_mod, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(runner_mod, "SESSION_CLOSE_STATE_FILE", tmp_path / "session_close_state.json")
+    monkeypatch.setattr(runner_mod, "SESSION_OPEN_STATE_FILE", tmp_path / "session_open_state.json")
+    monkeypatch.setattr(runner_mod, "HALT_FILE", tmp_path / "HALT")
+    monkeypatch.setattr(runner_mod, "HEARTBEAT_FILE", tmp_path / "heartbeat.json")
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: None)
+
+    sent = []
+
+    class _SpyAlerter:
+        def send(self, text, priority=None, alert_id=None):
+            sent.append(text)
+
+    db_path = tmp_path / "journal.db"
+
+    first = runner_mod.run_live(_SpyAlerter(), db_path=db_path)
+    assert first.session_date == trading_day
+    assert len(sent) > 0  # the real close report, sent exactly once
+
+    sent.clear()
+    second = runner_mod.run_live(_SpyAlerter(), db_path=db_path)
+    assert second.session_date == trading_day
+    assert sent == []  # the restart must NOT resend it
+
+
 def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
     start = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
     stats = HeartbeatStats(start_time=start, session_date=date(2026, 7, 23))

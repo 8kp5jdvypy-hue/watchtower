@@ -915,6 +915,23 @@ def _mark_session_open_sent(path: Path, session_date) -> None:
     path.write_text(json.dumps({"session_date": session_date.isoformat()}))
 
 
+SESSION_CLOSE_STATE_FILE = REPO_ROOT / "data" / "session_close_state.json"
+
+
+def _load_session_close_state(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())["session_date"]
+    except (json.JSONDecodeError, KeyError, OSError):
+        return None
+
+
+def _mark_session_close_sent(path: Path, session_date) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_date": session_date.isoformat()}))
+
+
 def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime, state_path: Path | None = None) -> None:
     """The morning briefing + pre-open card are once-per-session
     announcements, guarded the same way maybe_send_weekly_recap/
@@ -953,6 +970,24 @@ def run_live(
         time.sleep(OFF_SESSION_IDLE_SECONDS)
         return HeartbeatStats(start_time=now, session_date=session_date)
     open_ts, close_ts = session_bounds(session_date)
+
+    # Today is a trading day, but if we're already past its close AND
+    # we've already sent this session's close report, this call is a
+    # restart landing after today's market hours (Docker's `restart:
+    # unless-stopped` fires on ANY exit, including the clean one at the
+    # bottom of this function) — not a fresh session. Without this check
+    # every restart falls straight through to the while loop below, sees
+    # loop_start >= close_ts on its very first iteration, and re-runs the
+    # entire end-of-session send (log summary, heartbeat, re-pinning the
+    # status message) again — a fast, indefinite restart loop that spams
+    # Telegram once per restart until the next real trading session
+    # replaces session_date. See maybe_send_session_open_messages'
+    # docstring for the symmetric guard on the OPEN side of this same
+    # class of bug.
+    if now >= close_ts and _load_session_close_state(SESSION_CLOSE_STATE_FILE) == session_date.isoformat():
+        logger.info("already sent today's (%s) close report — idling %ds", session_date, OFF_SESSION_IDLE_SECONDS)
+        time.sleep(OFF_SESSION_IDLE_SECONDS)
+        return HeartbeatStats(start_time=now, session_date=session_date)
 
     # A halt has no in-process "resume" moment (see tradebot.incidents'
     # module docstring) — reaching a fresh run_live() call at all is
@@ -1111,6 +1146,7 @@ def run_live(
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,
     )
     alerter.send(heartbeat, priority=outbox.PRIORITY_LOG)
+    _mark_session_close_sent(SESSION_CLOSE_STATE_FILE, session_date)
     conn.close()
     return stats
 
