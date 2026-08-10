@@ -6,12 +6,14 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from tradebot.detectors import (
+    CONTEXT_DETECTORS,
     DETECTORS,
     Tier,
     build_anchors,
     gap,
     level_break,
     range_expansion,
+    relative_strength_break,
     round_number_break,
     rvol_spike,
     score_cluster,
@@ -221,6 +223,68 @@ def test_all_detectors_are_registered():
     assert kinds == {
         "level_break", "rvol_spike", "range_expansion", "vwap_break", "round_number_break", "gap",
     }
+
+
+def test_all_context_detectors_are_registered():
+    kinds = {d.__name__ for d in CONTEXT_DETECTORS}
+    assert kinds == {"relative_strength_break"}
+
+
+def _spy_bar(i: int, close: float) -> Bar:
+    ts = OPEN0 + timedelta(minutes=5 * i)
+    return Bar("SPY", ts, close, close + 1.0, close - 1.0, close, 10_000)
+
+
+def test_relative_strength_break_fires_when_symbol_diverges_from_a_flat_market():
+    anchors = _flat_anchors(prior_close=95.0)
+    bars = [_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)]  # stable ATR baseline near 100
+    spy_bars = [_spy_bar(i, 400.0) for i in range(16)]  # SPY dead flat throughout
+
+    for i in range(1, 16):
+        assert relative_strength_break(bars[: i + 1], anchors, {"SPY": spy_bars[: i + 1]}) is None
+
+    breakout = bars + [_bar(16, 130.0)]  # TEST up ~30%, SPY unchanged
+    spy_flat = spy_bars + [_spy_bar(16, 400.0)]
+    d = relative_strength_break(breakout, anchors, {"SPY": spy_flat})
+    assert d is not None
+    assert d.kind == "relative_strength_break"
+    assert d.context["market_proxy"] == "SPY"
+
+    # stays diverged on the same side — must not re-fire
+    still_diverged = breakout + [_bar(17, 131.0)]
+    spy_flat_2 = spy_flat + [_spy_bar(17, 400.0)]
+    assert relative_strength_break(still_diverged, anchors, {"SPY": spy_flat_2}) is None
+
+
+def test_relative_strength_break_does_not_fire_when_symbol_moves_in_lockstep_with_the_market():
+    anchors = _flat_anchors(prior_close=95.0)
+    bars = [_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)] + [_bar(16, 130.0)]  # +30%
+    spy_bars = [_spy_bar(i, 400.0) for i in range(16)] + [_spy_bar(16, 520.0)]  # SPY also +30%
+    assert relative_strength_break(bars, anchors, {"SPY": spy_bars}) is None
+
+
+def test_relative_strength_break_never_fires_on_the_proxy_symbol_itself():
+    spy_anchors = build_anchors(
+        "SPY", SESSION,
+        [Bar("SPY", OPEN0 - timedelta(days=1), 95.0, 96.0, 94.0, 95.0, 500_000)],
+        [_spy_bar(0, 100.0)], historical_session_bars=[],
+    )
+    bars = [_spy_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)] + [_spy_bar(16, 130.0)]
+    assert relative_strength_break(bars, spy_anchors, {"SPY": bars}) is None
+
+
+@pytest.mark.parametrize("market_bars", [None, {}, {"SPY": []}])
+def test_relative_strength_break_returns_none_never_raises_on_missing_market_data(market_bars):
+    anchors = _flat_anchors(prior_close=95.0)
+    bars = [_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)] + [_bar(16, 130.0)]
+    assert relative_strength_break(bars, anchors, market_bars) is None
+
+
+def test_relative_strength_break_returns_none_when_the_proxy_has_not_caught_up_yet():
+    anchors = _flat_anchors(prior_close=95.0)
+    bars = [_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)] + [_bar(16, 130.0)]
+    spy_bars = [_spy_bar(i, 400.0) for i in range(10)]  # shorter than bars — not aligned yet
+    assert relative_strength_break(bars, anchors, {"SPY": spy_bars}) is None
 
 
 def test_score_cluster_rewards_corroboration_but_caps_it_below_double_counting():

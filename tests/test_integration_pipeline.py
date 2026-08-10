@@ -105,7 +105,7 @@ def test_a_real_high_signal_flows_through_validate_render_queue_and_delivers():
 
     import tradebot.runner as runner_mod
     original_evaluate_bar = runner_mod.evaluate_bar
-    runner_mod.evaluate_bar = lambda symbol, bars, anch: evaluate_result
+    runner_mod.evaluate_bar = lambda symbol, bars, anch, market_bars=None: evaluate_result
     try:
         process_new_bar(
             journal_conn, budget, ConsoleAlerter(), "v1", "TSLA", SESSION_DATE, [bar], anchors,
@@ -175,7 +175,7 @@ def test_a_signal_that_fails_validation_never_reaches_the_queue():
 
     import tradebot.runner as runner_mod
     original_evaluate_bar = runner_mod.evaluate_bar
-    runner_mod.evaluate_bar = lambda symbol, bars, anch: evaluate_result
+    runner_mod.evaluate_bar = lambda symbol, bars, anch, market_bars=None: evaluate_result
     try:
         process_new_bar(
             journal_conn, budget, ConsoleAlerter(), "v1", "TSLA", SESSION_DATE, [bar], anchors,

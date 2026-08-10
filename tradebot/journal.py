@@ -59,7 +59,10 @@ CREATE TABLE IF NOT EXISTS detections (
     primary_kind TEXT,
     symbol_class TEXT,
     event_kind TEXT,
-    event_severity TEXT
+    event_severity TEXT,
+    suppress_category TEXT,
+    lifecycle_state TEXT,
+    related_detection_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -142,6 +145,21 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     _add_column_if_missing(conn, "detections", "symbol_class", "TEXT")
     _add_column_if_missing(conn, "detections", "event_kind", "TEXT")
     _add_column_if_missing(conn, "detections", "event_severity", "TEXT")
+    # Additive, parallel to the free-text suppress_reason above — never
+    # replaces it. tradebot.telegram_bot.handlers has an exact-string
+    # dependency on suppress_reason='cooldown_active', so existing values
+    # must never change shape. suppress_category is the structured,
+    # enumerable counterpart (see alerts.SuppressionCategory). NULL on
+    # every row written before this shipped, same as primary_kind/
+    # symbol_class on pre-existing rows — never back-filled.
+    _add_column_if_missing(conn, "detections", "suppress_category", "TEXT")
+    # "watch" (first cluster on a symbol in the dedup window) or
+    # "confirmed" (a later one, see tradebot.dedup). NULL pre-migration.
+    _add_column_if_missing(conn, "detections", "lifecycle_state", "TEXT")
+    # The anchor detections.id a "confirmed" row was deduped against.
+    # Loose reference, no SQLite FK constraint, same style as
+    # marks.detection_id / contract_selections.detection_id below.
+    _add_column_if_missing(conn, "detections", "related_detection_id", "TEXT")
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")

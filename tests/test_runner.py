@@ -20,7 +20,16 @@ from tradebot.journal import connect as journal_connect
 from tradebot.journal import write_cluster
 import tradebot.runner as runner_mod
 from tradebot.detectors import atr as compute_atr
-from tradebot.runner import HeartbeatStats, evaluate_bar, is_halted_bar, is_stale, process_new_bar, session_bounds
+from tradebot.runner import (
+    HeartbeatStats,
+    bar_gap_minutes,
+    evaluate_bar,
+    is_bar_gap,
+    is_halted_bar,
+    is_stale,
+    process_new_bar,
+    session_bounds,
+)
 
 
 def test_is_stale_true_past_the_threshold():
@@ -39,6 +48,49 @@ def test_is_halted_bar_detects_zero_volume():
     ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
     assert is_halted_bar(Bar("BE", ts, 10, 10, 10, 10, volume=0)) is True
     assert is_halted_bar(Bar("BE", ts, 10, 10.5, 9.5, 10.2, volume=100)) is False
+
+
+def test_bar_gap_minutes_none_with_fewer_than_two_bars():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    assert bar_gap_minutes([]) is None
+    assert bar_gap_minutes([Bar("TSLA", ts, 100, 100, 100, 100, volume=100)]) is None
+
+
+def test_bar_gap_minutes_measures_the_open_to_open_delta():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=15), 100, 100, 100, 100, volume=100),
+    ]
+    assert bar_gap_minutes(bars) == 15.0
+
+
+def test_is_bar_gap_false_on_the_expected_five_minute_cadence():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=5), 100, 100, 100, 100, volume=100),
+    ]
+    assert is_bar_gap(bars) is False
+
+
+def test_is_bar_gap_true_when_a_bar_was_silently_skipped():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=10), 100, 100, 100, 100, volume=100),  # a 5-min bar never arrived
+    ]
+    assert is_bar_gap(bars) is True
+
+
+def test_is_bar_gap_respects_tolerance_minutes():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=6), 100, 100, 100, 100, volume=100),  # 1 min of jitter
+    ]
+    assert is_bar_gap(bars, tolerance_minutes=0.0) is True
+    assert is_bar_gap(bars, tolerance_minutes=2.0) is False
 
 
 def test_session_bounds_regular_day():
@@ -118,7 +170,7 @@ def _high_tier_fixture():
 
 def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -137,7 +189,7 @@ def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(mon
 
 def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_text_on_a_high_send(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -164,7 +216,7 @@ def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_tex
 
 def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_the_alert(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -186,6 +238,38 @@ def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_t
     assert any("fan-out failed" in e for e in stats.errors)
     row = conn.execute("SELECT alerted FROM detections").fetchone()
     assert row[0] == 1  # the alert itself still went out despite the hook blowing up
+
+
+def test_process_new_bar_suppresses_on_a_bar_gap_without_journaling_or_evaluating(monkeypatch):
+    """Same precedent as the existing halted-bar (zero-volume) skip: no
+    Detection was ever produced, so nothing should be journaled — the
+    gap is visible only via stats.data_gaps and the data_health_suppression
+    metric, not a detections row."""
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=15), 100, 100, 100, 100, volume=100),
+    ]
+    anchors, _, _ = _high_tier_fixture()
+
+    called = []
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, b, a: called.append(1) or None)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bars[-1].ts)
+    stats = HeartbeatStats(start_time=bars[-1].ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bars[-1].ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), bars, anchors, quote_fn, chain_fn, stats)
+
+    assert called == []  # evaluate_bar never even ran
+    assert any("bar gap" in g for g in stats.data_gaps)
+    assert conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 0
 
 
 def test_evaluate_bar_cluster_atr14_matches_the_primary_detectors_own_atr():
@@ -238,7 +322,7 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", metrics_path)
 
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -256,11 +340,15 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
 
     assert any("alert suppressed by data guard" in r.message and "rule=crossed_quote" in r.message for r in caplog.records)
 
-    row = conn.execute("SELECT alerted, suppress_reason FROM detections").fetchone()
+    row = conn.execute("SELECT alerted, suppress_reason, suppress_category FROM detections").fetchone()
     assert row[0] == 0
     assert row[1].startswith("data_integrity_failed: crossed_quote")
+    assert row[2] == "data_integrity"
 
-    assert metrics_mod.read_all(metrics_path) == {"validator_rejection{rule=crossed_quote}": 1}
+    assert metrics_mod.read_all(metrics_path) == {
+        "validator_rejection{rule=crossed_quote}": 1,
+        "suppression{category=data_integrity}": 1,
+    }
 
 
 def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
@@ -271,7 +359,7 @@ def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}  # bullish -> calls
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -317,7 +405,7 @@ def test_process_new_bar_passes_the_real_entry_mid_to_the_subscriber_hook(monkey
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -356,7 +444,7 @@ def test_process_new_bar_blackouts_a_contract_when_a_real_earnings_event_falls_b
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     # earnings between today (2026-07-23) and the expiry the fixture below
@@ -400,13 +488,95 @@ def _flat_quote_fn(bar):
     return quote_fn
 
 
+def test_process_new_bar_suppresses_a_non_escalating_repeat_as_a_duplicate_without_burning_the_cap(monkeypatch):
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts, max_high_per_day=8)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    # Same score, 10 minutes later — well inside the default 30-minute
+    # dedup window, not a material escalation.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    result2 = {**result, "ts": result["ts"] + timedelta(minutes=10)}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
+        _flat_quote_fn(bar2), _no_op_chain_fn, stats,
+    )
+
+    rows = conn.execute(
+        "SELECT alerted, suppress_reason, suppress_category, lifecycle_state, related_detection_id "
+        "FROM detections ORDER BY ts_utc"
+    ).fetchall()
+    assert len(rows) == 2
+    first_id = conn.execute("SELECT id FROM detections ORDER BY ts_utc LIMIT 1").fetchone()[0]
+    assert rows[0][0] == 1 and rows[0][3] == "watch" and rows[0][4] is None
+    assert rows[1][0] == 0  # not alerted
+    assert rows[1][1] == f"duplicate_event:{first_id}"
+    assert rows[1][2] == "duplicate"
+    assert rows[1][3] == "confirmed"
+    assert rows[1][4] == first_id
+
+    # The duplicate must not have burned a daily-cap slot — budget still
+    # has all 8 real sends available (1 used by the first cluster).
+    assert len(budget._high_sent_today) == 1
+
+
+def test_process_new_bar_still_sends_a_material_escalation_within_the_dedup_window(monkeypatch):
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts, max_high_per_day=8)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    # Much higher score, a DIFFERENT detector kind (the realistic dedup
+    # case — a second, different signal on the same symbol shortly after
+    # the first), still inside the window — a real escalation. Using the
+    # same kind as the first cluster would also trip AlertBudget's own
+    # unrelated 45-minute per-(symbol,kind) cooldown, which would
+    # confound this test's one variable (dedup letting an escalation
+    # through) with a second, different suppression mechanism.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    escalated_detection = Detection("TSLA", "vwap_break", bar2.ts, 20.0, "a bigger break", {})
+    result2 = {
+        **result, "ts": result["ts"] + timedelta(minutes=10), "score": 20.0,
+        "kinds": "vwap_break", "primary_kind": "vwap_break", "primary_headline": "a bigger break",
+        "headlines": "a bigger break", "primary_detection": escalated_detection, "detections": [escalated_detection],
+    }
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
+        _flat_quote_fn(bar2), _no_op_chain_fn, stats,
+    )
+
+    rows = conn.execute("SELECT alerted, suppress_reason, lifecycle_state FROM detections ORDER BY ts_utc").fetchall()
+    assert len(rows) == 2
+    assert rows[1][0] == 1  # sent normally, not suppressed
+    assert rows[1][1] is None
+    assert rows[1][2] == "confirmed"  # still tagged confirmed for lifecycle visibility
+    assert len(budget._high_sent_today) == 2  # both real sends counted
+
+
 def test_process_new_bar_suppresses_high_alert_inside_a_suppress_severity_event_window(monkeypatch):
     """News as suppression, not an alert source: a HIGH cluster whose bar
     close falls inside a 'suppress' severity event window must never be
     sent, and the journal must say why — see tradebot.events module
     docstring."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -421,11 +591,12 @@ def test_process_new_bar_suppresses_high_alert_inside_a_suppress_severity_event_
         _flat_quote_fn(bar), _no_op_chain_fn, stats,
     )
 
-    row = conn.execute("SELECT alerted, suppress_reason, tier, news_driven FROM detections").fetchone()
+    row = conn.execute("SELECT alerted, suppress_reason, suppress_category, tier, news_driven FROM detections").fetchone()
     assert row[0] == 0  # never alerted
     assert row[1] == "news_blackout:8-K:material event"
-    assert row[2] == "high"  # the journal's ground-truth tier is score-based and unaffected
-    assert row[3] == 1
+    assert row[2] == "news_blackout"  # structured counterpart, parallel to the free-text reason above
+    assert row[3] == "high"  # the journal's ground-truth tier is score-based and unaffected
+    assert row[4] == 1
     assert stats.suppression_counts["news_blackout"] == 1
 
 
@@ -433,7 +604,7 @@ def test_process_new_bar_downgrades_high_alert_inside_a_downgrade_severity_event
     """A 'downgrade' severity window still gets a look — just batched into
     the medium digest instead of pushed immediately as HIGH."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -471,7 +642,7 @@ def test_process_new_bar_event_window_suppression_does_not_burn_cap_or_cooldown(
     the per-(symbol, kind) cooldown for an alert nobody ever saw, blocking a
     later, legitimate alert of the same kind."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -488,12 +659,19 @@ def test_process_new_bar_event_window_suppression_does_not_burn_cap_or_cooldown(
 
     # A second bar, same symbol/kind, at the SAME budget "now" — if the
     # first (suppressed) alert had wrongly started the cooldown, this one
-    # would see zero elapsed time and get suppressed too. Its bar close is
-    # past the event window's end (which runs to result["ts"] + 5min), so
-    # only the cooldown could stop it.
-    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=10), 100.2, 100.7, 100.0, 100.4, volume=10_000)
-    result2 = {**result, "ts": result["ts"] + timedelta(minutes=10)}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result2)
+    # would see zero elapsed time and get suppressed too. Its RESULT ts
+    # (below, independent of bar2's own ts since evaluate_bar is mocked)
+    # is past both the event window's end (result["ts"] + 5min) AND the
+    # dedup module's default DEDUP_WINDOW_MINUTES (30) — a cluster inside
+    # the dedup window would get suppressed as a duplicate of the first
+    # one too, which is real, correct, *new* behavior (tradebot.dedup)
+    # but would confound this test's one variable: proving cooldown
+    # specifically was never wrongly started by a suppressed alert. bar2
+    # itself stays on the normal 5-minute cadence — a wider gap there
+    # would trip the unrelated bar-gap data-health check.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    result2 = {**result, "ts": result["ts"] + timedelta(minutes=35)}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
 
     process_new_bar(
         conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
@@ -516,7 +694,7 @@ def test_process_new_bar_tags_but_does_not_reroute_non_high_tiers_inside_an_even
     docstring."""
     anchors, bar, result = _high_tier_fixture()
     medium_result = {**result, "score": 3.0}  # below HIGH threshold
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: medium_result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: medium_result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -542,7 +720,7 @@ def test_process_new_bar_journals_the_primary_kind_and_symbol_class(monkeypatch)
     primary_kind and symbol_class must be real, queryable columns so any
     stat can be recomputed later without guessing."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -561,7 +739,7 @@ def test_process_new_bar_records_which_event_kind_and_severity_applied(monkeypat
     """set_news_driven's kind/severity snapshot (see journal.py) must
     reflect the ACTUAL window that fired, not just a bare boolean."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(

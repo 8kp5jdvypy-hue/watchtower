@@ -73,6 +73,37 @@ def test_write_cluster_stores_primary_kind_and_freezes_symbol_class_at_write_tim
     assert primary_kind == "rvol_spike"  # the primary, not the full multi-kind list
 
 
+def test_suppress_category_lifecycle_state_and_related_detection_id_round_trip(tmp_path):
+    """These three columns are written via UPDATE after write_cluster (same
+    pattern as suppress_reason itself) — this just confirms the columns
+    exist and round-trip, and that a fresh row leaves them NULL until
+    something updates them, same discipline as primary_kind/symbol_class
+    on rows written before those columns existed."""
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="level_break", headlines="h", score=4.0, close=101.0, atr14=1.5,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT suppress_category, lifecycle_state, related_detection_id FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (None, None, None)
+
+    conn.execute(
+        "UPDATE detections SET suppress_category=?, lifecycle_state=?, related_detection_id=? WHERE id=?",
+        ("duplicate", "confirmed", "some-other-id", detection_id),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT suppress_category, lifecycle_state, related_detection_id FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == ("duplicate", "confirmed", "some-other-id")
+
+
 def test_sub_threshold_detections_are_still_written_as_log_tier(tmp_path):
     conn = connect(tmp_path / "journal.db")
     write_cluster(

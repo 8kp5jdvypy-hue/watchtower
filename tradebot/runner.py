@@ -38,10 +38,13 @@ from tradebot.alerts import (
     Cluster,
     ConsoleAlerter,
     Decision,
+    SuppressionCategory,
     TelegramAlerter,
+    suppression_category_for_decision,
 )
-from tradebot.config import WATCHLIST
+from tradebot.config import MARKET_PROXY_SYMBOLS, WATCHLIST
 from tradebot.costs import select_contract
+from tradebot import dedup
 from tradebot.events import active_event_window, events_for_date, has_earnings_before
 from tradebot.rendering import templates
 from tradebot.guard import validate_alert_data
@@ -50,6 +53,7 @@ from tradebot.telegram_bot import heartbeat as bot_liveness
 from tradebot.telegram_bot import outbox
 from tradebot.telegram_bot.performance import track_record, weekly_recap
 from tradebot.detectors import (
+    CONTEXT_DETECTORS,
     DETECTORS,
     Bar,
     DailyAnchors,
@@ -120,6 +124,26 @@ def is_halted_bar(bar: Bar) -> bool:
     return bar.volume == 0
 
 
+def bar_gap_minutes(bars: list[Bar], bar_minutes: int = BAR_MINUTES) -> float | None:
+    """Minutes between the two most recent bars' OPEN timestamps, or None
+    with fewer than 2 bars. A vendor that silently drops a bar (unlike
+    is_halted_bar's zero-volume case, which is an explicit bar the vendor
+    DID return) shows up here as a gap wider than bar_minutes."""
+    if len(bars) < 2:
+        return None
+    return (bars[-1].ts - bars[-2].ts).total_seconds() / 60
+
+
+def is_bar_gap(bars: list[Bar], bar_minutes: int = BAR_MINUTES, tolerance_minutes: float = 0.0) -> bool:
+    """True when the most recent bar arrived later than expected — a
+    silently-missing mid-session bar, not caught by is_halted_bar since
+    no zero-volume bar was ever returned for the gap to begin with.
+    tolerance_minutes defaults to 0 (strict); loosen only after a real
+    replay run shows benign vendor timestamp jitter, not by guessing."""
+    gap = bar_gap_minutes(bars, bar_minutes)
+    return gap is not None and gap > bar_minutes + tolerance_minutes
+
+
 def session_bounds(session_date: date, calendar=CALENDAR) -> tuple[datetime, datetime]:
     """(open, close) in UTC for session_date, honoring early closes (e.g.
     13:00 ET) — never hardcode 09:30-16:00 ET."""
@@ -160,8 +184,12 @@ class HeartbeatStats:
             self.suppression_counts[decision.value] += 1
 
 
-def evaluate_bar(symbol: str, bars: list[Bar], anchors: DailyAnchors) -> dict | None:
-    detections = [d for d in (detector(bars, anchors) for detector in DETECTORS) if d is not None]
+def evaluate_bar(
+    symbol: str, bars: list[Bar], anchors: DailyAnchors, market_bars: dict[str, list[Bar]] | None = None
+) -> dict | None:
+    core = [d for d in (detector(bars, anchors) for detector in DETECTORS) if d is not None]
+    context = [d for d in (detector(bars, anchors, market_bars) for detector in CONTEXT_DETECTORS) if d is not None]
+    detections = core + context
     if not detections:
         return None
     last = bars[-1]
@@ -238,7 +266,7 @@ class TelegramHaltChecker:
 
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
-    subscriber_hook=None, now=None,
+    subscriber_hook=None, now=None, market_bars=None,
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
     called right after a HIGH alert is sent to the ops channel/console —
@@ -255,13 +283,23 @@ def process_new_bar(
     check. Only run_live() passes this — a replayed historical quote is
     definitionally hours/days "stale" relative to real now, so replay
     passes None and the guard skips that one check, the same way
-    STALENESS_SECONDS/is_stale() is already a live-only concept here."""
+    STALENESS_SECONDS/is_stale() is already a live-only concept here.
+
+    market_bars: {proxy_symbol: bars}, for detectors.relative_strength_break
+    via evaluate_bar's CONTEXT_DETECTORS pass. None (the default) means
+    that detector simply never fires — same fail-conservative behavior
+    as any other missing-data case, not an error."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
+        metrics.increment("data_health_suppression", reason="halted")
+        return
+    if is_bar_gap(bars):
+        stats.data_gaps.append(f"{symbol}: bar gap ({bar_gap_minutes(bars):.0f}min) at {last.ts.isoformat()}")
+        metrics.increment("data_health_suppression", reason="bar_gap")
         return
 
-    result = evaluate_bar(symbol, bars, anchors)
+    result = evaluate_bar(symbol, bars, anchors, market_bars)
     if result is None:
         return
 
@@ -293,6 +331,24 @@ def process_new_bar(
     news_driven = event_window is not None
     if news_driven:
         set_news_driven(conn, detection_id, True, kind=event_window.kind, severity=event_window.severity)
+
+    # Cross-time dedup — see tradebot.dedup module docstring. A crash in
+    # this lookup itself is treated as WATCH (not a duplicate), a
+    # deliberate exception to "always suppress on failure": a dedup-check
+    # bug says nothing about whether the underlying SIGNAL is
+    # trustworthy (unlike a stale quote or missing bar), so the safer
+    # failure mode is to let it through the normal budget pipeline rather
+    # than silently zero out all HIGH alerting on a transient bug here.
+    try:
+        dedup_result = dedup.evaluate_dedup(conn, symbol, result["ts"], result["score"])
+    except Exception:
+        logger.error("dedup check failed: symbol=%s detection_id=%s", symbol, detection_id, exc_info=True)
+        metrics.increment("dedup_check_failed")
+        dedup_result = dedup.DedupResult(dedup.LifecycleState.WATCH, None, False)
+    conn.execute(
+        "UPDATE detections SET lifecycle_state=?, related_detection_id=? WHERE id=?",
+        (dedup_result.lifecycle_state.value, dedup_result.related_detection_id, detection_id),
+    )
 
     # HIGH-only blackout action — suppress or downgrade, stating why.
     # MEDIUM/LOG are already batched, so there's no immediate-publish race
@@ -332,6 +388,17 @@ def process_new_bar(
             symbol, event_window.kind, event_window.detail, event_window.source,
         )
         metrics.increment("event_window_suppression", kind=event_window.kind)
+    elif (
+        raw_tier_is_high
+        and dedup_result.lifecycle_state == dedup.LifecycleState.CONFIRMED
+        and not dedup_result.is_escalation
+    ):
+        decision = Decision.SUPPRESS_DUPLICATE
+        logger.info(
+            "HIGH alert suppressed as duplicate: symbol=%s related_id=%s",
+            symbol, dedup_result.related_detection_id,
+        )
+        metrics.increment("duplicate_suppression", symbol=symbol)
     else:
         decision = budget.evaluate(cluster)
     stats.record_cluster(tier, decision)
@@ -410,10 +477,11 @@ def process_new_bar(
                 rule_name, symbol, detection_id, guard_reason, cluster, anchors, quote,
             )
             metrics.increment("validator_rejection", rule=rule_name)
+            metrics.increment("suppression", category=SuppressionCategory.DATA_INTEGRITY.value)
             stats.errors.append(f"{symbol}: alert suppressed by data guard — {guard_reason}")
             conn.execute(
-                "UPDATE detections SET suppress_reason=? WHERE id=?",
-                (f"data_integrity_failed: {guard_reason}", detection_id),
+                "UPDATE detections SET suppress_reason=?, suppress_category=? WHERE id=?",
+                (f"data_integrity_failed: {guard_reason}", SuppressionCategory.DATA_INTEGRITY.value, detection_id),
             )
         if decision == Decision.CAP_REACHED_NOTICE:
             alerter.send(
@@ -425,14 +493,26 @@ def process_new_bar(
                 priority=outbox.PRIORITY_HIGH,
             )
             if guard_reason is None:
+                category = suppression_category_for_decision(decision)
+                metrics.increment("suppression", category=category.value if category else "unknown")
                 conn.execute(
-                    "UPDATE detections SET suppress_reason=? WHERE id=?", (decision.value, detection_id)
+                    "UPDATE detections SET suppress_reason=?, suppress_category=? WHERE id=?",
+                    (decision.value, category.value if category else None, detection_id),
                 )
-    elif decision in (Decision.SUPPRESS_CAP, Decision.SUPPRESS_COOLDOWN, Decision.SUPPRESS_NEWS_BLACKOUT):
+    elif decision in (
+        Decision.SUPPRESS_CAP, Decision.SUPPRESS_COOLDOWN, Decision.SUPPRESS_NEWS_BLACKOUT, Decision.SUPPRESS_DUPLICATE,
+    ):
         reason = decision.value
         if decision == Decision.SUPPRESS_NEWS_BLACKOUT:
             reason = f"{decision.value}:{event_window.kind}:{event_window.detail or event_window.source}"
-        conn.execute("UPDATE detections SET suppress_reason=? WHERE id=?", (reason, detection_id))
+        elif decision == Decision.SUPPRESS_DUPLICATE:
+            reason = f"{decision.value}:{dedup_result.related_detection_id}"
+        category = suppression_category_for_decision(decision)
+        metrics.increment("suppression", category=category.value if category else "unknown")
+        conn.execute(
+            "UPDATE detections SET suppress_reason=?, suppress_category=? WHERE id=?",
+            (reason, category.value if category else None, detection_id),
+        )
     conn.commit()
 
 
@@ -663,10 +743,16 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
 # --------------------------------------------------------------------------
 
 
-def run_replay(session_date: date, alerter) -> HeartbeatStats:
+def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
+    """db_path: override the journal DB path (default DEFAULT_DB_PATH).
+    Used by scripts/compare_replay.py to run two versions of the
+    detection logic against the same historical session into two
+    separate DB files, without touching the real journal — see that
+    script's module docstring for why this is a separate-file design
+    rather than an in-place A/B split."""
     open_ts, _close_ts = session_bounds(session_date)
 
-    conn = connect()
+    conn = connect(db_path) if db_path is not None else connect()
     version = code_version()
     clock = {"t": open_ts}
     budget = AlertBudget(now=lambda: clock["t"])
@@ -726,9 +812,13 @@ def run_replay(session_date: date, alerter) -> HeartbeatStats:
                         historical_session_bars=history_by_symbol[symbol],
                     )
 
+                market_bars = {
+                    proxy: list(md[proxy].session_bars(proxy, session_date))
+                    for proxy in MARKET_PROXY_SYMBOLS if proxy in md
+                }
                 process_new_bar(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
-                    anchors[symbol], quote_fn, chain_fn, stats,
+                    anchors[symbol], quote_fn, chain_fn, stats, market_bars=market_bars,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, clock["t"])
             except Exception:
@@ -847,7 +937,9 @@ def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime,
     _mark_session_open_sent(state_path, session_date)
 
 
-def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False) -> HeartbeatStats:
+def run_live(
+    alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False, db_path=None,
+) -> HeartbeatStats:
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
     if not CALENDAR.is_session(session_date):
@@ -870,7 +962,7 @@ def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_
 
     incidents.close_incident("halt", now)
 
-    conn = connect()
+    conn = connect(db_path) if db_path is not None else connect()
     version = code_version()
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
     stats = HeartbeatStats(start_time=now, session_date=session_date)
@@ -945,6 +1037,7 @@ def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_
                 if not rth_bars:
                     continue
                 if is_stale(bar_close_ts(rth_bars[-1]), loop_start):
+                    metrics.increment("data_health_suppression", reason="stale")
                     if not stale_notified:
                         alerter.send(
                             templates.render_system_notice(
@@ -979,11 +1072,15 @@ def run_live(alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_
                         historical_session_bars=history_by_symbol.get(symbol, []),
                     )
 
+                market_bars = {
+                    proxy: list(md[proxy].session_bars(proxy, session_date))
+                    for proxy in MARKET_PROXY_SYMBOLS if proxy in md
+                }
                 process_new_bar(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
                     lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
-                    stats, subscriber_hook, now=loop_start,
+                    stats, subscriber_hook, now=loop_start, market_bars=market_bars,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
             except Exception:
@@ -1035,12 +1132,17 @@ def main() -> None:
         "(tradebot.universe) every 30 minutes, promoting up to 25 extra symbols into live Stage 2 "
         "evaluation on top of the fixed WATCHLIST. Off by default.",
     )
+    parser.add_argument(
+        "--db-path", type=str, default=None,
+        help="override the journal DB path (default data/journal.db) — for running two versions of the "
+        "detection logic against the same --replay-date into separate files, see scripts/compare_replay.py",
+    )
     args = parser.parse_args()
 
     alerter = TelegramAlerter() if args.live else ConsoleAlerter()
 
     if args.replay_date:
-        run_replay(date.fromisoformat(args.replay_date), alerter)
+        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path)
     else:
         subscriber_hook = None
         medium_fanout_fn = None
@@ -1057,7 +1159,7 @@ def main() -> None:
             session_date_fn = lambda now: now.astimezone(ET).date()
             subscriber_hook = make_subscriber_hook(users_conn, session_date_fn, WATCHLIST)
             medium_fanout_fn = make_medium_fanout_fn(users_conn, session_date_fn, WATCHLIST)
-        run_live(alerter, subscriber_hook, medium_fanout_fn, enable_broad_scan=args.broad_scan)
+        run_live(alerter, subscriber_hook, medium_fanout_fn, enable_broad_scan=args.broad_scan, db_path=args.db_path)
 
 
 if __name__ == "__main__":
