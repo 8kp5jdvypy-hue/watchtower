@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 
-from tradebot.email_sender import DevEmailSender, ResendEmailSender, build_email_sender
+from tradebot.accounts import MAGIC_LINK_TTL_MINUTES
+from tradebot.email_sender import DevEmailSender, ResendEmailSender, _render_magic_link_email, build_email_sender
 
 
 def test_dev_email_sender_never_raises_and_makes_no_network_call():
@@ -45,4 +46,26 @@ def test_resend_email_sender_posts_expected_payload(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer re_test_key"
     assert captured["json"]["from"] == "login@perchmarkets.com"
     assert captured["json"]["to"] == ["alice@example.com"]
+    assert captured["json"]["subject"] == "Your Perch sign-in link"
     assert "https://app.perchmarkets.com/verify?token=abc" in captured["json"]["html"]
+    assert "https://app.perchmarkets.com/verify?token=abc" in captured["json"]["text"]
+
+
+def test_render_magic_link_email_uses_real_link_and_ttl_not_a_hardcoded_value():
+    link = "https://api.perchmarkets.com/auth/magic-link/verify?token=xyz"
+    html, text = _render_magic_link_email(link)
+
+    # The link must appear verbatim: the button href, plus the fallback
+    # paragraph's href and its visible text -- never rewritten,
+    # truncated, or wrapped.
+    assert html.count(link) == 3
+    assert link in text
+
+    # TTL is read from tradebot.accounts.MAGIC_LINK_TTL_MINUTES, not
+    # a copy-pasted "15 minutes" that could drift from the real value.
+    assert f"{MAGIC_LINK_TTL_MINUTES} minutes" in html
+    assert f"{MAGIC_LINK_TTL_MINUTES} minutes" in text
+
+    # No leftover template placeholders.
+    assert "__" not in html
+    assert "__" not in text

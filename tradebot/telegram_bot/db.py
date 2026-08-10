@@ -158,6 +158,23 @@ CREATE TABLE IF NOT EXISTS magic_link_tokens (
     expires_at TEXT NOT NULL,
     consumed_at TEXT
 );
+
+-- Minimal, anonymous product-funnel log -- see tradebot.funnel_events
+-- for the write path and the reviewed ALLOWED_EVENTS set. anon_id is a
+-- random value the frontend generates and stores in localStorage, not
+-- derived from anything identifying; account_id is filled in by the API
+-- from the session once a visitor has signed in, so a signup funnel can
+-- be traced end to end without anything before that point being tied
+-- to a real person.
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event TEXT NOT NULL,
+    anon_id TEXT NOT NULL,
+    account_id TEXT,
+    props_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_events_event ON funnel_events(event, ts_utc);
 """
 
 

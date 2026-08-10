@@ -185,3 +185,43 @@ def test_cors_header_only_reflects_an_allowed_origin(app, client):
 
     disallowed = client.get("/healthz", headers={"Origin": "https://evil.example.com"})
     assert "Access-Control-Allow-Origin" not in disallowed.headers
+
+
+def _post_event_beacon(client, body: dict):
+    # Mirrors exactly how navigator.sendBeacon sends it client-side: a
+    # raw text/plain body, not client.post(json=...) (which sets
+    # application/json and would trigger a CORS preflight in a real
+    # browser -- see the route's own docstring in tradebot/api/app.py).
+    import json as _json
+
+    return client.post("/events", data=_json.dumps(body), content_type="text/plain")
+
+
+def test_events_endpoint_records_an_allowed_event(app, client):
+    response = _post_event_beacon(client, {"event": "landing_view", "anon_id": "anon-1"})
+    assert response.status_code == 204
+    row = app.users_conn.execute("SELECT event, anon_id, account_id FROM funnel_events").fetchone()
+    assert row == ("landing_view", "anon-1", None)
+
+
+def test_events_endpoint_silently_ignores_an_unknown_event(app, client):
+    response = _post_event_beacon(client, {"event": "definitely_not_real", "anon_id": "anon-2"})
+    assert response.status_code == 204  # same response as a valid event -- no oracle for what's allowed
+    assert app.users_conn.execute("SELECT COUNT(*) FROM funnel_events").fetchone()[0] == 0
+
+
+def test_events_endpoint_silently_ignores_malformed_bodies(app, client):
+    response = client.post("/events", data="not json at all", content_type="text/plain")
+    assert response.status_code == 204
+    assert app.users_conn.execute("SELECT COUNT(*) FROM funnel_events").fetchone()[0] == 0
+
+
+def test_events_endpoint_captures_account_id_once_signed_in(app, client):
+    token = _request_and_extract_token(app, client, "ivy@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    _post_event_beacon(client, {"event": "app_authenticated", "anon_id": "anon-3"})
+
+    row = app.users_conn.execute("SELECT account_id FROM funnel_events WHERE event = 'app_authenticated'").fetchone()
+    account = app.users_conn.execute("SELECT id FROM accounts WHERE email = 'ivy@example.com'").fetchone()
+    assert row[0] == account[0]
