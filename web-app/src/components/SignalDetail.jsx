@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
@@ -29,20 +29,55 @@ function pct(value) {
   return value == null ? '—' : `${(value * 100).toFixed(0)}%`
 }
 
+// Matches .signal-detail's CSS transition duration -- see sd-panel-in/
+// sd-sheet-in. Kept in one place so the JS unmount delay and the CSS
+// animation length can't silently drift apart.
+const CLOSE_ANIMATION_MS = 200
+
+function prefersReducedMotion() {
+  return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+}
+
 // A focused subset of what the landing page's demo AlertCard shows,
 // built from real fields the API returns -- see tradebot/api/app.py's
 // /signals/<id> and web-app/src/signalContext.js for where each piece
 // of this actually comes from.
 export default function SignalDetail({ id, onClose }) {
+  const [retryKey, setRetryKey] = useState(0)
   const fetchDetail = useCallback(() => api.signalDetail(id), [id])
-  const { data, error, loading } = useApiData(fetchDetail, [id])
+  const { data, error, loading } = useApiData(fetchDetail, [id, retryKey])
   const dialogRef = useRef(null)
   const previouslyFocused = useRef(null)
+  const [closing, setClosing] = useState(false)
+
+  // Closing plays the reverse of the entrance transition instead of the
+  // panel just vanishing -- an instant cut reads cheap for something
+  // meant to feel like closing a report, not a debug panel. Skipped
+  // entirely for reduced-motion, where there's nothing to wait out.
+  const requestClose = useCallback(() => {
+    if (prefersReducedMotion()) {
+      onClose()
+      return
+    }
+    setClosing(true)
+  }, [onClose])
+
+  useEffect(() => {
+    if (!closing) return
+    const t = setTimeout(onClose, CLOSE_ANIMATION_MS)
+    return () => clearTimeout(t)
+  }, [closing, onClose])
 
   useEffect(() => {
     previouslyFocused.current = document.activeElement
     dialogRef.current?.focus()
+    // Background content stays reachable by scroll/gesture behind a
+    // fixed overlay unless the page itself is locked -- easy to miss
+    // on mobile, where the sheet covers less than the full viewport.
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
     return () => {
+      document.body.style.overflow = previousOverflow
       if (previouslyFocused.current instanceof HTMLElement) previouslyFocused.current.focus()
     }
   }, [])
@@ -50,7 +85,7 @@ export default function SignalDetail({ id, onClose }) {
   useEffect(() => {
     function onKeyDown(e) {
       if (e.key === 'Escape') {
-        onClose()
+        requestClose()
         return
       }
       if (e.key !== 'Tab' || !dialogRef.current) return
@@ -70,16 +105,19 @@ export default function SignalDetail({ id, onClose }) {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [onClose])
+  }, [requestClose])
 
   const isHigh = data?.tier === 'high'
   const kinds = data?.kinds || []
   const contexts = data?.contexts || []
 
   return (
-    <div className="signal-detail-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+    <div
+      className={`signal-detail-overlay${closing ? ' is-closing' : ''}`}
+      onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose() }}
+    >
       <div
-        className="signal-detail"
+        className={`signal-detail${closing ? ' is-closing' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-label={data ? `${data.symbol} signal detail` : 'Signal detail'}
@@ -91,13 +129,21 @@ export default function SignalDetail({ id, onClose }) {
             <PerchMark size={14} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
             <span className="sd-eyebrow">PERCH DETECTED</span>
           </span>
-          <button type="button" className="sd-close" onClick={onClose} aria-label="Close signal detail">
+          <button type="button" className="sd-close" onClick={requestClose} aria-label="Close signal detail">
             Close
           </button>
         </div>
 
-        {loading && <p className="empty-state">Loading signal…</p>}
-        {error && <p className="empty-state">Couldn't load this signal.</p>}
+        {loading && <SignalDetailSkeleton />}
+
+        {error && (
+          <div className="sd-error" role="alert">
+            <p>Perch couldn't load this signal.</p>
+            <button type="button" className="sd-retry" onClick={() => setRetryKey((k) => k + 1)}>
+              Try again
+            </button>
+          </div>
+        )}
 
         {data && (
           <>
@@ -138,24 +184,6 @@ export default function SignalDetail({ id, onClose }) {
             </section>
 
             <section className="sd-section">
-              <h2 className="sd-section-title">Market context</h2>
-              <div className="sd-context-grid">
-                <div className="sd-context-item">
-                  <span className="sd-context-label">Price at detection</span>
-                  <span className="sd-context-value">{data.close != null ? `$${data.close.toFixed(2)}` : '—'}</span>
-                </div>
-                <div className="sd-context-item">
-                  <span className="sd-context-label">ATR (14)</span>
-                  <span className="sd-context-value">{data.atr14 != null ? data.atr14.toFixed(2) : '—'}</span>
-                </div>
-                <div className="sd-context-item">
-                  <span className="sd-context-label">Score</span>
-                  <span className="sd-context-value">{data.score != null ? data.score.toFixed(2) : '—'}</span>
-                </div>
-              </div>
-            </section>
-
-            <section className="sd-section">
               <h2 className="sd-section-title">Historical stats</h2>
               {data.history ? (
                 <p className="sd-history">
@@ -171,6 +199,31 @@ export default function SignalDetail({ id, onClose }) {
               )}
             </section>
 
+            <section className="sd-section">
+              <h2 className="sd-section-title">Market context</h2>
+              <div className="sd-context-grid">
+                <div className="sd-context-item">
+                  <span className="sd-context-label">Price at detection</span>
+                  <span className="sd-context-value">{data.close != null ? `$${data.close.toFixed(2)}` : '—'}</span>
+                </div>
+                <div className="sd-context-item">
+                  <span className="sd-context-label">Typical range (ATR-14)</span>
+                  <span className="sd-context-value">{data.atr14 != null ? `$${data.atr14.toFixed(2)}` : '—'}</span>
+                </div>
+              </div>
+              {data.score != null && (
+                <details className="sd-why-technical sd-tech-details">
+                  <summary>Technical details</summary>
+                  <dl>
+                    <div className="sd-why-technical-row">
+                      <dt>Signal score</dt>
+                      <dd>{data.score.toFixed(2)}</dd>
+                    </div>
+                  </dl>
+                </details>
+              )}
+            </section>
+
             <div className="sd-foot">
               <span>{absoluteTime(data.ts_utc)}</span>
               <span>{data.session}</span>
@@ -178,6 +231,18 @@ export default function SignalDetail({ id, onClose }) {
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+function SignalDetailSkeleton() {
+  return (
+    <div className="sd-skeleton" aria-live="polite" aria-busy="true">
+      <span className="sr-only">Loading signal…</span>
+      <div className="sd-skel-line sd-skel-title" aria-hidden="true" />
+      <div className="sd-skel-line sd-skel-sub" aria-hidden="true" />
+      <div className="sd-skel-block" aria-hidden="true" />
+      <div className="sd-skel-block sd-skel-block-sm" aria-hidden="true" />
     </div>
   )
 }
