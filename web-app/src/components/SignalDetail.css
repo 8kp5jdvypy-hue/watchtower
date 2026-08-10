@@ -1,0 +1,210 @@
+.signal-detail-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(5, 7, 10, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: sd-backdrop-in 0.2s ease-out both;
+}
+@keyframes sd-backdrop-in { from { opacity: 0; } }
+/* Closing plays the entrance transitions in reverse (see SignalDetail.jsx's
+   CLOSE_ANIMATION_MS, kept in sync with these durations) instead of the
+   panel just disappearing. */
+.signal-detail-overlay.is-closing { animation: sd-backdrop-in 0.2s ease-in reverse both; }
+
+.signal-detail {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: linear-gradient(165deg, rgba(16, 20, 27, 0.97), rgba(10, 13, 18, 0.99));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6);
+  animation: sd-panel-in 0.28s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes sd-panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+}
+.signal-detail.is-closing { animation: sd-panel-in 0.2s cubic-bezier(.4,0,1,1) reverse both; }
+
+.sd-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(10, 13, 18, 0.92);
+  backdrop-filter: blur(8px);
+}
+.sd-head-id { display: flex; align-items: center; gap: 0.5rem; }
+.sd-eyebrow {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.sd-close {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  border-radius: 5px;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.sd-close:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+.sd-title-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 1.1rem 1.25rem 0;
+}
+.sd-symbol {
+  font-family: var(--display); font-weight: 600; font-size: 1.5rem; letter-spacing: -0.01em;
+  display: inline-flex; align-items: center; gap: 0.4em;
+}
+.sd-symbol.trend-up { color: var(--up); }
+.sd-symbol.trend-down { color: var(--down); }
+.sd-tier {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.22rem 0.6rem; border-radius: 999px; font-weight: 600;
+}
+.sd-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan-dim); }
+.sd-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
+
+.sd-headline { color: var(--ink-dim); font-size: 0.92rem; line-height: 1.5; margin: 0.5rem 1.25rem 0; }
+
+.sd-flags { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.85rem 1.25rem 0; }
+.sd-flag {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.02em;
+  color: var(--ink-faint); border: 1px solid var(--line); border-radius: 999px;
+  padding: 0.3rem 0.65rem;
+}
+.sd-flag-news { color: var(--amber); border-color: rgba(255, 180, 84, 0.3); }
+.sd-flag-alerted { color: var(--cyan); border-color: rgba(52, 226, 255, 0.25); }
+
+.sd-section { padding: 1.1rem 1.25rem 0; }
+.sd-section:last-of-type { padding-bottom: 1.1rem; }
+.sd-section-title {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 0.7rem; font-weight: 600;
+  border-top: 1px solid var(--line); padding-top: 1rem;
+}
+.sd-section:first-of-type .sd-section-title { border-top: none; padding-top: 0; }
+
+.sd-why-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.9rem; }
+.sd-why-item { display: flex; flex-direction: column; gap: 0.35rem; }
+.sd-kind-tag {
+  align-self: flex-start;
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.04em;
+  color: var(--cyan-dim); border: 1px solid rgba(52, 226, 255, 0.2); border-radius: 4px;
+  padding: 0.15rem 0.5rem;
+}
+.sd-why-body p { margin: 0; color: var(--ink); font-size: 0.88rem; line-height: 1.55; }
+.sd-why-technical { margin-top: 0.4rem; }
+.sd-why-technical summary {
+  cursor: pointer; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em;
+  color: var(--ink-faint); text-transform: uppercase;
+}
+.sd-why-technical summary:hover { color: var(--ink-dim); }
+.sd-why-technical dl { margin: 0.5rem 0 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.sd-why-technical-row {
+  display: flex; justify-content: space-between; gap: 1rem;
+  font-family: var(--mono); font-size: 0.76rem;
+}
+/* A level_break/vwap_break value can be a full phrase ("yesterday's
+   high ($451.20)"), not just a number -- without flex-shrink + wrapping
+   this can push the row wider than the panel on narrow viewports. */
+.sd-why-technical-row dt { flex: none; color: var(--ink-faint); margin: 0; }
+.sd-why-technical-row dd { flex: 1; min-width: 0; color: var(--ink-dim); margin: 0; text-align: right; overflow-wrap: break-word; }
+
+.sd-tech-details { margin-top: 0.85rem; }
+
+.sd-context-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
+.sd-context-item {
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.7rem 0.8rem;
+}
+.sd-context-label {
+  display: block; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--ink-faint); margin-bottom: 0.3rem;
+}
+.sd-context-value { font-family: var(--display); font-size: 1.05rem; font-weight: 600; color: var(--ink); }
+
+.sd-history { margin: 0; color: var(--ink-dim); font-size: 0.86rem; line-height: 1.6; }
+.sd-history b { color: var(--ink); }
+.sd-history-empty { color: var(--ink-faint); }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+.sd-skeleton { padding: 1.1rem 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 0.9rem; }
+.sd-skel-line, .sd-skel-block {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-1) 25%, var(--line) 50%, var(--bg-1) 75%);
+  background-size: 200% 100%;
+  animation: sd-skel-shimmer 1.6s ease-in-out infinite;
+}
+.sd-skel-title { width: 40%; height: 1.6rem; }
+.sd-skel-sub { width: 75%; height: 0.9rem; }
+.sd-skel-block { height: 4.5rem; }
+.sd-skel-block-sm { height: 3rem; width: 60%; }
+@keyframes sd-skel-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sd-skel-line, .sd-skel-block { animation: none; background: var(--bg-1); }
+}
+
+.sd-error {
+  padding: 2rem 1.25rem 2.25rem; display: flex; flex-direction: column;
+  align-items: center; text-align: center; gap: 0.85rem;
+}
+.sd-error p { margin: 0; color: var(--ink-dim); font-size: 0.88rem; }
+.sd-retry {
+  background: none; border: 1px solid rgba(52, 226, 255, 0.25); color: var(--cyan);
+  border-radius: 5px; padding: 0.45rem 0.9rem; cursor: pointer;
+  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.02em;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.sd-retry:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+
+.sd-foot {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 1.1rem 1.25rem 0; padding: 0.85rem 0 1.1rem; border-top: 1px solid var(--line);
+  font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
+}
+
+@media (max-width: 640px) {
+  .signal-detail-overlay { align-items: flex-end; padding: 0; }
+  .signal-detail {
+    max-width: 100%;
+    max-height: 88vh;
+    border-radius: 16px 16px 0 0;
+    border-left: none; border-right: none; border-bottom: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    animation: sd-sheet-in 0.28s cubic-bezier(.2,.8,.2,1) both;
+  }
+  @keyframes sd-sheet-in { from { transform: translateY(100%); } }
+  .signal-detail.is-closing { animation: sd-sheet-in 0.2s cubic-bezier(.4,0,1,1) reverse both; }
+  .sd-close, .sd-retry { min-height: 44px; padding-left: 1rem; padding-right: 1rem; }
+  .sd-context-grid { gap: 0.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signal-detail-overlay, .signal-detail,
+  .signal-detail-overlay.is-closing, .signal-detail.is-closing { animation: none; }
+}

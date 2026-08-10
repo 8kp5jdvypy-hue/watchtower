@@ -22,9 +22,15 @@
 .signal-card:nth-child(7) { animation-delay: 0.38s; }
 .signal-card:nth-child(n+8) { animation-delay: 0.44s; }
 /* High tier gets the "very important: cyan edge/bloom" treatment --
-   quiet by default, a touch of glow, never a flashing border. */
+   quiet by default, a touch of glow, never a flashing border. The left
+   accent bar is the one addition purely for glance-ability: a border/
+   shadow tint alone is too subtle to read as "important" while
+   scanning a list quickly, and severity has to be readable without
+   stopping to compare cards side by side. */
 .signal-card.is-high {
   border-color: rgba(52, 226, 255, 0.25);
+  border-left: 3px solid var(--cyan);
+  padding-left: calc(1.25rem - 3px);
   box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.06), 0 20px 50px -30px rgba(52, 226, 255, 0.25);
 }
 
@@ -59,9 +65,30 @@
 }
 
 .sc-foot {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
   margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px solid var(--line);
   font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
+}
+.sc-view {
+  flex: none;
+  background: none;
+  border: 1px solid rgba(52, 226, 255, 0.25);
+  color: var(--cyan);
+  border-radius: 5px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.sc-view:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+
+@media (max-width: 640px) {
+  /* 0.35rem/0.7rem padding at 0.7rem font-size lands well under a
+     comfortable tap target -- bump it up on touch-sized viewports
+     without changing how it reads on desktop. */
+  .sc-view { min-height: 40px; padding: 0.5rem 0.85rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

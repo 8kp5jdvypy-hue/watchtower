@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
-from tradebot.journal import tier_performance
+from tradebot.journal import historical_performance, tier_performance
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
@@ -333,6 +333,64 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # wrong on a VPS and around the ET midnight rollover.
         session_date = datetime.now(ET).date().isoformat()
         return jsonify({"session": session_date, "signals": _recent_signals(session_date, 3)})
+
+    @app.route("/signals/<detection_id>")
+    @login_required
+    def signal_detail(detection_id):
+        # Same tier restriction as _recent_signals -- sub-threshold ('log'
+        # tier) detections were never meant to be user-facing, so a
+        # detection id for one 404s here exactly like an unknown id would.
+        row = app.journal_conn.execute(
+            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, "
+            "alerted, close, atr14, context_json, primary_kind, no_trade, news_driven, "
+            "event_kind, event_severity "
+            "FROM detections WHERE id = ? AND tier IN ('high', 'medium')",
+            (detection_id,),
+        ).fetchone()
+        if row is None:
+            return jsonify({"error": "signal not found"}), 404
+        (
+            id_, ts_utc, session, symbol, kinds, headlines, score, tier, trend,
+            alerted, close, atr14, context_json, primary_kind, no_trade, news_driven,
+            event_kind, event_severity,
+        ) = row
+        # One context dict per detector kind that fired in this cluster,
+        # same order as kinds.split(",") -- see journal.write_cluster,
+        # which writes json.dumps([d.context for d in detections]).
+        contexts = json.loads(context_json) if context_json else []
+        # Real base-rate history for this exact kind+direction, excluding
+        # this detection itself and any news-driven rows -- reuses
+        # journal.historical_performance() as-is (no new query logic),
+        # the same function /performance already relies on for tier-level
+        # stats. None when there's no primary_kind/trend to match on, or
+        # when the sample is too small -- never fabricated.
+        history = (
+            historical_performance(app.journal_conn, primary_kind, trend, id_)
+            if primary_kind and trend
+            else None
+        )
+        return jsonify(
+            {
+                "id": id_,
+                "ts_utc": ts_utc,
+                "session": session,
+                "symbol": symbol,
+                "kinds": kinds.split(","),
+                "contexts": contexts,
+                "headlines": headlines,
+                "score": score,
+                "tier": tier,
+                "trend": trend,
+                "alerted": bool(alerted),
+                "close": close,
+                "atr14": atr14,
+                "no_trade": bool(no_trade) if no_trade is not None else None,
+                "news_driven": bool(news_driven) if news_driven is not None else None,
+                "event_kind": event_kind,
+                "event_severity": event_severity,
+                "history": _to_jsonable(history),
+            }
+        )
 
     @app.route("/performance")
     @login_required
