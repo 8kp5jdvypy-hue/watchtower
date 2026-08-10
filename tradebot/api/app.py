@@ -27,13 +27,17 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import Flask, g, jsonify, redirect, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-from tradebot import accounts, config, funnel_events
+logger = logging.getLogger(__name__)
+
+from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import tier_performance
@@ -56,6 +60,17 @@ SESSION_LIFETIME_DAYS = 30
 # stale-across-workers inconsistency, since every worker eventually
 # converges on the same underlying data.
 PERFORMANCE_CACHE_TTL_SECONDS = 60
+
+# How many magic-link requests one email address / one IP can make
+# before being rate-limited, and the same for the two public write
+# endpoints below. Deliberately generous for /events -- real usage
+# (a page view plus a handful of CTA clicks) is nowhere near these
+# numbers; they exist to cap abuse, not to constrain a real visitor.
+_MAGIC_LINK_PER_EMAIL = (3, 900)     # 3 per 15 minutes -- matches the token TTL
+_MAGIC_LINK_PER_IP = (10, 3600)      # 10 per hour
+_EVENTS_PER_ANON = (120, 300)        # 120 per 5 minutes
+_EVENTS_PER_IP = (600, 300)          # 600 per 5 minutes
+_CLIENT_ERRORS_PER_IP = (60, 300)    # 60 per 5 minutes
 
 
 def _to_jsonable(obj):
@@ -84,6 +99,14 @@ def _linked_telegram_user_id(conn, account: accounts.Account) -> int | None:
 
 def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     app = Flask(__name__)
+    # Caddy (see ../../Caddyfile) sits in front of this app in production
+    # and, like any reverse proxy, is the direct TCP peer for every
+    # request -- without this, request.remote_addr is always Caddy's own
+    # address, never the real client's, which would make IP-based rate
+    # limiting below apply to one shared bucket for everyone. x_for=1
+    # trusts exactly one hop of X-Forwarded-For (the one Caddy itself
+    # appends), not any earlier entry a client could forge.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
     app.config["SECRET_KEY"] = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key-set-SESSION_SECRET_KEY")
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -151,13 +174,45 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             return "", 204
         if not isinstance(payload, dict):
             return "", 204
+        anon_id = str(payload.get("anon_id") or "")
+        # Rate-limited the same silent way as everything else on this
+        # route: over the limit looks identical to "recorded normally"
+        # from the outside, just without the write.
+        if not rate_limit.allow(app.users_conn, f"events:anon:{anon_id}", *_EVENTS_PER_ANON):
+            return "", 204
+        if not rate_limit.allow(app.users_conn, f"events:ip:{request.remote_addr}", *_EVENTS_PER_IP):
+            return "", 204
         props = payload.get("props")
         funnel_events.record_event(
             app.users_conn,
             event=str(payload.get("event") or ""),
-            anon_id=str(payload.get("anon_id") or ""),
+            anon_id=anon_id,
             account_id=session.get("account_id"),
             props=props if isinstance(props, dict) else None,
+        )
+        return "", 204
+
+    @app.route("/client-errors", methods=["POST"])
+    def report_client_error():
+        # Same sendBeacon/text-plain/always-204 shape as /events, for the
+        # same reasons (see that route's comment) -- and rate-limited by
+        # IP alone (no anon_id involved here) so a loop that throws on
+        # every render can't flood this table.
+        try:
+            payload = json.loads(request.get_data(as_text=True) or "{}")
+        except ValueError:
+            return "", 204
+        if not isinstance(payload, dict):
+            return "", 204
+        if not rate_limit.allow(app.users_conn, f"client_errors:ip:{request.remote_addr}", *_CLIENT_ERRORS_PER_IP):
+            return "", 204
+        client_errors.record_error(
+            app.users_conn,
+            message=str(payload.get("message") or ""),
+            stack=str(payload.get("stack") or "") or None,
+            url=str(payload.get("url") or "") or None,
+            user_agent=request.headers.get("User-Agent"),
+            account_id=session.get("account_id"),
         )
         return "", 204
 
@@ -168,13 +223,33 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not email or "@" not in email:
             return jsonify({"error": "a valid email is required"}), 400
         now = datetime.now(timezone.utc)
-        # Same response either way (see the comment below) — a rate-limited
-        # request is silently absorbed rather than erroring, so this can't
-        # be used to probe whether an address is close to its limit either.
-        if not accounts.is_magic_link_rate_limited(app.users_conn, email, now):
-            token = accounts.create_magic_link_token(app.users_conn, email, now)
-            link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
+        # Two separate limits: per-email caps how many times any one
+        # address can be emailed (the real risk -- this endpoint sends a
+        # real message to whatever address is given, with no proof yet
+        # that the requester controls it), per-IP catches one requester
+        # cycling through many addresses. Either one tripping answers
+        # the same 429 either way -- nothing here reveals which limit
+        # was hit, since that alone would leak whether this email has
+        # been requested before.
+        if not rate_limit.allow(app.users_conn, f"magic_link:email:{email}", *_MAGIC_LINK_PER_EMAIL, now=now):
+            return jsonify({"error": "too many requests, try again shortly"}), 429
+        if not rate_limit.allow(app.users_conn, f"magic_link:ip:{request.remote_addr}", *_MAGIC_LINK_PER_IP, now=now):
+            return jsonify({"error": "too many requests, try again shortly"}), 429
+        token = accounts.create_magic_link_token(app.users_conn, email, now)
+        link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
+        try:
             app.email_sender.send_magic_link(email, link_url)
+        except Exception:
+            # Found live: an unhandled failure here (Resend down, a
+            # quota/rate limit on our sending account, a network hiccup)
+            # was reaching the client as a raw Flask 500 page -- an
+            # implementation detail of *our* email provider becoming a
+            # broken sign-in page for a real person. The token already
+            # exists in magic_link_tokens either way; if the email
+            # genuinely never went out, it just expires unused per its
+            # normal TTL, same as any other unused token.
+            logger.exception("send_magic_link failed for a request (email withheld from logs)")
+            return jsonify({"error": "couldn't send the email, try again shortly"}), 502
         # Same response regardless of whether this email already has an
         # account — one is created on verify if not. Nothing here reveals
         # whether an address is a known user.

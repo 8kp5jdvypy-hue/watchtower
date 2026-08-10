@@ -29,14 +29,6 @@ from datetime import datetime, timedelta, timezone
 MAGIC_LINK_TTL_MINUTES = 15
 TELEGRAM_PROVIDER = "telegram"
 
-# Unauthenticated abuse surface: /auth/magic-link/request sends a real
-# email to whatever address it's given, with no auth of its own — without
-# a limit, it can be used to mail-bomb an arbitrary inbox or burn the
-# Resend send quota. DB-backed (not an in-memory counter) so the limit
-# holds across every gunicorn worker process, not just one.
-MAGIC_LINK_RATE_LIMIT_WINDOW_MINUTES = 15
-MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS = 3
-
 
 @dataclass(frozen=True)
 class Account:
@@ -114,21 +106,6 @@ def link_identity(conn: sqlite3.Connection, account_id: str, provider: str, prov
         (account_id, provider, provider_user_id, _now_iso()),
     )
     conn.commit()
-
-
-def is_magic_link_rate_limited(conn: sqlite3.Connection, email: str, now: datetime) -> bool:
-    """True once `email` has already requested
-    MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS or more links within the last
-    MAGIC_LINK_RATE_LIMIT_WINDOW_MINUTES. Counts every request in the
-    window regardless of whether that token was later consumed or has
-    since expired — what's being limited is send volume, not valid-token
-    count."""
-    window_start = (now - timedelta(minutes=MAGIC_LINK_RATE_LIMIT_WINDOW_MINUTES)).isoformat()
-    count = conn.execute(
-        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = ? AND created_at >= ?",
-        (email, window_start),
-    ).fetchone()[0]
-    return count >= MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS
 
 
 def create_magic_link_token(conn: sqlite3.Connection, email: str, now: datetime) -> str:

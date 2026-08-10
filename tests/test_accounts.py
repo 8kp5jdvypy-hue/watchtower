@@ -129,54 +129,6 @@ def test_migrate_is_idempotent_and_never_creates_a_second_account():
     assert count == 1
 
 
-def test_is_magic_link_rate_limited_false_under_the_limit():
-    conn = db.connect(":memory:")
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-    for i in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS - 1):
-        accounts.create_magic_link_token(conn, "eve@example.com", now + timedelta(seconds=i))
-    assert accounts.is_magic_link_rate_limited(conn, "eve@example.com", now) is False
-
-
-def test_is_magic_link_rate_limited_true_at_the_limit():
-    conn = db.connect(":memory:")
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-    for i in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        accounts.create_magic_link_token(conn, "eve@example.com", now + timedelta(seconds=i))
-    assert accounts.is_magic_link_rate_limited(conn, "eve@example.com", now) is True
-
-
-def test_is_magic_link_rate_limited_counts_consumed_and_expired_tokens_too():
-    """The limit is on send volume, not on currently-valid tokens — a
-    token being consumed or expired doesn't free up a slot within the
-    window, otherwise an attacker could just wait for each to expire
-    (or a legitimate user's own successful logins would silently reopen
-    the door for someone else hammering the same address)."""
-    conn = db.connect(":memory:")
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-    for i in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        token = accounts.create_magic_link_token(conn, "eve@example.com", now + timedelta(seconds=i))
-        accounts.verify_magic_link_token(conn, token, now + timedelta(seconds=i))  # consume it
-    assert accounts.is_magic_link_rate_limited(conn, "eve@example.com", now) is True
-
-
-def test_is_magic_link_rate_limited_resets_after_the_window():
-    conn = db.connect(":memory:")
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-    for i in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        accounts.create_magic_link_token(conn, "eve@example.com", now + timedelta(seconds=i))
-    later = now + timedelta(minutes=accounts.MAGIC_LINK_RATE_LIMIT_WINDOW_MINUTES + 1)
-    assert accounts.is_magic_link_rate_limited(conn, "eve@example.com", later) is False
-
-
-def test_is_magic_link_rate_limited_is_scoped_per_email():
-    conn = db.connect(":memory:")
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
-    for i in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        accounts.create_magic_link_token(conn, "eve@example.com", now + timedelta(seconds=i))
-    assert accounts.is_magic_link_rate_limited(conn, "eve@example.com", now) is True
-    assert accounts.is_magic_link_rate_limited(conn, "someone-else@example.com", now) is False
-
-
 def test_migrate_skips_a_telegram_user_already_linked_by_some_other_means():
     conn = db.connect(":memory:")
     db.get_or_create_user(conn, 1, 1, "alice")

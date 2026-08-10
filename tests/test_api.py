@@ -108,42 +108,6 @@ def test_magic_link_request_rejects_a_missing_or_bad_email(client):
     assert client.post("/auth/magic-link/request", json={"email": "not-an-email"}).status_code == 400
 
 
-def test_magic_link_request_is_rate_limited_per_email(app, client):
-    """After the limit, the route must still answer 202 (no oracle for
-    whether an address is rate-limited) but must stop actually creating
-    tokens/sending mail — the real abuse case this protects against is
-    mail-bombing one target address, not the requester learning anything
-    different back."""
-    email = "spammed@example.com"
-    for _ in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        response = client.post("/auth/magic-link/request", json={"email": email})
-        assert response.status_code == 202
-
-    count_at_limit = app.users_conn.execute(
-        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = ?", (email,)
-    ).fetchone()[0]
-    assert count_at_limit == accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS
-
-    over_limit_response = client.post("/auth/magic-link/request", json={"email": email})
-    assert over_limit_response.status_code == 202  # same response, not an error
-
-    count_after = app.users_conn.execute(
-        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = ?", (email,)
-    ).fetchone()[0]
-    assert count_after == count_at_limit  # no new token was actually created
-
-
-def test_magic_link_rate_limit_does_not_affect_other_addresses(app, client):
-    email = "spammed2@example.com"
-    for _ in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
-        client.post("/auth/magic-link/request", json={"email": email})
-    client.post("/auth/magic-link/request", json={"email": email})  # over limit
-
-    # A different address is unaffected — still gets a real token.
-    token = _request_and_extract_token(app, client, "unrelated@example.com")
-    assert token
-
-
 def test_logout_clears_the_session(app, client):
     token = _request_and_extract_token(app, client, "carol@example.com")
     client.get(f"/auth/magic-link/verify?token={token}")
@@ -305,3 +269,72 @@ def test_events_endpoint_captures_account_id_once_signed_in(app, client):
     row = app.users_conn.execute("SELECT account_id FROM funnel_events WHERE event = 'app_authenticated'").fetchone()
     account = app.users_conn.execute("SELECT id FROM accounts WHERE email = 'ivy@example.com'").fetchone()
     assert row[0] == account[0]
+
+
+def test_events_endpoint_silently_drops_writes_past_the_per_anon_limit(app, client):
+    from tradebot.api import app as app_module
+
+    limit, _window = app_module._EVENTS_PER_ANON
+    for _ in range(limit):
+        response = _post_event_beacon(client, {"event": "landing_view", "anon_id": "flooder"})
+        assert response.status_code == 204
+
+    over_limit = _post_event_beacon(client, {"event": "landing_view", "anon_id": "flooder"})
+    assert over_limit.status_code == 204  # same response either way -- see the route's own comment
+    assert app.users_conn.execute(
+        "SELECT COUNT(*) FROM funnel_events WHERE anon_id = 'flooder'"
+    ).fetchone()[0] == limit
+
+
+def test_magic_link_request_is_rate_limited_per_email(app, client):
+    from tradebot.api import app as app_module
+
+    limit, _window = app_module._MAGIC_LINK_PER_EMAIL
+    for _ in range(limit):
+        response = client.post("/auth/magic-link/request", json={"email": "flooded@example.com"})
+        assert response.status_code == 202
+
+    over_limit = client.post("/auth/magic-link/request", json={"email": "flooded@example.com"})
+    assert over_limit.status_code == 429
+    # A *different* email is unaffected -- the limit is per-address, not global.
+    other = client.post("/auth/magic-link/request", json={"email": "someone-else@example.com"})
+    assert other.status_code == 202
+
+
+def test_client_errors_endpoint_records_a_report(app, client):
+    response = client.post(
+        "/client-errors",
+        data='{"message": "TypeError: boom", "stack": "at x (app.js:1:1)", "url": "https://app.perchmarkets.com/"}',
+        content_type="text/plain",
+    )
+    assert response.status_code == 204
+    row = app.users_conn.execute("SELECT message, url FROM client_errors").fetchone()
+    assert row == ("TypeError: boom", "https://app.perchmarkets.com/")
+
+
+def test_client_errors_endpoint_silently_ignores_a_missing_message(app, client):
+    response = client.post("/client-errors", data='{"stack": "no message here"}', content_type="text/plain")
+    assert response.status_code == 204
+    assert app.users_conn.execute("SELECT COUNT(*) FROM client_errors").fetchone()[0] == 0
+
+
+def test_magic_link_request_answers_a_clean_error_when_the_email_provider_fails(app, client):
+    # Reproduces a real failure seen live: ResendEmailSender.send_magic_link
+    # can raise (a Resend outage, our sending account hitting a quota, a
+    # network error) -- that must never surface as a raw Flask 500 page.
+    class BrokenEmailSender:
+        def send_magic_link(self, to_email, link_url):
+            raise RuntimeError("simulated provider outage")
+
+    app.email_sender = BrokenEmailSender()
+    response = client.post("/auth/magic-link/request", json={"email": "unlucky@example.com"})
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "couldn't send the email, try again shortly"}
+    # The token is still created before the send is attempted -- that's
+    # fine, it just expires unused; the point of this test is that the
+    # *response* degrades cleanly, not that the token creation is undone.
+    row = app.users_conn.execute(
+        "SELECT email FROM magic_link_tokens WHERE email = 'unlucky@example.com'"
+    ).fetchone()
+    assert row is not None
