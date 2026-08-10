@@ -3,6 +3,7 @@ rule exercised through the actual /limits handler (not just the db layer).
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -226,6 +227,32 @@ def test_status_reports_market_state_and_users_own_lock_state():
     assert "paused" in reply.text.lower()
     assert "market" in reply.text.lower() or "live" in reply.text.lower() or "closed" in reply.text.lower()
     assert "beta" in reply.text.lower()
+
+
+def _write_heartbeat(path: Path, ts_utc: str) -> None:
+    path.write_text(json.dumps({"ts_utc": ts_utc}))
+
+
+def test_status_does_not_flag_stale_over_a_weekend_with_the_market_closed():
+    """Regression: an old heartbeat is expected and correct while the
+    market's closed (see runner.py's OFF_SESSION_IDLE_SECONDS — it
+    doesn't write a heartbeat at all outside a trading session), not a
+    fault worth alarming someone checking /status over the weekend."""
+    users_conn, journal_conn = _setup()
+    ctx = _ctx(users_conn, journal_conn, market_open=False)
+    old_ts = (NOW - timedelta(days=2)).isoformat()
+    _write_heartbeat(ctx.app.heartbeat_file, old_ts)
+    reply = handlers.handle_status(ctx)
+    assert "stale" not in reply.text.lower()
+
+
+def test_status_still_flags_a_genuinely_stale_feed_during_market_hours():
+    users_conn, journal_conn = _setup()
+    ctx = _ctx(users_conn, journal_conn, market_open=True)
+    old_ts = (NOW - timedelta(minutes=30)).isoformat()
+    _write_heartbeat(ctx.app.heartbeat_file, old_ts)
+    reply = handlers.handle_status(ctx)
+    assert "stale" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #

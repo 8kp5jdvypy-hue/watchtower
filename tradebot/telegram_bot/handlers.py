@@ -255,7 +255,12 @@ def handle_status(ctx: HandlerContext) -> Reply:
         feed_line = "no heartbeat recorded yet — the live scanner may not be running"
     else:
         age = (now - datetime.fromisoformat(hb["ts_utc"])).total_seconds()
-        stale = age > ctx.app.bar_minutes * 60 * 2
+        # Staleness only means something while the market is actually
+        # open — an old heartbeat over a weekend/holiday (or overnight)
+        # is the scanner correctly idling, not a fault. See runner.py's
+        # OFF_SESSION_IDLE_SECONDS: run_live() itself doesn't write a
+        # heartbeat at all outside a trading session.
+        stale = market_open and age > ctx.app.bar_minutes * 60 * 2
         feed_line = f"last loop {int(age)}s ago" + (" — looks STALE" if stale else "")
 
     fired_today = ctx.journal_conn.execute(
