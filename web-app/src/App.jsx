@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
+import { track } from './analytics'
 import PerchMark from './components/PerchMark'
 import AmbientField from './components/AmbientField'
 import Login from './components/Login'
@@ -43,6 +44,7 @@ function LoadingShell() {
 function App() {
   const [account, setAccount] = useState(undefined) // undefined = still checking, null = signed out
   const [activeTab, setActiveTab] = useState('today')
+  const trackedAuthRef = useRef(false)
 
   const checkSession = useCallback(() => {
     api.me().then(setAccount).catch(() => setAccount(null))
@@ -51,6 +53,16 @@ function App() {
   useEffect(() => {
     checkSession()
   }, [checkSession])
+
+  // Fires once per real session, not on every re-render or tab switch --
+  // this is "a signed-in session exists," the funnel's last real step,
+  // not a page-view counter (see tradebot/funnel_events.py's ALLOWED_EVENTS).
+  useEffect(() => {
+    if (account && !trackedAuthRef.current) {
+      trackedAuthRef.current = true
+      track('app_authenticated')
+    }
+  }, [account])
 
   if (account === undefined) {
     return <LoadingShell />

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { track } from '../analytics'
 import PerchMark from './PerchMark'
 import AmbientField from './AmbientField'
 import './Login.css'
@@ -68,6 +69,7 @@ export default function Login() {
     try {
       await api.requestMagicLink(trimmed)
       setStatus('sent')
+      track('magic_link_sent', { mode })
     } catch {
       setStatus('error')
     }
