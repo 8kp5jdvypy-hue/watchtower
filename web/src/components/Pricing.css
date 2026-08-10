@@ -1,0 +1,38 @@
+.pricing {
+  position: relative;
+  padding: clamp(6rem, 14vw, 10rem) 0;
+  background: #000;
+  text-align: center;
+  overflow: hidden;
+}
+.pr-inner { max-width: 560px; margin: 0 auto; }
+.pricing h2 { font-family: var(--display); font-weight: 600; letter-spacing: -0.02em; font-size: var(--step-4); margin: 1rem 0 0; color: var(--ink); }
+.pr-sub { color: var(--ink-dim); margin: 1rem 0 0; font-size: var(--step-0); }
+
+.pr-card {
+  margin: 2.8rem 0 0;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 2.2rem 2rem;
+  text-align: left;
+}
+.pr-card-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding-bottom: 1.3rem; margin-bottom: 1.3rem; border-bottom: 1px solid var(--line);
+}
+.pr-plan-name { font-family: var(--display); font-weight: 600; letter-spacing: 0.03em; font-size: 1rem; color: var(--ink); }
+.pr-plan-price { font-family: var(--mono); font-size: 0.85rem; color: var(--ink-dim); }
+.pr-plan-price b { color: var(--cyan); font-weight: 600; }
+
+.pr-features { list-style: none; margin: 0 0 1.8rem; padding: 0; display: flex; flex-direction: column; gap: 0.65rem; }
+.pr-features li { display: flex; align-items: center; gap: 0.65em; color: var(--ink-dim); font-size: 0.92rem; }
+.pr-features li span { color: var(--cyan); font-size: 0.85rem; flex: none; }
+
+.pr-cta { width: 100%; text-align: center; justify-content: center; }
+
+.pr-trust { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.02em; color: var(--ink-faint); margin: 1.6rem 0 0; line-height: 1.6; }
+
+@media (max-width: 640px) {
+  .pr-card { padding: 1.8rem 1.5rem; }
+}

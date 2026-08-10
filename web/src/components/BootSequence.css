@@ -1,0 +1,66 @@
+.boot {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  background: #05070a;
+  overflow: hidden;
+  /* The overlay fades out over ~300ms (see BootSequence.jsx) but the
+     content underneath starts becoming visible and clickable before that
+     fade finishes -- without this, a click in that window lands on a
+     still-present (if fading) full-screen overlay instead of the page. */
+  pointer-events: none;
+}
+
+.boot-mote {
+  position: absolute;
+  border-radius: 50%;
+  background: var(--ink);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  will-change: transform, opacity;
+}
+
+.boot-lock {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+}
+.boot-word {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: clamp(1.6rem, 4vw, 2.4rem);
+  letter-spacing: 0.08em;
+  color: var(--ink);
+  opacity: 0;
+  filter: blur(5px);
+  transform: scaleX(1.35);
+  transform-origin: right center;
+  white-space: nowrap;
+}
+.boot-dot-wrap {
+  position: relative;
+  width: 22px; height: 21px;
+  flex: none;
+  margin-left: 6px;
+}
+.boot-dot {
+  position: absolute; inset: 0;
+  color: var(--cyan);
+  filter: drop-shadow(0 0 8px rgba(52,226,255,0.75));
+  opacity: 0;
+  transform: scale(0);
+  will-change: transform, opacity;
+}
+.boot-ring {
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 10px; height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  border: 1px solid var(--cyan);
+  opacity: 0;
+  will-change: transform, opacity;
+}

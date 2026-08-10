@@ -1,0 +1,97 @@
+.market-field {
+  position: relative;
+  height: 100svh;
+  background: radial-gradient(ellipse 80% 60% at 50% 40%, #0a0f16, var(--bg) 75%);
+  overflow: hidden;
+}
+.mf-inner { position: absolute; inset: 0; }
+.mf-sym {
+  position: absolute;
+  font-family: var(--mono);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  transform: translate(-50%, -50%) scale(calc(1 + var(--boost, 0) * 0.5));
+  opacity: calc(0.28 + var(--boost, 0) * 0.6);
+  filter: brightness(calc(1 + var(--boost, 0) * 1.4));
+  animation: mf-flicker 5s ease-in-out infinite;
+  will-change: transform, opacity;
+  pointer-events: none;
+}
+@keyframes mf-flicker { 0%, 100% { opacity: 0.85; } 50% { opacity: 0.4; } }
+.mf-sym.is-chosen {
+  color: var(--cyan);
+  text-shadow: 0 0 18px rgba(52, 226, 255, 0.6);
+  animation: none;
+  opacity: 1;
+  z-index: 2;
+}
+.mf-caption {
+  position: absolute; left: 50%; top: 62%; transform: translateX(-50%);
+  text-align: center; opacity: 0; pointer-events: none;
+}
+.mf-caption p { margin: 0.7rem 0 0; font-family: var(--display); font-size: var(--step-2); color: var(--ink); }
+
+.mf-kestrel {
+  position: absolute; left: 22%; top: 38%; width: 260px; height: 260px;
+  fill: #0d1420;
+  stroke: #7fe8ff;
+  stroke-width: 0.5;
+  /* A refined silhouette with a quiet edge accent, not a full glow. */
+  filter: drop-shadow(0 0 10px rgba(52,226,255,0.35)) drop-shadow(0 4px 30px rgba(0,0,0,0.7));
+  opacity: 0;
+  pointer-events: none;
+  z-index: 3;
+  will-change: transform, opacity;
+}
+
+.mf-funnel {
+  position: absolute; left: 50%; top: 18%; transform: translateX(-50%);
+  text-align: center; opacity: 0; pointer-events: none; z-index: 4;
+}
+.mf-funnel-num {
+  display: block; font-family: var(--display); font-weight: 600;
+  font-size: var(--step-4); color: var(--ink); letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.mf-funnel-lbl {
+  display: block; font-family: var(--mono); font-size: 0.72rem;
+  letter-spacing: 0.16em; color: var(--ink-dim); margin-top: 0.4rem;
+}
+.mf-funnel .demo-tag { display: inline-block; margin-top: 0.7rem; }
+
+.mf-radar-ring {
+  display: none;
+  position: absolute; left: 50%; top: 50%;
+  width: 60vw; height: 36vh; max-width: 260px; max-height: 260px;
+  border: 1px solid var(--line); border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.mf-radar-ring::before {
+  content: '';
+  position: absolute; inset: 22%;
+  border: 1px solid var(--line); border-radius: 50%; opacity: 0.6;
+}
+
+@media (max-width: 760px) {
+  .mf-sym { font-size: 0.68rem !important; }
+  .mf-kestrel { width: 140px; height: 140px; }
+  .mf-funnel-num { font-size: var(--step-3); }
+  .mf-radar-ring { display: block; }
+}
+
+/* This section's whole story (the funnel count, the caption, the kestrel)
+   is told entirely by a scroll-scrubbed GSAP timeline that never runs for
+   reduced-motion users -- everything above defaults to opacity: 0 and
+   just stays that way, leaving only a field of flickering ticker symbols
+   with no payoff. The funnel counter's digits are mutated by GSAP
+   directly (innerText), so there's no sensible static number to freeze it
+   on -- it stays hidden. The caption and kestrel are plain, pre-written
+   content, so they're safe to reveal at rest: the noise, the one signal
+   already picked out in cyan by its own static CSS class, and the line
+   that explains why. */
+@media (prefers-reduced-motion: reduce) {
+  .mf-sym { animation: none; opacity: 0.5; }
+  .mf-caption { opacity: 1; }
+  .mf-kestrel { opacity: 0.55; }
+}

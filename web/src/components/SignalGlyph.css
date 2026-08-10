@@ -1,0 +1,41 @@
+.signal-glyph { width: 120px; height: 32px; overflow: visible; display: block; }
+.sg-noise {
+  fill: var(--ink-faint);
+  opacity: 0;
+  transform-origin: center;
+  transform: scale(0.4);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.signal-glyph.is-in .sg-noise { opacity: 0.55; transform: scale(1); }
+
+.sg-line {
+  stroke: var(--line);
+  stroke-width: 1;
+  stroke-dasharray: 14;
+  stroke-dashoffset: 14;
+  transition: stroke-dashoffset 0.6s ease 0.35s;
+}
+.signal-glyph.is-in .sg-line { stroke-dashoffset: 0; }
+
+.sg-signal {
+  fill: var(--cyan);
+  opacity: 0;
+  transform-origin: center;
+  transform: scale(0.3);
+  transition: opacity 0.4s ease 0.75s, transform 0.4s ease 0.75s;
+  filter: drop-shadow(0 0 6px rgba(52,226,255,0.7));
+}
+.signal-glyph.is-in .sg-signal {
+  opacity: 1;
+  transform: scale(1);
+  animation: pulse 2.4s ease-in-out 1.15s infinite;
+}
+
+.section-divider {
+  display: flex;
+  justify-content: center;
+  padding: clamp(2.5rem, 6vw, 4rem) 0;
+  background: var(--bg-1);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}

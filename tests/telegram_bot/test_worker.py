@@ -256,7 +256,7 @@ def test_heartbeat_paging_fires_once_when_stale_during_rth(tmp_path):
     import json
 
     heartbeat_path = tmp_path / "heartbeat.json"
-    heartbeat_path.write_text(json.dumps({"ts_utc": (NOW - timedelta(minutes=10)).isoformat()}))
+    heartbeat_path.write_text(json.dumps({"ts_utc": (NOW - timedelta(minutes=20)).isoformat()}))
     conn = _conn()
     clock = FakeClock(NOW)
     sender = FakeSender()
@@ -328,7 +328,7 @@ def test_stale_heartbeat_opens_an_incident_and_recovery_closes_it(tmp_path):
 
     heartbeat_path = tmp_path / "heartbeat.json"
     incidents_path = tmp_path / "incidents.jsonl"
-    heartbeat_path.write_text(json.dumps({"ts_utc": (NOW - timedelta(minutes=10)).isoformat()}))
+    heartbeat_path.write_text(json.dumps({"ts_utc": (NOW - timedelta(minutes=20)).isoformat()}))
     conn = _conn()
     clock = FakeClock(NOW)
     sender = FakeSender()

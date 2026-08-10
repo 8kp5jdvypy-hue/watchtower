@@ -1,0 +1,23 @@
+.final-cta {
+  position: relative;
+  min-height: 90svh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  text-align: center;
+  overflow: hidden;
+}
+.fc-glow {
+  position: absolute; left: 50%; top: 50%; width: 60vw; height: 60vw; max-width: 700px; max-height: 700px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(52,226,255,0.06), transparent 70%);
+  pointer-events: none;
+}
+.fc-inner { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; }
+.fc-mark { margin-bottom: 1.6rem; opacity: 0.85; }
+.final-cta h2 {
+  font-family: var(--display); font-weight: 600; letter-spacing: -0.02em;
+  font-size: var(--step-6); line-height: 0.98; margin: 0; color: var(--ink);
+}
+.final-cta p { color: var(--ink-dim); font-size: var(--step-1); margin: 1.6rem 0 2.4rem; }

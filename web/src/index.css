@@ -1,0 +1,117 @@
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/SpaceGrotesk.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/JetBrainsMono.woff2') format('woff2');
+}
+
+:root {
+  /* deep graphite / near-black with a cold blue undertone */
+  --bg: #05070a;
+  --bg-1: #0a0d12;
+  --bg-2: #10141b;
+  --line: #1c222c;
+  --ink: #eef2f6;
+  --ink-dim: #8b95a3;
+  /* 2.68:1 against --bg at the old #4d5563 -- fails WCAG AA (4.5:1) for
+     the actual body text it's used on (footer disclaimer, demo-tag
+     labels, fine print). Lightened to clear AA with some margin while
+     staying visibly dimmer than --ink-dim, so the ink/ink-dim/ink-faint
+     hierarchy still reads correctly. */
+  --ink-faint: #737f94;
+
+  /* signal is the exception, not the rule */
+  --cyan: #34e2ff;
+  --cyan-dim: #1a7d8f;
+  --violet: #b26bff;
+  --red: #ff3b4e;
+  /* Reserved for "unusual / worth a second look" inside the alert
+     experience specifically -- cyan stays the one color that means
+     "Perch noticed", amber means "this is the anomaly", never used as
+     a general brand color. 11.44:1 against --bg. */
+  --amber: #ffb454;
+
+  --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+
+  --step--1: clamp(0.78rem, 0.75rem + 0.15vw, 0.88rem);
+  --step-0: clamp(1rem, 0.95rem + 0.2vw, 1.1rem);
+  --step-1: clamp(1.25rem, 1.1rem + 0.6vw, 1.6rem);
+  --step-2: clamp(1.6rem, 1.35rem + 1.1vw, 2.3rem);
+  --step-3: clamp(2.1rem, 1.7rem + 1.8vw, 3.2rem);
+  --step-4: clamp(2.7rem, 2rem + 3vw, 4.6rem);
+  --step-5: clamp(3.4rem, 2.2rem + 5vw, 6.4rem);
+  --step-6: clamp(4rem, 2rem + 8vw, 9rem);
+
+  --edge: clamp(1.25rem, 5vw, 5rem);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+html, body { overscroll-behavior: none; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--step-0);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+#root { overflow-x: clip; }
+::selection { background: var(--cyan); color: var(--bg); }
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+a { color: inherit; }
+button { font: inherit; color: inherit; }
+
+.wrap { max-width: 1240px; margin: 0 auto; padding: 0 var(--edge); }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+}
+.eyebrow b { color: var(--cyan); font-weight: 500; }
+.eyebrow .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 8px 1px var(--cyan);
+  flex: none;
+  animation: pulse 2.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+.demo-tag {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.15em 0.5em;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

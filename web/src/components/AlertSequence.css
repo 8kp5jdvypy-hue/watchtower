@@ -1,0 +1,187 @@
+.alert-seq {
+  position: relative;
+  height: 100svh;
+  display: flex;
+  align-items: center;
+  background: radial-gradient(ellipse 80% 55% at 50% 15%, #0a0f16, var(--bg) 70%);
+  overflow: hidden;
+}
+.as-inner { width: 100%; }
+.as-sub { color: var(--ink-dim); margin: 1rem 0 0; font-size: var(--step-0); line-height: 1.6; display: flex; align-items: center; gap: 0.7em; flex-wrap: wrap; max-width: 62ch; }
+
+.as-stage {
+  position: relative;
+  height: clamp(440px, 56vh, 620px);
+  margin-top: clamp(2.5rem, 5vw, 3.5rem);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: radial-gradient(ellipse 70% 55% at 50% 32%, rgba(52,226,255,0.035), transparent 70%);
+  overflow: hidden;
+}
+
+/* A quiet corner presence, not a mascot -- opacity/color transitions
+   only (the state hooks in PerchMark.css), never position or scale, so
+   it never competes with the field/context/payoff content doing the
+   actual storytelling underneath it. */
+.as-perch-badge {
+  position: absolute;
+  top: 1.1rem; right: 1.1rem;
+  z-index: 5;
+  color: var(--ink-dim);
+  transition: color 0.4s ease;
+}
+.as-perch-badge.pm-state-scanning,
+.as-perch-badge.pm-state-signal,
+.as-perch-badge.pm-state-confirmed,
+.as-perch-badge.pm-state-alert {
+  color: var(--cyan);
+}
+@media (max-width: 760px) {
+  .as-perch-badge { top: 0.85rem; right: 0.85rem; }
+}
+
+/* ---------- Beat 1-3, 5: the field ---------- */
+.as-field { position: absolute; inset: 0; opacity: 0; }
+.as-sym {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-family: var(--mono);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  animation: as-flicker 5.5s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform, opacity;
+}
+@keyframes as-flicker { 0%, 100% { opacity: 0.8; } 50% { opacity: 0.4; } }
+.as-sym.is-chosen {
+  color: var(--ink-dim);
+  font-weight: 600;
+  animation: none;
+  opacity: 1;
+  z-index: 2;
+  text-shadow: 0 0 0 transparent;
+}
+
+.as-ring {
+  position: absolute;
+  width: 16px; height: 16px;
+  transform: translate(-50%, -50%);
+  border: 1px solid var(--cyan);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.as-status {
+  position: absolute; left: 50%; bottom: 8%; transform: translateX(-50%);
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.16em;
+  color: var(--ink-dim);
+  text-transform: uppercase;
+}
+
+/* ---------- Beat 4: context ---------- */
+.as-context {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 0 clamp(1.25rem, 5vw, 3.5rem);
+}
+.as-ctx-row {
+  display: grid; grid-template-columns: 5.5em 1fr 6em; align-items: center; gap: 1rem;
+  padding: 0.85rem 0; border-bottom: 1px solid var(--line);
+  opacity: 0; transform: translateX(-14px);
+  max-width: 640px; margin: 0 auto; width: 100%;
+}
+.as-ctx-row:first-child { border-top: 1px solid var(--line); }
+.as-ctx-sym { font-family: var(--mono); font-weight: 500; font-size: 0.95rem; color: var(--ink); }
+.as-ctx-name { font-size: 0.9rem; color: var(--ink-dim); }
+.as-ctx-chg { font-family: var(--mono); font-size: 0.9rem; text-align: right; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.as-ctx-row:first-child .as-ctx-sym,
+.as-ctx-row:first-child .as-ctx-chg { color: var(--cyan); }
+.as-ctx-row:first-child .as-ctx-name { color: var(--ink); }
+
+/* ---------- Beat 6: payoff ---------- */
+.as-payoff {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 0.9rem;
+  padding: 1.5rem clamp(1.25rem, 5vw, 3.5rem);
+}
+.as-signal-flourish { display: flex; align-items: center; gap: 0; height: 8px; }
+.as-point {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 10px 2px rgba(52,226,255,0.7);
+  opacity: 0;
+  flex: none;
+}
+.as-point-line {
+  width: 64px; height: 1px;
+  background: linear-gradient(90deg, var(--cyan), transparent);
+  transform: scaleX(0);
+  flex: none;
+}
+.as-signal-label {
+  font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.16em;
+  color: var(--cyan); text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 0.6em;
+  text-shadow: 0 0 18px rgba(52,226,255,0.35);
+  opacity: 0;
+}
+.as-signal-label .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 8px 1px var(--cyan); }
+
+.as-chart { width: 100%; max-width: 640px; height: clamp(110px, 18vw, 170px); display: block; overflow: visible; }
+.as-grid { stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.as-trig { stroke: var(--cyan); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.45; vector-effect: non-scaling-stroke; }
+.as-wick { stroke-width: 1; vector-effect: non-scaling-stroke; }
+.as-bar .as-wick, .as-bar .as-body { fill: var(--ink-faint); stroke: var(--ink-faint); }
+.as-bar.is-alert .as-wick, .as-bar.is-alert .as-body { fill: var(--cyan); stroke: var(--cyan); }
+
+.as-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); width: 100%; max-width: 640px; }
+.as-stat { background: var(--bg); padding: 0.85rem 1rem; opacity: 0; }
+.as-stat-label { display: block; font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.1em; color: var(--ink-faint); }
+.as-stat-val { display: block; font-family: var(--display); font-size: var(--step-0); color: var(--ink); margin-top: 0.25rem; }
+.as-stat-delta { display: block; font-family: var(--mono); font-size: 0.66rem; color: var(--cyan); margin-top: 0.1rem; }
+
+@media (max-width: 760px) {
+  /* The heading wraps to 2-3 lines at this width -- header + stage
+     together can run taller than 100svh. Centered flex + overflow:hidden
+     on a too-tall box clips evenly off both edges, and the top slice
+     that gets clipped is exactly the part that collides with the fixed
+     nav. Switching to natural top-down flow with real padding means the
+     section is simply as tall as it needs to be -- nothing to clip. */
+  .alert-seq { height: auto; min-height: 100svh; align-items: flex-start; padding: clamp(6rem, 24vw, 8rem) 0 3rem; }
+  .as-stage { height: clamp(460px, 66vh, 620px); }
+  .as-sym { font-size: 0.62rem !important; }
+  .as-stats { grid-template-columns: repeat(2, 1fr); }
+  .as-chart { height: 130px; }
+  .as-ctx-row { grid-template-columns: 4.2em 1fr 4.5em; gap: 0.5rem; }
+  .as-ctx-name { font-size: 0.78rem; }
+}
+
+/* This entire section tells its story through one long scroll-scrubbed
+   GSAP timeline that reduced-motion users never run -- the field, the
+   context rows, and the payoff would otherwise stay at their default
+   opacity: 0 forever. Rather than trying to force every layer visible at
+   once (they're deliberately stacked/overlapping for the crossfade,
+   which would just look like clutter if all shown together), skip
+   straight to the section's actual point: drop the field spectacle
+   entirely, and lay the context table and the signal payoff out in
+   normal document flow, stacked and fully visible. */
+@media (prefers-reduced-motion: reduce) {
+  .alert-seq { height: auto; min-height: 100svh; align-items: flex-start; padding: clamp(5.5rem, 10vw, 7rem) 0 3rem; }
+  .as-stage { height: auto; padding: 2rem 0; }
+  .as-field { display: none; }
+  .as-context { position: static; padding: 0 clamp(1.25rem, 5vw, 3.5rem) 1rem; }
+  .as-ctx-row { opacity: 1; transform: none; }
+  .as-payoff { position: static; padding: 1rem clamp(1.25rem, 5vw, 3.5rem) 1.5rem; }
+  .as-signal-label { opacity: 1; }
+  .as-stat { opacity: 1; }
+  /* The badge's state normally tracks the (skipped, for reduced-motion)
+     GSAP timeline -- its class never changes from the idle it mounts
+     with, so both color and filter need setting directly here to match
+     "alert" -- otherwise it'd sit dim and glow-free beside content
+     that's otherwise showing its fully-arrived "signal detected" state,
+     which reads as wrong/inconsistent. */
+  .as-perch-badge { color: var(--cyan); filter: drop-shadow(0 0 8px rgba(52, 226, 255, 0.55)); }
+}

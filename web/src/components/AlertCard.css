@@ -1,0 +1,107 @@
+.alert-card {
+  --rx: 0; --ry: 0; --mx: 50%; --my: 50%;
+  position: relative;
+  width: min(400px, 90vw);
+  background: linear-gradient(165deg, rgba(16,20,27,0.9), rgba(10,13,18,0.95));
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1.3rem 1.4rem 1.5rem;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 30px 70px -24px rgba(0,0,0,0.7);
+  opacity: 0;
+  transform: perspective(900px) rotateX(calc(var(--rx) * 1deg)) rotateY(calc(var(--ry) * 1deg)) translateY(10px) scale(0.98);
+  transition: opacity 0.35s cubic-bezier(.2,.8,.2,1), transform 0.35s cubic-bezier(.2,.8,.2,1), box-shadow 0.3s ease;
+  pointer-events: none;
+}
+.alert-card.is-visible {
+  opacity: 1;
+  transform: perspective(900px) rotateX(calc(var(--rx) * 1deg)) rotateY(calc(var(--ry) * 1deg)) translateY(0) scale(1);
+  pointer-events: auto;
+}
+.alert-card.is-visible:hover {
+  box-shadow: 0 34px 90px -20px rgba(0,0,0,0.8), 0 0 0 1px rgba(52,226,255,0.18);
+}
+.alert-card::before {
+  content: '';
+  position: absolute; inset: 0; border-radius: 6px; padding: 1px;
+  background:
+    radial-gradient(220px circle at var(--mx) var(--my), rgba(52,226,255,0.55), transparent 55%),
+    linear-gradient(140deg, rgba(52,226,255,0.35), transparent 45%, transparent 60%, rgba(178,107,255,0.25));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.6;
+  transition: opacity 0.3s ease;
+}
+.alert-card.is-visible:hover::before { opacity: 1; }
+
+.ac-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+.ac-head-id { display: flex; align-items: center; gap: 0.55rem; }
+.ac-body { display: flex; flex-direction: column; position: relative; }
+.ac-symbol { font-family: var(--display); font-weight: 600; font-size: var(--step-3); color: var(--ink); letter-spacing: -0.01em; }
+.ac-kind { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); margin-top: 0.3rem; }
+.ac-detail { font-size: 0.92rem; color: var(--ink-dim); margin: 0.7rem 0 0; line-height: 1.5; }
+
+/* Quiet, continuous "data is moving" cue -- only animates while the card
+   is actually on screen, never in the background. */
+.ac-pulse {
+  display: block; height: 1px; margin-top: 0.85rem;
+  background: linear-gradient(90deg, transparent, var(--line) 20%, var(--line) 80%, transparent);
+  position: relative; overflow: hidden;
+}
+.ac-pulse::after {
+  content: ''; position: absolute; top: 0; left: -30%; width: 30%; height: 100%;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  opacity: 0; animation: none;
+}
+.alert-card.is-visible .ac-pulse::after { opacity: 0.75; animation: ac-shimmer 2.6s linear infinite; }
+@keyframes ac-shimmer { from { left: -30%; } to { left: 100%; } }
+
+.ac-expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.4s cubic-bezier(.2,.8,.2,1);
+}
+.alert-card.is-open .ac-expand { grid-template-rows: 1fr; }
+.ac-expand-in { overflow: hidden; }
+
+.ac-meter { margin-top: 1.1rem; }
+.ac-meter-label { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.ac-meter-track { height: 4px; background: var(--line); border-radius: 2px; margin: 0.5rem 0 0.35rem; overflow: hidden; }
+.ac-meter-fill {
+  display: block; height: 100%; width: 0%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--cyan-dim), var(--cyan));
+  transition: width 0.6s cubic-bezier(.2,.8,.2,1) 0.1s;
+}
+.alert-card.is-open .ac-meter-fill { width: var(--pct); }
+.ac-meter-val { font-family: var(--mono); font-size: 0.76rem; color: var(--ink); }
+
+.ac-fig-row { display: flex; gap: 1.4rem; margin-top: 1rem; }
+.ac-fig { display: flex; flex-direction: column; gap: 0.25rem; }
+.ac-fig span { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.ac-fig b { font-family: var(--display); font-size: 0.9rem; color: var(--ink); font-weight: 600; }
+
+.ac-context { font-size: 0.82rem; color: var(--ink-dim); line-height: 1.55; margin: 0.9rem 0 0; }
+.ac-context b { color: var(--ink); font-weight: 600; }
+
+.ac-why { margin-top: 1rem; padding-top: 0.9rem; border-top: 1px solid var(--line); }
+.ac-why-label { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.ac-why ul { margin: 0.6rem 0 0; padding-left: 1.1rem; display: flex; flex-direction: column; gap: 0.4rem; }
+.ac-why li { font-size: 0.82rem; color: var(--ink-dim); line-height: 1.45; }
+.ac-why li::marker { color: var(--cyan); }
+
+.ac-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 1.3rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.ac-time { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
+.ac-view {
+  background: none; border: none; color: var(--cyan); font-family: var(--mono);
+  font-size: 0.72rem; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; padding: 0.2em 0;
+  transition: opacity 0.2s ease;
+}
+.ac-view:hover { opacity: 0.7; }
+
+@media (hover: none) {
+  .alert-card { transform: none !important; }
+  .alert-card::before { opacity: 0.6; }
+  .ac-view { padding: 0.6em 0; }
+}
