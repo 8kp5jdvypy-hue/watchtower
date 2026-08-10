@@ -181,6 +181,83 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     assert feed_body["signals"][0]["kinds"] == ["gap"]
 
 
+def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, client):
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    context = {"vwap": 451.2, "close": 450.0, "atr14": 2.0, "direction": "up"}
+    detection_id = write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="SPY",
+        ts_utc=now.isoformat(),
+        kinds="vwap_break",
+        headlines="SPY broke above VWAP",
+        score=5.0,
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("SPY", "vwap_break", now, 5.0, "SPY broke above VWAP", context)],
+        code_version_str="test",
+        primary_kind="vwap_break",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "ivan@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get(f"/signals/{detection_id}")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["id"] == detection_id
+    assert body["symbol"] == "SPY"
+    assert body["kinds"] == ["vwap_break"]
+    assert body["contexts"] == [context]
+    assert body["tier"] == "high"
+    assert body["trend"] == "up"
+    assert body["close"] == 450.0
+    assert body["atr14"] == 2.0
+    assert body["no_trade"] is None
+    assert body["news_driven"] is None
+    # Fewer than MIN_HISTORY_SAMPLE same-kind/same-trend prior rows exist
+    # (there are none), so historical_performance() correctly reports
+    # nothing rather than a stat built on too little data.
+    assert body["history"] is None
+
+
+def test_signal_detail_404s_for_an_unknown_id(app, client):
+    token = _request_and_extract_token(app, client, "judy2@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get("/signals/not-a-real-id")
+    assert response.status_code == 404
+
+
+def test_signal_detail_404s_for_a_sub_threshold_log_tier_detection(app, client):
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    detection_id = write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="SPY",
+        ts_utc=now.isoformat(),
+        kinds="gap",
+        headlines="SPY gapped slightly",
+        score=0.5,  # below TIER_MEDIUM -> tier == 'log'
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("SPY", "gap", now, 0.5, "SPY gapped slightly", {})],
+        code_version_str="test",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "kim@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get(f"/signals/{detection_id}")
+    assert response.status_code == 404
+
+
 def test_performance_endpoint_returns_json_with_no_data_yet(app, client):
     token = _request_and_extract_token(app, client, "heidi@example.com")
     client.get(f"/auth/magic-link/verify?token={token}")
