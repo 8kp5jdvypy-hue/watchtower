@@ -24,18 +24,17 @@ Mac (2026-08-10):
   anymore. (`scripts/status.sh` still works if you ever want to check
   this machine specifically, but it's no longer the live host.)
 
-## Left before the dashboard is fully live
+## Done — web dashboard (2026-08-10)
 
 - [x] **Deploy `web-app/`** to its own Cloudflare Workers project
-  (`perch-dashboard`) — live at `app.perchmarkets.com` (2026-08-10).
+  (`perch-dashboard`) — live at `app.perchmarkets.com`.
+- [x] **Resend domain verified**, `RESEND_API_KEY` / `RESEND_FROM_EMAIL`
+  set on the server. Confirmed working end-to-end: magic-link email
+  sent, received, clicked, logged into the real dashboard.
 
-- [ ] **Finish Resend domain verification**, then set `RESEND_API_KEY` /
-  `RESEND_FROM_EMAIL=login@perchmarkets.com` in `.env` **on the server**
-  (`/opt/perch/.env`) and run `docker compose up -d` there to pick it
-  up. DNS records are already added and resolving correctly — just
-  waiting on Resend's own dashboard to show verified. See
-  `docs/DEPLOYMENT.md` → Secrets. Until this is done, magic-link sign-in
-  works (the link just isn't emailed to anyone yet).
+The full surface is live: `perchmarkets.com` (marketing), `app.perchmarkets.com`
+(dashboard), `api.perchmarkets.com` (backend), plus the Telegram bot —
+all pointing at the one VPS.
 
 ## Before the social-media launch
 
