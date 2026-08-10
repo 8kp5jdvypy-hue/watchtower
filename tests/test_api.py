@@ -272,3 +272,25 @@ def test_client_errors_endpoint_silently_ignores_a_missing_message(app, client):
     response = client.post("/client-errors", data='{"stack": "no message here"}', content_type="text/plain")
     assert response.status_code == 204
     assert app.users_conn.execute("SELECT COUNT(*) FROM client_errors").fetchone()[0] == 0
+
+
+def test_magic_link_request_answers_a_clean_error_when_the_email_provider_fails(app, client):
+    # Reproduces a real failure seen live: ResendEmailSender.send_magic_link
+    # can raise (a Resend outage, our sending account hitting a quota, a
+    # network error) -- that must never surface as a raw Flask 500 page.
+    class BrokenEmailSender:
+        def send_magic_link(self, to_email, link_url):
+            raise RuntimeError("simulated provider outage")
+
+    app.email_sender = BrokenEmailSender()
+    response = client.post("/auth/magic-link/request", json={"email": "unlucky@example.com"})
+
+    assert response.status_code == 502
+    assert response.get_json() == {"error": "couldn't send the email, try again shortly"}
+    # The token is still created before the send is attempted -- that's
+    # fine, it just expires unused; the point of this test is that the
+    # *response* degrades cleanly, not that the token creation is undone.
+    row = app.users_conn.execute(
+        "SELECT email FROM magic_link_tokens WHERE email = 'unlucky@example.com'"
+    ).fetchone()
+    assert row is not None

@@ -27,12 +27,15 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, g, jsonify, redirect, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
+
+logger = logging.getLogger(__name__)
 
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
@@ -218,7 +221,19 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             return jsonify({"error": "too many requests, try again shortly"}), 429
         token = accounts.create_magic_link_token(app.users_conn, email, now)
         link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
-        app.email_sender.send_magic_link(email, link_url)
+        try:
+            app.email_sender.send_magic_link(email, link_url)
+        except Exception:
+            # Found live: an unhandled failure here (Resend down, a
+            # quota/rate limit on our sending account, a network hiccup)
+            # was reaching the client as a raw Flask 500 page -- an
+            # implementation detail of *our* email provider becoming a
+            # broken sign-in page for a real person. The token already
+            # exists in magic_link_tokens either way; if the email
+            # genuinely never went out, it just expires unused per its
+            # normal TTL, same as any other unused token.
+            logger.exception("send_magic_link failed for a request (email withheld from logs)")
+            return jsonify({"error": "couldn't send the email, try again shortly"}), 502
         # Same response regardless of whether this email already has an
         # account — one is created on verify if not. Nothing here reveals
         # whether an address is a known user.
