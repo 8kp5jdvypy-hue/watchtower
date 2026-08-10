@@ -28,7 +28,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import Flask, g, jsonify, redirect, request, session
@@ -42,6 +42,20 @@ from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
 
 DEFAULT_FRONTEND_URL = "https://app.perchmarkets.com"
+# The itsdangerous-signed session cookie has no server-side revocation —
+# without an expiry, a copied/leaked cookie stays valid forever. 30 days
+# bounds that blast radius while still being "stay signed in" for a
+# passwordless product where re-auth means waiting on another email.
+SESSION_LIFETIME_DAYS = 30
+
+# /performance ran two unbounded, uncached full-table queries on every
+# single request. A short TTL cache is a pragmatic fix, not a real
+# invalidation scheme — performance stats don't need per-request
+# freshness. Per-process (gunicorn runs --workers 2), so each worker
+# caches independently; that just means up to 2x the query rate, not
+# stale-across-workers inconsistency, since every worker eventually
+# converges on the same underlying data.
+PERFORMANCE_CACHE_TTL_SECONDS = 60
 
 
 def _to_jsonable(obj):
@@ -78,6 +92,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # so the cookie set by api.perchmarkets.com is also sent on requests
     # from app.perchmarkets.com.
     app.config["SESSION_COOKIE_DOMAIN"] = os.environ.get("SESSION_COOKIE_DOMAIN") or None
+    app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=SESSION_LIFETIME_DAYS)
 
     app.frontend_url = os.environ.get("FRONTEND_URL", DEFAULT_FRONTEND_URL)
     app.users_conn = users_db.connect(users_db_path) if users_db_path is not None else users_db.connect()
@@ -87,6 +102,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         else journal_connect(check_same_thread=False)
     )
     app.email_sender = build_email_sender()
+    app._performance_cache: dict = {"data": None, "computed_at": None}
 
     allowed_origins = {app.frontend_url, "http://localhost:5173"}
 
@@ -152,9 +168,13 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not email or "@" not in email:
             return jsonify({"error": "a valid email is required"}), 400
         now = datetime.now(timezone.utc)
-        token = accounts.create_magic_link_token(app.users_conn, email, now)
-        link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
-        app.email_sender.send_magic_link(email, link_url)
+        # Same response either way (see the comment below) — a rate-limited
+        # request is silently absorbed rather than erroring, so this can't
+        # be used to probe whether an address is close to its limit either.
+        if not accounts.is_magic_link_rate_limited(app.users_conn, email, now):
+            token = accounts.create_magic_link_token(app.users_conn, email, now)
+            link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
+            app.email_sender.send_magic_link(email, link_url)
         # Same response regardless of whether this email already has an
         # account — one is created on verify if not. Nothing here reveals
         # whether an address is a known user.
@@ -168,6 +188,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if email is None:
             return jsonify({"error": "invalid or expired link"}), 400
         account = accounts.get_or_create_account_for_email(app.users_conn, email)
+        session.permanent = True  # opts into PERMANENT_SESSION_LIFETIME instead of an unbounded session
         session["account_id"] = account.id
         return redirect(app.frontend_url)
 
@@ -241,9 +262,15 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     @app.route("/performance")
     @login_required
     def performance():
-        by_tier = tier_performance(app.journal_conn)
-        record = track_record(app.journal_conn)
-        return jsonify({"by_tier": _to_jsonable(by_tier), "track_record": _to_jsonable(record)})
+        cache = app._performance_cache
+        now = datetime.now(timezone.utc)
+        stale = cache["computed_at"] is None or (now - cache["computed_at"]).total_seconds() > PERFORMANCE_CACHE_TTL_SECONDS
+        if stale:
+            by_tier = tier_performance(app.journal_conn)
+            record = track_record(app.journal_conn)
+            cache["data"] = {"by_tier": _to_jsonable(by_tier), "track_record": _to_jsonable(record)}
+            cache["computed_at"] = now
+        return jsonify(cache["data"])
 
     @app.route("/activity")
     @login_required
@@ -252,7 +279,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if telegram_user_id is None:
             return jsonify({"trades": [], "stats": None})
         trades = users_db.list_trades(app.users_conn, telegram_user_id)
-        stats = users_db.personal_stats(app.users_conn, telegram_user_id)
+        stats = users_db.personal_stats(app.users_conn, telegram_user_id, trades=trades)
         return jsonify({"trades": _to_jsonable(trades), "stats": _to_jsonable(stats)})
 
     return app

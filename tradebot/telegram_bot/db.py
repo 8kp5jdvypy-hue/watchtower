@@ -923,8 +923,12 @@ def _hold_time_bucket_stats(trades: list[Trade]) -> dict[str, BucketStats | None
     return result
 
 
-def personal_stats(conn: sqlite3.Connection, telegram_user_id: int) -> dict:
-    trades = list_trades(conn, telegram_user_id)
+def personal_stats(conn: sqlite3.Connection, telegram_user_id: int, trades: list[Trade] | None = None) -> dict:
+    """trades: pass an already-fetched list_trades() result to skip a
+    second identical query — every existing caller that doesn't have one
+    handy still gets it fetched here, unchanged."""
+    if trades is None:
+        trades = list_trades(conn, telegram_user_id)
 
     by_detector = {kind: _bucket_stats([t for t in trades if t.kind == kind]) for kind in sorted({t.kind for t in trades if t.kind})}
     by_symbol = {symbol: _bucket_stats([t for t in trades if t.symbol == symbol]) for symbol in sorted({t.symbol for t in trades})}

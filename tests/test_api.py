@@ -7,7 +7,7 @@ entitlements.py (already covered in their own test files).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -76,6 +76,19 @@ def test_magic_link_request_then_verify_logs_the_user_in(app, client):
     assert body["linked_identities"] == []
 
 
+def test_login_session_cookie_has_an_expiry_not_an_unbounded_lifetime(app, client):
+    """The signed session cookie has no server-side revocation — without
+    an explicit expiry it would stay valid forever if leaked. session.
+    permanent=True (set at verify time) plus PERMANENT_SESSION_LIFETIME
+    is what puts a real Max-Age/Expires on the cookie Flask sends."""
+    token = _request_and_extract_token(app, client, "session-expiry@example.com")
+    verify_response = client.get(f"/auth/magic-link/verify?token={token}", follow_redirects=False)
+
+    set_cookie = verify_response.headers.get("Set-Cookie", "")
+    assert "session=" in set_cookie
+    assert "Max-Age=" in set_cookie or "expires=" in set_cookie.lower()
+
+
 def test_magic_link_token_cannot_be_reused(app, client):
     token = _request_and_extract_token(app, client, "bob@example.com")
     client.get(f"/auth/magic-link/verify?token={token}")
@@ -93,6 +106,42 @@ def test_magic_link_verify_rejects_an_unknown_token(client):
 def test_magic_link_request_rejects_a_missing_or_bad_email(client):
     assert client.post("/auth/magic-link/request", json={}).status_code == 400
     assert client.post("/auth/magic-link/request", json={"email": "not-an-email"}).status_code == 400
+
+
+def test_magic_link_request_is_rate_limited_per_email(app, client):
+    """After the limit, the route must still answer 202 (no oracle for
+    whether an address is rate-limited) but must stop actually creating
+    tokens/sending mail — the real abuse case this protects against is
+    mail-bombing one target address, not the requester learning anything
+    different back."""
+    email = "spammed@example.com"
+    for _ in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
+        response = client.post("/auth/magic-link/request", json={"email": email})
+        assert response.status_code == 202
+
+    count_at_limit = app.users_conn.execute(
+        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = ?", (email,)
+    ).fetchone()[0]
+    assert count_at_limit == accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS
+
+    over_limit_response = client.post("/auth/magic-link/request", json={"email": email})
+    assert over_limit_response.status_code == 202  # same response, not an error
+
+    count_after = app.users_conn.execute(
+        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = ?", (email,)
+    ).fetchone()[0]
+    assert count_after == count_at_limit  # no new token was actually created
+
+
+def test_magic_link_rate_limit_does_not_affect_other_addresses(app, client):
+    email = "spammed2@example.com"
+    for _ in range(accounts.MAGIC_LINK_RATE_LIMIT_MAX_REQUESTS):
+        client.post("/auth/magic-link/request", json={"email": email})
+    client.post("/auth/magic-link/request", json={"email": email})  # over limit
+
+    # A different address is unaffected — still gets a real token.
+    token = _request_and_extract_token(app, client, "unrelated@example.com")
+    assert token
 
 
 def test_logout_clears_the_session(app, client):
@@ -177,6 +226,37 @@ def test_performance_endpoint_returns_json_with_no_data_yet(app, client):
     body = response.get_json()
     assert body["by_tier"] == {}
     assert body["track_record"] is None
+
+
+def test_performance_endpoint_caches_within_the_ttl(app, client, monkeypatch):
+    """tier_performance/track_record used to run on every single request
+    with no caching — this locks in that a second request within the TTL
+    reuses the cached result instead of recomputing."""
+    import tradebot.api.app as api_app_module
+
+    call_count = {"n": 0}
+    real_tier_performance = api_app_module.tier_performance
+
+    def counting_tier_performance(conn):
+        call_count["n"] += 1
+        return real_tier_performance(conn)
+
+    monkeypatch.setattr(api_app_module, "tier_performance", counting_tier_performance)
+
+    token = _request_and_extract_token(app, client, "judy@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    client.get("/performance")
+    client.get("/performance")
+    client.get("/performance")
+    assert call_count["n"] == 1  # only the first request actually computed it
+
+    # Force staleness and confirm it recomputes rather than caching forever.
+    app._performance_cache["computed_at"] = datetime.now(timezone.utc) - timedelta(
+        seconds=api_app_module.PERFORMANCE_CACHE_TTL_SECONDS + 1
+    )
+    client.get("/performance")
+    assert call_count["n"] == 2
 
 
 def test_cors_header_only_reflects_an_allowed_origin(app, client):
