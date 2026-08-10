@@ -225,3 +225,50 @@ def test_events_endpoint_captures_account_id_once_signed_in(app, client):
     row = app.users_conn.execute("SELECT account_id FROM funnel_events WHERE event = 'app_authenticated'").fetchone()
     account = app.users_conn.execute("SELECT id FROM accounts WHERE email = 'ivy@example.com'").fetchone()
     assert row[0] == account[0]
+
+
+def test_events_endpoint_silently_drops_writes_past_the_per_anon_limit(app, client):
+    from tradebot.api import app as app_module
+
+    limit, _window = app_module._EVENTS_PER_ANON
+    for _ in range(limit):
+        response = _post_event_beacon(client, {"event": "landing_view", "anon_id": "flooder"})
+        assert response.status_code == 204
+
+    over_limit = _post_event_beacon(client, {"event": "landing_view", "anon_id": "flooder"})
+    assert over_limit.status_code == 204  # same response either way -- see the route's own comment
+    assert app.users_conn.execute(
+        "SELECT COUNT(*) FROM funnel_events WHERE anon_id = 'flooder'"
+    ).fetchone()[0] == limit
+
+
+def test_magic_link_request_is_rate_limited_per_email(app, client):
+    from tradebot.api import app as app_module
+
+    limit, _window = app_module._MAGIC_LINK_PER_EMAIL
+    for _ in range(limit):
+        response = client.post("/auth/magic-link/request", json={"email": "flooded@example.com"})
+        assert response.status_code == 202
+
+    over_limit = client.post("/auth/magic-link/request", json={"email": "flooded@example.com"})
+    assert over_limit.status_code == 429
+    # A *different* email is unaffected -- the limit is per-address, not global.
+    other = client.post("/auth/magic-link/request", json={"email": "someone-else@example.com"})
+    assert other.status_code == 202
+
+
+def test_client_errors_endpoint_records_a_report(app, client):
+    response = client.post(
+        "/client-errors",
+        data='{"message": "TypeError: boom", "stack": "at x (app.js:1:1)", "url": "https://app.perchmarkets.com/"}',
+        content_type="text/plain",
+    )
+    assert response.status_code == 204
+    row = app.users_conn.execute("SELECT message, url FROM client_errors").fetchone()
+    assert row == ("TypeError: boom", "https://app.perchmarkets.com/")
+
+
+def test_client_errors_endpoint_silently_ignores_a_missing_message(app, client):
+    response = client.post("/client-errors", data='{"stack": "no message here"}', content_type="text/plain")
+    assert response.status_code == 204
+    assert app.users_conn.execute("SELECT COUNT(*) FROM client_errors").fetchone()[0] == 0
