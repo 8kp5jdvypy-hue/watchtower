@@ -8,26 +8,27 @@ import Watchlist from './components/Watchlist'
 import Feed from './components/Feed'
 import Performance from './components/Performance'
 import Activity from './components/Activity'
+import Settings from './components/Settings'
 import './components/PerchMark.css'
 import './components/AppShell.css'
 
 // "Feed" -> "Signals" is a rename, not a new view -- same data, clearer
 // label. Performance and Activity stay their own honest tabs rather
 // than being forced into a "History" label that doesn't quite describe
-// either of them. No Settings tab: the only real account-level control
-// today is sign-out, which lives in the topbar where it already was --
-// inventing a Settings page with nothing real to put in it would be a
-// worse result than not having one.
+// either of them. Settings now exists because there's something real
+// to put in it: Telegram alert setup info and the plan/subscription
+// preview -- see Settings.jsx.
 const TABS = [
   { id: 'today', label: 'Today', Component: Today },
   { id: 'watchlist', label: 'Watchlist', Component: Watchlist },
   { id: 'signals', label: 'Signals', Component: Feed },
   { id: 'performance', label: 'Performance', Component: Performance },
   { id: 'activity', label: 'Activity', Component: Activity },
+  { id: 'settings', label: 'Settings', Component: Settings },
 ]
-// Same five on mobile, no "more" menu -- five compact buttons fits a
-// bottom bar fine, and hiding one behind a menu for a beta with a
-// handful of users isn't worth the added complexity.
+// Same six on mobile, no "more" menu -- see AppShell.css's mobile-nav
+// sizing; six compact buttons still fits a bottom bar without wrapping
+// or truncation at the narrowest supported width (360px).
 
 function LoadingShell() {
   return (
