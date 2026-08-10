@@ -175,6 +175,34 @@ CREATE TABLE IF NOT EXISTS funnel_events (
     props_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_funnel_events_event ON funnel_events(event, ts_utc);
+
+-- Fixed-window rate limiting -- see tradebot.rate_limit. One row per
+-- (bucket_key, window_start); bucket_key encodes both what's being
+-- limited and its scope, e.g. "magic_link:email:alice@example.com" or
+-- "events:ip:203.0.113.4", so the same table serves every endpoint
+-- that needs this without a schema change per endpoint.
+CREATE TABLE IF NOT EXISTS rate_limit_counters (
+    bucket_key TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_key, window_start)
+);
+
+-- Client-side error reports -- see tradebot.client_errors. Deliberately
+-- separate from funnel_events: different read pattern ("show me the
+-- last 50 errors"), different retention concerns, and mixing product
+-- analytics with crash reports in one table would make both harder to
+-- query honestly.
+CREATE TABLE IF NOT EXISTS client_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    message TEXT NOT NULL,
+    stack TEXT,
+    url TEXT,
+    user_agent TEXT,
+    account_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_client_errors_ts ON client_errors(ts_utc);
 """
 
 

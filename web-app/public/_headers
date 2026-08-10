@@ -1,0 +1,18 @@
+# Cloudflare Workers static-assets reads this the same way Pages does.
+# /assets/* filenames are content-hashed by Vite (index-<hash>.js) --
+# the URL itself changes whenever the content does, so "cache forever"
+# is correct, not stale: a new deploy is a new URL, never the same URL
+# with different bytes. Without this, the default `must-revalidate`
+# response makes every repeat visit pay a full round-trip to confirm
+# what's already sitting in the browser's cache unchanged.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# The OG share image and email mark are stable, un-hashed filenames --
+# still safe to cache long, just not "immutable" (a future redeploy
+# could legitimately replace either at the same URL).
+/brand/*
+  Cache-Control: public, max-age=86400
+
+/fonts/*
+  Cache-Control: public, max-age=31536000, immutable
