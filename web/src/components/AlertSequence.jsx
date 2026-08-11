@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { buildCandles } from '../scenes/candleData'
 import { PerchMarkGlyph, PERCH_MARK_VIEWBOX } from './PerchMark'
 import { useReducedMotion, useIsMobile } from '../hooks/usePrefs'

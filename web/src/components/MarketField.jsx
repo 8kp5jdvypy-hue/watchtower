@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
 import { PerchMarkGlyph } from './PerchMark'
 import './MarketField.css'
