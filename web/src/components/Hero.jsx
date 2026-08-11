@@ -8,25 +8,45 @@ import { SIGNUP_URL } from '../config'
 import { track, withRef } from '../analytics'
 import './Hero.css'
 
+const SESSION_LABEL = { pre: 'PRE-MARKET', open: 'MARKET OPEN', post: 'AFTER HOURS', closed: 'MARKET CLOSED' }
+
+// Mirrors web-app/src/hooks/useMarketClock.js's sessionState() exactly --
+// same boundaries (9:30-16:00 ET weekdays), same labels -- so the site and
+// the app never disagree about what "after hours" means. Deliberately no
+// holiday awareness, same as that hook: this is session hours, not a
+// live-verified "market is open today" claim.
+function sessionState(etDate) {
+  const day = etDate.getDay()
+  if (day === 0 || day === 6) return 'closed'
+  const minutes = etDate.getHours() * 60 + etDate.getMinutes()
+  if (minutes < 9 * 60 + 30) return 'pre'
+  if (minutes < 16 * 60) return 'open'
+  return 'post'
+}
+
 function useEtClock() {
-  const [time, setTime] = useState('')
+  const [state, setState] = useState({ time: '', sessionLabel: '' })
   useEffect(() => {
     const fmt = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
     })
-    const tick = () => setTime(fmt.format(new Date()))
+    const tick = () => {
+      const now = new Date()
+      const etParts = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
+      setState({ time: fmt.format(now), sessionLabel: SESSION_LABEL[sessionState(etParts)] })
+    }
     tick()
     const id = setInterval(tick, 1000)
     return () => clearInterval(id)
   }, [])
-  return time
+  return state
 }
 
 export default function Hero() {
   const reduced = useReducedMotion()
   const isMobile = useIsMobile()
-  const time = useEtClock()
+  const { time, sessionLabel } = useEtClock()
   const rootRef = useRef(null)
   const [inView, setInView] = useState(true)
 
@@ -81,9 +101,15 @@ export default function Hero() {
       <div className="hero-vignette" aria-hidden="true" />
 
       <div className="hero-content wrap">
+        {/* Pure text content inside the same .hero-fade element the boot
+            timeline already animates as a whole (see the GSAP timeline
+            below, which targets `.hero-fade` by class, not by count) --
+            adding sessionLabel here doesn't add a new animation target or
+            touch the timeline at all. */}
         <div className="hero-fade eyebrow">
           <span className="dot" />
-          PERCH <b>/</b> SYSTEM ACTIVE <b>/</b> <span className="hero-clock">{time || '--:--:--'} ET</span>
+          PERCH <b>/</b> SYSTEM ACTIVE {sessionLabel && <><b>/</b> {sessionLabel} </>}<b>/</b>{' '}
+          <span className="hero-clock">{time || '--:--:--'} ET</span>
         </div>
 
         <h1>

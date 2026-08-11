@@ -177,6 +177,10 @@
   .as-payoff { position: static; padding: 1rem clamp(1.25rem, 5vw, 3.5rem) 1.5rem; }
   .as-signal-label { opacity: 1; }
   .as-stat { opacity: 1; }
+  /* Missed in the original reduced-motion pass -- same "stays at its
+     GSAP-driven default forever" issue as the label/stat above. */
+  .as-point { opacity: 1; }
+  .as-point-line { transform: none; }
   /* The badge's state normally tracks the (skipped, for reduced-motion)
      GSAP timeline -- its class never changes from the idle it mounts
      with, so both color and filter need setting directly here to match
