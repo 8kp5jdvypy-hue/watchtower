@@ -1,12 +1,11 @@
-// Maps a signal's primary detector kind (+ trend -- the only two fields
-// the list endpoints, /signals/today and /signals/feed, currently return)
-// to a plain-English card headline. Every builder also accepts an optional
-// `context` argument even though no caller can supply one yet: those list
-// endpoints don't return context_json (only /signals/<id> does today), so
-// `context` is always undefined for now. Threading the parameter through
-// already means wiring in a real level name later (once that field ships)
-// is a body-only change inside level_break's builder, not a signature
-// change here or at any call site.
+// Maps a signal's primary detector kind + trend to a plain-English card
+// headline. Every builder also accepts an optional `context` argument --
+// the list endpoints (/signals/today and /signals/feed) return it as
+// context_summary, one or two fields per kind (see tradebot/api/app.py's
+// _context_summary()), not the full context_json /signals/<id> returns.
+// A kind with no entry in that endpoint's field map, or a row with
+// nothing recorded, means `context` comes through as undefined -- every
+// builder has to handle that case, not assume it's always populated.
 //
 // Only real detector kinds (tradebot/detectors.py) get an entry. An
 // unmapped kind returns null so the caller can fall back to the raw
