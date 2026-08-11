@@ -21,3 +21,11 @@
   font-size: var(--step-6); line-height: 0.98; margin: 0; color: var(--ink);
 }
 .final-cta p { color: var(--ink-dim); font-size: var(--step-1); margin: 1.6rem 0 2.4rem; }
+
+/* Unlike Hero's h1 (same --step-6), this had no mobile step-down at all --
+   "WHEN IT MOVES." alone overflows a 375px line at the unshrunk floor
+   size. Matches Hero's own mobile treatment exactly (step-6 -> step-5)
+   for consistency, not just fixing the overflow. */
+@media (max-width: 760px) {
+  .final-cta h2 { font-size: var(--step-5); }
+}

@@ -29,3 +29,9 @@
 .mcv-chip-state { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.06em; color: var(--ink-faint); }
 .mcv-chip.is-unusual { border-color: rgba(255,59,78,0.35); }
 .mcv-chip.is-unusual .mcv-chip-state { color: var(--red); }
+
+@media (hover: none) {
+  /* 0.6em padding at 0.82rem font lands under a 44px touch target on
+     the touch devices this actually matters for. */
+  .mcv-tab { min-height: 44px; padding: 0 1.2em; display: inline-flex; align-items: center; }
+}

@@ -125,5 +125,8 @@
 @media (hover: none) {
   .alert-card { transform: none !important; }
   .alert-card::before { opacity: 0.6; }
-  .ac-view { padding: 0.6em 0; }
+  /* 0.6em vertical padding at 0.72rem font lands well under a 44px touch
+     target -- min-height + horizontal padding gets there without
+     changing how it reads next to .ac-time on desktop. */
+  .ac-view { min-height: 44px; padding: 0 0.4em; display: inline-flex; align-items: center; }
 }
