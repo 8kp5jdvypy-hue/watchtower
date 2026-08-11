@@ -163,6 +163,11 @@
 .sd-history { margin: 0; color: var(--ink-dim); font-size: 0.86rem; line-height: 1.6; }
 .sd-history b { color: var(--ink); }
 .sd-history-empty { color: var(--ink-faint); }
+/* Same average move restated in ATR units (see journal.py's
+   HistoricalPerformance.avg_return_atr) -- a quieter aside next to the
+   pct figure, not a competing headline number; CLAUDE.md's own
+   convention is ATR units over raw percentages. */
+.sd-history-atr { color: var(--ink-faint); }
 /* Amber, not cyan -- amber is already this app's "worth a second look"
    color (see .sd-flag-news), and a caveat about weak evidence reads as
    that same category of thing, not a "Perch confirmed this" cyan fact. */

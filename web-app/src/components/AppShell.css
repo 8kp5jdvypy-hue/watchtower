@@ -29,13 +29,24 @@
   font-size: 1.05rem;
   color: var(--ink);
 }
+/* Reflects the real market session (see useMarketClock), not a
+   decorative always-on pulse -- only pulses during regular hours, when
+   Perch is actually actively scanning. Pre/post market get a steady dim
+   cyan (still watching, just not the primary session); a real weekend
+   close gets a plain neutral dot, same as SignalCard/SignalDetail's
+   MARKET CLOSED treatment elsewhere in the app. */
 .brand-live {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--cyan);
   box-shadow: 0 0 8px 1px var(--cyan);
-  animation: brand-pulse 2.4s ease-in-out infinite;
 }
+.brand-live-open { animation: brand-pulse 2.4s ease-in-out infinite; }
+.brand-live-pre, .brand-live-post { opacity: 0.55; }
+.brand-live-closed { background: var(--ink-faint); box-shadow: none; }
 @keyframes brand-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) {
+  .brand-live-open { animation: none; }
+}
 
 .topbar-account {
   display: flex;

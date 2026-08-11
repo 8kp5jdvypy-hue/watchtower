@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { track } from './analytics'
+import { SESSION_LABEL, useMarketClock } from './hooks/useMarketClock'
 import PerchMark from './components/PerchMark'
 import AmbientField from './components/AmbientField'
 import Login from './components/Login'
@@ -45,6 +46,7 @@ function App() {
   const [account, setAccount] = useState(undefined) // undefined = still checking, null = signed out
   const [activeTab, setActiveTab] = useState('today')
   const trackedAuthRef = useRef(false)
+  const clock = useMarketClock()
 
   const checkSession = useCallback(() => {
     api.me().then(setAccount).catch(() => setAccount(null))
@@ -87,9 +89,13 @@ function App() {
       <AmbientField />
       <div className="topbar">
         <div className="brand">
-          <PerchMark size={20} />
+          <PerchMark size={20} state={clock.session === 'open' ? 'scanning' : 'idle'} />
           <span>PERCH</span>
-          <span className="brand-live" aria-hidden="true" />
+          <span
+            className={`brand-live brand-live-${clock.session}`}
+            title={`${SESSION_LABEL[clock.session]}${clock.time ? ` — ${clock.time} ET` : ''}`}
+            aria-hidden="true"
+          />
         </div>
         <div className="topbar-account">
           <span>{account.email || 'linked via Telegram'}</span>
