@@ -20,6 +20,16 @@ from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 
 
+@pytest.fixture(autouse=True)
+def _session_secret_key(monkeypatch):
+    # create_app() now refuses to start without this set (no insecure
+    # fallback -- see tradebot/api/app.py) -- every test in this file
+    # constructs a real app, whether via the `app` fixture below or
+    # directly (e.g. test_healthz), so this is autouse rather than
+    # threaded through each one individually.
+    monkeypatch.setenv("SESSION_SECRET_KEY", "test-only-secret-key-do-not-use-in-production")
+
+
 @pytest.fixture
 def app(tmp_path):
     application = create_app(
@@ -61,6 +71,16 @@ def test_healthz():
     app = create_app(users_db_path=":memory:", journal_db_path=":memory:")
     client = app.test_client()
     assert client.get("/healthz").get_json() == {"ok": True}
+
+
+def test_create_app_refuses_to_start_without_a_session_secret_key(monkeypatch):
+    # The _session_secret_key autouse fixture sets this for every other
+    # test in this file -- unset it here specifically to confirm
+    # create_app() no longer falls back to a hardcoded default (that
+    # default sat in this public repo's source).
+    monkeypatch.delenv("SESSION_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="SESSION_SECRET_KEY"):
+        create_app(users_db_path=":memory:", journal_db_path=":memory:")
 
 
 def test_protected_endpoint_without_a_session_is_401(client):

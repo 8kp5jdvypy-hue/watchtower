@@ -141,7 +141,20 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # trusts exactly one hop of X-Forwarded-For (the one Caddy itself
     # appends), not any earlier entry a client could forge.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
-    app.config["SECRET_KEY"] = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key-set-SESSION_SECRET_KEY")
+    # No insecure fallback here on purpose -- this key signs every
+    # session cookie, and a hardcoded default sitting in a public repo
+    # (this one is public on GitHub) is a full account-takeover waiting
+    # on a single missing env var. Refuse to start rather than silently
+    # run with a signing key anyone can read the source of.
+    session_secret_key = os.environ.get("SESSION_SECRET_KEY")
+    if not session_secret_key:
+        raise RuntimeError(
+            "SESSION_SECRET_KEY is not set. Generate one with "
+            '`python3 -c "import secrets; print(secrets.token_hex(32))"` '
+            "and set it in the environment before starting this app -- "
+            "there is no safe default for a session-signing key."
+        )
+    app.config["SECRET_KEY"] = session_secret_key
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "1") != "0"

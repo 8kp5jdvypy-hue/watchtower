@@ -83,13 +83,14 @@ dev but not for a real user trying to sign in from perchmarkets.com:
   since that's already where the marketing site's DNS lives) — a
   one-time manual step, not something any script here does.
 
-Three more, for the `api` service (`tradebot/api/app.py`) — required
-for a real deployment; the code falls back to insecure dev defaults if
-they're unset, which is only fine for local development:
+Three more, for the `api` service (`tradebot/api/app.py`):
 
-- `SESSION_SECRET_KEY` — signs the login session cookie. Generate one
-  with `python3 -c "import secrets; print(secrets.token_hex(32))"` and
-  never reuse the built-in dev default in production.
+- `SESSION_SECRET_KEY` — signs the login session cookie. **Required —
+  `create_app()` raises and the process refuses to start without it.**
+  No insecure fallback: this used to default to a hardcoded dev key,
+  which — in a public repo — meant a single missing env var was a full
+  account-takeover away. Generate one with
+  `python3 -c "import secrets; print(secrets.token_hex(32))"`.
 - `FRONTEND_URL` — where the magic-link email points people (its own
   confirmation screen, `web-app/src/components/VerifyMagicLink.jsx`,
   is what actually POSTs the token back to `/auth/magic-link/verify`
