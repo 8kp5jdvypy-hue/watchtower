@@ -7,8 +7,10 @@ These tests cover the pieces that are meaningfully testable in isolation.
 """
 from __future__ import annotations
 
+import csv
 import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -24,6 +26,7 @@ from tradebot.runner import (
     HeartbeatStats,
     bar_gap_minutes,
     evaluate_bar,
+    full_session_rth_bars,
     is_bar_gap,
     is_halted_bar,
     is_stale,
@@ -1352,3 +1355,45 @@ def test_run_broad_scan_respects_the_promotion_limit():
     promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars, promotion_limit=2)
     assert len(promoted) == 2
     assert promoted == ["SYM4", "SYM3"]  # strongest first
+
+
+def _write_intraday_csv(cache_dir: Path, symbol: str, session: date, closes: list[float]) -> None:
+    path = cache_dir / symbol / f"intraday_{session.isoformat()}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rth_open = datetime(session.year, session.month, session.day, 13, 30, tzinfo=timezone.utc)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["ts", "open", "high", "low", "close", "volume"])
+        writer.writeheader()
+        for i, close in enumerate(closes):
+            ts = rth_open + timedelta(minutes=5 * i)
+            writer.writerow({"ts": ts.isoformat(), "open": close, "high": close + 0.5, "low": close - 0.5, "close": close, "volume": 1000})
+
+
+def test_full_session_rth_bars_reads_from_the_given_cache_dir_not_the_default(tmp_path):
+    """docs/sip-migration-proposal.md's Phase 1 needs run_replay's --cache-dir
+    override to actually redirect where historical bars come from, not just
+    accept the argument -- two separate cache dirs with different bar data
+    must produce different results."""
+    symbol = "TEST"
+    session = date(2026, 6, 15)
+
+    cache_a = tmp_path / "cache-a"
+    cache_b = tmp_path / "cache-b"
+    _write_intraday_csv(cache_a, symbol, session, [100.0, 101.0])
+    _write_intraday_csv(cache_b, symbol, session, [200.0, 201.0, 202.0])
+
+    bars_a = full_session_rth_bars(symbol, session, cache_a)
+    bars_b = full_session_rth_bars(symbol, session, cache_b)
+
+    assert [b.close for b in bars_a] == [100.0, 101.0]
+    assert [b.close for b in bars_b] == [200.0, 201.0, 202.0]
+
+
+def test_full_session_rth_bars_defaults_to_the_module_cache_dir():
+    """No cache_dir passed -- signature default is runner.CACHE_DIR itself,
+    not None, so a caller that forgets the argument still gets the real
+    live cache, never a silent empty/broken default."""
+    import inspect
+
+    default = inspect.signature(full_session_rth_bars).parameters["cache_dir"].default
+    assert default == runner_mod.CACHE_DIR

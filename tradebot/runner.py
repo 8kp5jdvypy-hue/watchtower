@@ -162,8 +162,8 @@ def cached_session_dates(cache_dir: Path, symbols: list[str]) -> list[date]:
     return sorted(common or set())
 
 
-def full_session_rth_bars(symbol: str, session_date: date) -> list[Bar]:
-    md = ReplayMarketData(CACHE_DIR, symbol, session_date)
+def full_session_rth_bars(symbol: str, session_date: date, cache_dir: Path = CACHE_DIR) -> list[Bar]:
+    md = ReplayMarketData(cache_dir, symbol, session_date)
     while md.advance():
         pass
     return list(md.session_bars(symbol, session_date))
@@ -743,13 +743,21 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
 # --------------------------------------------------------------------------
 
 
-def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
+def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None) -> HeartbeatStats:
     """db_path: override the journal DB path (default DEFAULT_DB_PATH).
     Used by scripts/compare_replay.py to run two versions of the
     detection logic against the same historical session into two
     separate DB files, without touching the real journal — see that
     script's module docstring for why this is a separate-file design
-    rather than an in-place A/B split."""
+    rather than an in-place A/B split.
+
+    cache_dir: override which cache tree (see scripts/fetch_cache.py) is
+    replayed against (default CACHE_DIR, i.e. data/cache/). Used the
+    same way as db_path, but for comparing two DATA sources (e.g. IEX
+    vs. SIP -- see docs/sip-migration-proposal.md's Phase 1) instead of
+    two code versions. Only affects this replay call -- run_live never
+    passes this, so live mode is untouched."""
+    cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
     open_ts, _close_ts = session_bounds(session_date)
 
     conn = connect(db_path) if db_path is not None else connect()
@@ -767,12 +775,12 @@ def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
     except Exception:
         stats.errors.append(traceback.format_exc())
 
-    historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
+    historical_sessions = [s for s in cached_session_dates(cache_dir, WATCHLIST) if s < session_date]
     history_by_symbol = {
-        symbol: [full_session_rth_bars(symbol, s) for s in historical_sessions] for symbol in WATCHLIST
+        symbol: [full_session_rth_bars(symbol, s, cache_dir) for s in historical_sessions] for symbol in WATCHLIST
     }
 
-    md = {symbol: ReplayMarketData(CACHE_DIR, symbol, session_date) for symbol in WATCHLIST}
+    md = {symbol: ReplayMarketData(cache_dir, symbol, session_date) for symbol in WATCHLIST}
     anchors: dict[str, DailyAnchors] = {}
     rth_bar_count = {symbol: 0 for symbol in WATCHLIST}
 
@@ -1173,12 +1181,18 @@ def main() -> None:
         help="override the journal DB path (default data/journal.db) — for running two versions of the "
         "detection logic against the same --replay-date into separate files, see scripts/compare_replay.py",
     )
+    parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="override which cache tree (default data/cache/) --replay-date replays against — for comparing "
+        "two DATA sources (e.g. IEX vs. SIP) into separate --db-path files, see docs/sip-migration-proposal.md",
+    )
     args = parser.parse_args()
 
     alerter = TelegramAlerter() if args.live else ConsoleAlerter()
 
     if args.replay_date:
-        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path)
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path, cache_dir=cache_dir)
     else:
         subscriber_hook = None
         medium_fanout_fn = None
