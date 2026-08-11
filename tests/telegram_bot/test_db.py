@@ -14,17 +14,43 @@ def _conn():
 
 def test_get_or_create_user_is_idempotent_and_never_wipes_settings():
     conn = _conn()
-    db.get_or_create_user(conn, 1, 100, "alice")
+    db.get_or_create_user(conn, 1, 1, "alice")  # private chat: chat_id == telegram_user_id
     db.set_timezone(conn, 1, "America/Chicago")
     db.mark_onboarded(conn, 1, datetime.now(timezone.utc))
 
-    # re-running with a different chat_id/username (e.g. they changed their
-    # Telegram @handle) must update those but never touch onboarding state
-    user = db.get_or_create_user(conn, 1, 200, "alice2")
-    assert user.chat_id == 200
+    # re-running from their private chat (e.g. they changed their
+    # Telegram @handle) must update username but never touch onboarding state
+    user = db.get_or_create_user(conn, 1, 1, "alice2")
+    assert user.chat_id == 1
     assert user.username == "alice2"
     assert user.timezone == "America/Chicago"
     assert user.is_onboarded
+
+
+def test_get_or_create_user_never_redirects_chat_id_to_a_group():
+    """A subscriber's stored delivery target -- where their HIGH alerts
+    and personal position-sizing follow-ups actually get sent (see
+    telegram_bot.delivery) -- must stay their own private chat even
+    after they run a GROUP_ALLOWED command (commands.py) or send any
+    message in a group the bot is also in. Telegram's own convention: a
+    private chat's chat_id equals the user's telegram_user_id; a group/
+    supergroup chat_id never does (dispatcher._handle_message passes
+    whatever chat the message just arrived in straight through to this
+    function on every call, private or not)."""
+    conn = _conn()
+    telegram_user_id = 12345
+    private_chat_id = telegram_user_id
+    group_chat_id = -987654321  # group/supergroup chat_ids are negative
+
+    db.get_or_create_user(conn, telegram_user_id, private_chat_id, "alice")
+
+    # A message from a group -- e.g. /status, GROUP_ALLOWED per
+    # commands.py -- must not change where alerts get sent.
+    user = db.get_or_create_user(conn, telegram_user_id, group_chat_id, "alice")
+    assert user.chat_id == private_chat_id
+
+    # Confirmed via a direct read too, not just the return value.
+    assert db.get_user(conn, telegram_user_id).chat_id == private_chat_id
 
 
 def test_pause_and_lock_state():
@@ -218,6 +244,25 @@ def test_get_or_create_user_clears_telegram_unreachable_on_a_new_update():
 
     db.get_or_create_user(conn, 1, 1, "alice")  # dispatcher calls this on every incoming update
     assert db.get_user(conn, 1).is_telegram_unreachable is False
+
+
+def test_get_or_create_user_does_not_clear_telegram_unreachable_from_a_group_message():
+    """A message arriving from a GROUP the bot is also in proves that
+    group is reachable, not that the user's own private chat is -- only
+    an update from their private chat is real evidence the terminal
+    unreachable marking should lift (same is_private gate as chat_id
+    itself, see get_or_create_user's docstring)."""
+    conn = _conn()
+    now = datetime.now(timezone.utc)
+    telegram_user_id = 12345
+    group_chat_id = -987654321
+
+    db.get_or_create_user(conn, telegram_user_id, telegram_user_id, "alice")
+    db.mark_telegram_unreachable(conn, telegram_user_id, now)
+    assert db.get_user(conn, telegram_user_id).is_telegram_unreachable is True
+
+    db.get_or_create_user(conn, telegram_user_id, group_chat_id, "alice")
+    assert db.get_user(conn, telegram_user_id).is_telegram_unreachable is True
 
 
 # --------------------------------------------------------------------------

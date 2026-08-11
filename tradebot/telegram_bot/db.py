@@ -386,15 +386,30 @@ def get_or_create_user(conn: sqlite3.Connection, telegram_user_id: int, chat_id:
     existing settings. Only touches chat_id/username on an existing row
     (they can legitimately change), never resets onboarding state.
 
-    Also clears telegram_unreachable_at: this only runs when a real
-    update arrives FROM this chat (see dispatcher._get_user), which is
-    concrete proof the chat is reachable again — the one event that can
-    legitimately undo mark_telegram_unreachable's terminal marking."""
+    chat_id is only ever overwritten when this update came from the
+    user's own private chat (Telegram's convention: chat_id ==
+    telegram_user_id there, never true for a group/supergroup/channel).
+    A subscriber's stored delivery target -- where their HIGH alerts and
+    personal position-sizing follow-ups actually get sent
+    (telegram_bot.delivery) -- must never silently become a group chat
+    just because they ran a GROUP_ALLOWED command (commands.py) or sent
+    any message there; only re-DMing the bot can change it back. The
+    very first row for a brand-new user still takes whatever chat_id
+    they were first seen in (nothing to protect yet there).
+
+    telegram_unreachable_at is cleared by the same is_private gate, for
+    the same reason: a message arriving from a GROUP the bot is also in
+    is concrete proof that group is reachable, not that the user's own
+    private chat is -- only an update from their private chat is real
+    evidence mark_telegram_unreachable's terminal marking should lift."""
+    is_private = chat_id == telegram_user_id
     conn.execute(
         "INSERT INTO users (telegram_user_id, chat_id, username, created_at) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(telegram_user_id) DO UPDATE SET chat_id=excluded.chat_id, username=excluded.username, "
-        "telegram_unreachable_at=NULL",
-        (telegram_user_id, chat_id, username, _now_iso()),
+        "ON CONFLICT(telegram_user_id) DO UPDATE SET "
+        "chat_id = CASE WHEN ? THEN excluded.chat_id ELSE users.chat_id END, "
+        "username=excluded.username, "
+        "telegram_unreachable_at = CASE WHEN ? THEN NULL ELSE users.telegram_unreachable_at END",
+        (telegram_user_id, chat_id, username, _now_iso(), is_private, is_private),
     )
     conn.commit()
     return get_user(conn, telegram_user_id)

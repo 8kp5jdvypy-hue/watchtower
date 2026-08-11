@@ -5,7 +5,7 @@
 // a frontend wiring regression without needing Flask, sqlite, or a
 // network connection at all.
 
-const EMPTY_AUTHENTICATED_RESPONSES = {
+export const EMPTY_AUTHENTICATED_RESPONSES = {
   '**/watchlist': { symbols: ['SPY', 'QQQ'], is_custom: false },
   '**/signals/today': { session: '2026-01-01', signals: [] },
   '**/signals/feed*': { signals: [] },

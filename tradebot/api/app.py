@@ -32,7 +32,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, g, jsonify, redirect, request, session
+from flask import Flask, g, jsonify, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 logger = logging.getLogger(__name__)
@@ -141,7 +141,20 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # trusts exactly one hop of X-Forwarded-For (the one Caddy itself
     # appends), not any earlier entry a client could forge.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
-    app.config["SECRET_KEY"] = os.environ.get("SESSION_SECRET_KEY", "dev-only-insecure-key-set-SESSION_SECRET_KEY")
+    # No insecure fallback here on purpose -- this key signs every
+    # session cookie, and a hardcoded default sitting in a public repo
+    # (this one is public on GitHub) is a full account-takeover waiting
+    # on a single missing env var. Refuse to start rather than silently
+    # run with a signing key anyone can read the source of.
+    session_secret_key = os.environ.get("SESSION_SECRET_KEY")
+    if not session_secret_key:
+        raise RuntimeError(
+            "SESSION_SECRET_KEY is not set. Generate one with "
+            '`python3 -c "import secrets; print(secrets.token_hex(32))"` '
+            "and set it in the environment before starting this app -- "
+            "there is no safe default for a session-signing key."
+        )
+    app.config["SECRET_KEY"] = session_secret_key
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "1") != "0"
@@ -162,7 +175,17 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     app._performance_cache: dict = {"data": None, "computed_at": None}
     app._quote_cache: dict = {}
 
-    allowed_origins = {app.frontend_url, "http://localhost:5173"}
+    # Trusts app.frontend_url only, plus whatever a developer's own local
+    # frontend dev server is running on -- opt-in via DEV_CORS_ORIGIN
+    # (e.g. "http://localhost:5173"), never assumed. A hardcoded
+    # localhost origin used to be trusted unconditionally here, in
+    # production too; SESSION_COOKIE_SAMESITE=Lax already stopped that
+    # from being directly exploitable, but a public API has no business
+    # trusting a dev origin at all unless someone explicitly asked it to.
+    allowed_origins = {app.frontend_url}
+    dev_cors_origin = os.environ.get("DEV_CORS_ORIGIN")
+    if dev_cors_origin:
+        allowed_origins.add(dev_cors_origin)
 
     @app.after_request
     def add_cors_headers(response):
@@ -271,7 +294,11 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not rate_limit.allow(app.users_conn, f"magic_link:ip:{request.remote_addr}", *_MAGIC_LINK_PER_IP, now=now):
             return jsonify({"error": "too many requests, try again shortly"}), 429
         token = accounts.create_magic_link_token(app.users_conn, email, now)
-        link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
+        # Points at the frontend's own confirmation screen
+        # (VerifyMagicLink.jsx), not directly at /auth/magic-link/verify
+        # below -- see that route's comment for why a bare GET can never
+        # be the thing that actually signs someone in.
+        link_url = f"{app.frontend_url.rstrip('/')}/?token={token}"
         try:
             app.email_sender.send_magic_link(email, link_url)
         except Exception:
@@ -290,9 +317,24 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # whether an address is a known user.
         return jsonify({"ok": True}), 202
 
-    @app.route("/auth/magic-link/verify")
+    @app.route("/auth/magic-link/verify", methods=["POST"])
     def verify_magic_link():
-        token = request.args.get("token", "")
+        # POST with a JSON body, not the GET-with-token-in-the-query this
+        # used to be. A bare GET is triggerable by anything that merely
+        # LOADS a URL -- an <img src="…?token=…">, an email-scanning
+        # security appliance prefetching links, a <link rel=prefetch> --
+        # with no click and no JS, and the Set-Cookie in the response
+        # would land regardless of how the request was triggered. A JSON
+        # POST can't be forged the same way: request()'s
+        # Content-Type: application/json (see web-app/src/api.js) forces
+        # a CORS preflight, and add_cors_headers above only allows it
+        # from app.frontend_url -- an attacker page's fetch() never gets
+        # past that, and a plain auto-submitting HTML <form> can't set a
+        # JSON content-type at all. See web-app/src/components/
+        # VerifyMagicLink.jsx for the confirmation screen this now
+        # requires an actual button press on.
+        data = request.get_json(silent=True) or {}
+        token = data.get("token") or ""
         now = datetime.now(timezone.utc)
         email = accounts.verify_magic_link_token(app.users_conn, token, now)
         if email is None:
@@ -300,7 +342,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         account = accounts.get_or_create_account_for_email(app.users_conn, email)
         session.permanent = True  # opts into PERMANENT_SESSION_LIFETIME instead of an unbounded session
         session["account_id"] = account.id
-        return redirect(app.frontend_url)
+        return jsonify({"ok": True})
 
     @app.route("/auth/logout", methods=["POST"])
     def logout():

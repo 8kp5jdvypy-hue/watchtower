@@ -83,22 +83,36 @@ dev but not for a real user trying to sign in from perchmarkets.com:
   since that's already where the marketing site's DNS lives) — a
   one-time manual step, not something any script here does.
 
-Three more, for the `api` service (`tradebot/api/app.py`) — required
-for a real deployment; the code falls back to insecure dev defaults if
-they're unset, which is only fine for local development:
+Three more, for the `api` service (`tradebot/api/app.py`):
 
-- `SESSION_SECRET_KEY` — signs the login session cookie. Generate one
-  with `python3 -c "import secrets; print(secrets.token_hex(32))"` and
-  never reuse the built-in dev default in production.
-- `FRONTEND_URL` — where `/auth/magic-link/verify` redirects after a
-  successful login, and the only origin the API's CORS headers allow.
-  Set to `https://app.perchmarkets.com` once the dashboard is deployed
+- `SESSION_SECRET_KEY` — signs the login session cookie. **Required —
+  `create_app()` raises and the process refuses to start without it.**
+  No insecure fallback: this used to default to a hardcoded dev key,
+  which — in a public repo — meant a single missing env var was a full
+  account-takeover away. Generate one with
+  `python3 -c "import secrets; print(secrets.token_hex(32))"`.
+- `FRONTEND_URL` — where the magic-link email points people (its own
+  confirmation screen, `web-app/src/components/VerifyMagicLink.jsx`,
+  is what actually POSTs the token back to `/auth/magic-link/verify`
+  once they press the button there — that route itself is a same-
+  origin JSON POST, not something a plain emailed link can trigger on
+  its own), and the primary origin the API's CORS headers allow. Set
+  to `https://app.perchmarkets.com` once the dashboard is deployed
   there (Phase 6); until then, magic-link login has nowhere real to
-  redirect to.
+  send people. See `DEV_CORS_ORIGIN` below for also trusting a local
+  frontend dev server.
 - `SESSION_COOKIE_DOMAIN` — set to `.perchmarkets.com` so the session
   cookie `api.perchmarkets.com` sets is also sent on requests from
   `app.perchmarkets.com`. Leave unset for local development (host-only
   cookie).
+
+One more, local development only — never set in production:
+
+- `DEV_CORS_ORIGIN` — an extra origin (e.g. `http://localhost:5173`)
+  the API's CORS headers trust, on top of `FRONTEND_URL`. Unset means
+  only the real frontend origin is ever trusted — a local dev origin
+  used to be hardcoded in and trusted unconditionally, in production
+  too; this is opt-in now.
 
 Local dev over plain `http://localhost` needs one more override: the
 session cookie is `Secure` by default (required in production, since

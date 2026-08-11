@@ -20,6 +20,16 @@ from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 
 
+@pytest.fixture(autouse=True)
+def _session_secret_key(monkeypatch):
+    # create_app() now refuses to start without this set (no insecure
+    # fallback -- see tradebot/api/app.py) -- every test in this file
+    # constructs a real app, whether via the `app` fixture below or
+    # directly (e.g. test_healthz), so this is autouse rather than
+    # threaded through each one individually.
+    monkeypatch.setenv("SESSION_SECRET_KEY", "test-only-secret-key-do-not-use-in-production")
+
+
 @pytest.fixture
 def app(tmp_path):
     application = create_app(
@@ -50,10 +60,27 @@ def _request_and_extract_token(app, client, email: str) -> str:
     return row[0]
 
 
+def _verify_token(client, token: str):
+    """Same request the confirm button in web-app/src/components/
+    VerifyMagicLink.jsx sends -- a JSON POST, not a GET-with-token-in-
+    the-query (see /auth/magic-link/verify's own comment for why)."""
+    return client.post("/auth/magic-link/verify", json={"token": token})
+
+
 def test_healthz():
     app = create_app(users_db_path=":memory:", journal_db_path=":memory:")
     client = app.test_client()
     assert client.get("/healthz").get_json() == {"ok": True}
+
+
+def test_create_app_refuses_to_start_without_a_session_secret_key(monkeypatch):
+    # The _session_secret_key autouse fixture sets this for every other
+    # test in this file -- unset it here specifically to confirm
+    # create_app() no longer falls back to a hardcoded default (that
+    # default sat in this public repo's source).
+    monkeypatch.delenv("SESSION_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="SESSION_SECRET_KEY"):
+        create_app(users_db_path=":memory:", journal_db_path=":memory:")
 
 
 def test_protected_endpoint_without_a_session_is_401(client):
@@ -64,9 +91,9 @@ def test_protected_endpoint_without_a_session_is_401(client):
 def test_magic_link_request_then_verify_logs_the_user_in(app, client):
     token = _request_and_extract_token(app, client, "alice@example.com")
 
-    verify_response = client.get(f"/auth/magic-link/verify?token={token}", follow_redirects=False)
-    assert verify_response.status_code == 302
-    assert verify_response.headers["Location"] == app.frontend_url
+    verify_response = _verify_token(client, token)
+    assert verify_response.status_code == 200
+    assert verify_response.get_json() == {"ok": True}
 
     me_response = client.get("/me")
     assert me_response.status_code == 200
@@ -82,7 +109,7 @@ def test_login_session_cookie_has_an_expiry_not_an_unbounded_lifetime(app, clien
     permanent=True (set at verify time) plus PERMANENT_SESSION_LIFETIME
     is what puts a real Max-Age/Expires on the cookie Flask sends."""
     token = _request_and_extract_token(app, client, "session-expiry@example.com")
-    verify_response = client.get(f"/auth/magic-link/verify?token={token}", follow_redirects=False)
+    verify_response = _verify_token(client, token)
 
     set_cookie = verify_response.headers.get("Set-Cookie", "")
     assert "session=" in set_cookie
@@ -91,16 +118,25 @@ def test_login_session_cookie_has_an_expiry_not_an_unbounded_lifetime(app, clien
 
 def test_magic_link_token_cannot_be_reused(app, client):
     token = _request_and_extract_token(app, client, "bob@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     second_client = app.test_client()
-    reuse_response = second_client.get(f"/auth/magic-link/verify?token={token}")
+    reuse_response = _verify_token(second_client, token)
     assert reuse_response.status_code == 400
 
 
 def test_magic_link_verify_rejects_an_unknown_token(client):
-    response = client.get("/auth/magic-link/verify?token=not-a-real-token")
+    response = _verify_token(client, "not-a-real-token")
     assert response.status_code == 400
+
+
+def test_magic_link_verify_rejects_a_get_request(client):
+    """The whole point of the POST-only switch: a bare GET (what an
+    <img> tag, a link-scanning security appliance, or a <link
+    rel=prefetch> could trigger with zero user action) must never be
+    able to establish a session -- see the route's own comment."""
+    response = client.get("/auth/magic-link/verify?token=whatever")
+    assert response.status_code == 405
 
 
 def test_magic_link_request_rejects_a_missing_or_bad_email(client):
@@ -110,7 +146,7 @@ def test_magic_link_request_rejects_a_missing_or_bad_email(client):
 
 def test_logout_clears_the_session(app, client):
     token = _request_and_extract_token(app, client, "carol@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
     assert client.get("/me").status_code == 200
 
     logout_response = client.post("/auth/logout")
@@ -120,7 +156,7 @@ def test_logout_clears_the_session(app, client):
 
 def test_watchlist_defaults_to_the_global_watchlist_with_no_linked_telegram(app, client):
     token = _request_and_extract_token(app, client, "dana@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/watchlist")
     body = response.get_json()
@@ -130,7 +166,7 @@ def test_watchlist_defaults_to_the_global_watchlist_with_no_linked_telegram(app,
 
 def test_watchlist_reflects_a_linked_telegram_users_custom_list(app, client):
     token = _request_and_extract_token(app, client, "erin@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
     me_body = client.get("/me").get_json()
 
     telegram_user = users_db.get_or_create_user(app.users_conn, 4242, 4242, "erin")
@@ -158,7 +194,7 @@ def test_quotes_returns_real_quotes_for_watchlist_symbols(app, client, monkeypat
     monkeypatch.setattr(api_app_module, "fetch_quotes", fake_fetch_quotes)
 
     token = _request_and_extract_token(app, client, "quotes1@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/quotes?symbols=SPY,QQQ")
     assert response.status_code == 200
@@ -173,7 +209,7 @@ def test_quotes_silently_drops_symbols_outside_the_watchlist(app, client, monkey
     monkeypatch.setattr(api_app_module, "fetch_quotes", lambda symbols: {s: _fake_quote(s, 50.0) for s in symbols})
 
     token = _request_and_extract_token(app, client, "quotes2@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     # DOGE isn't on the default watchlist -- same "no oracle for what's
     # allowed" discipline as /events: silently excluded, not a 400.
@@ -190,7 +226,7 @@ def test_quotes_omits_a_symbol_the_vendor_has_no_quote_for(app, client, monkeypa
     monkeypatch.setattr(api_app_module, "fetch_quotes", lambda symbols: {"SPY": _fake_quote("SPY", 100.0)})
 
     token = _request_and_extract_token(app, client, "quotes3@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/quotes?symbols=SPY,QQQ")
     body = response.get_json()
@@ -209,7 +245,7 @@ def test_quotes_caches_within_the_ttl(app, client, monkeypatch):
     monkeypatch.setattr(api_app_module, "fetch_quotes", counting_fetch_quotes)
 
     token = _request_and_extract_token(app, client, "quotes4@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     client.get("/quotes?symbols=SPY")
     client.get("/quotes?symbols=SPY")
@@ -224,7 +260,7 @@ def test_quotes_caches_within_the_ttl(app, client, monkeypatch):
 
 def test_activity_is_empty_with_no_linked_telegram_identity(app, client):
     token = _request_and_extract_token(app, client, "frank@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/activity")
     body = response.get_json()
@@ -252,7 +288,7 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "grace@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     feed_body = client.get("/signals/feed").get_json()
     assert len(feed_body["signals"]) == 1
@@ -288,7 +324,7 @@ def test_signals_feed_includes_a_context_summary_for_level_break(app, client):
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "level-break@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     body = client.get("/signals/feed").get_json()
     signal = body["signals"][0]
@@ -318,7 +354,7 @@ def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, 
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "rvol@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     body = client.get("/signals/feed").get_json()
     signal = body["signals"][0]
@@ -348,7 +384,7 @@ def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, clie
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "ivan@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get(f"/signals/{detection_id}")
     assert response.status_code == 200
@@ -401,7 +437,7 @@ def test_signal_detail_includes_backfilled_marks_in_after_detection_order(app, c
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "marks@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get(f"/signals/{detection_id}")
     body = response.get_json()
@@ -415,7 +451,7 @@ def test_signal_detail_includes_backfilled_marks_in_after_detection_order(app, c
 
 def test_signal_detail_404s_for_an_unknown_id(app, client):
     token = _request_and_extract_token(app, client, "judy2@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/signals/not-a-real-id")
     assert response.status_code == 404
@@ -441,7 +477,7 @@ def test_signal_detail_404s_for_a_sub_threshold_log_tier_detection(app, client):
     app.journal_conn.commit()
 
     token = _request_and_extract_token(app, client, "kim@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get(f"/signals/{detection_id}")
     assert response.status_code == 404
@@ -449,7 +485,7 @@ def test_signal_detail_404s_for_a_sub_threshold_log_tier_detection(app, client):
 
 def test_performance_endpoint_returns_json_with_no_data_yet(app, client):
     token = _request_and_extract_token(app, client, "heidi@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     response = client.get("/performance")
     assert response.status_code == 200
@@ -475,7 +511,7 @@ def test_performance_endpoint_caches_within_the_ttl(app, client, monkeypatch):
     monkeypatch.setattr(api_app_module, "tier_performance", counting_tier_performance)
 
     token = _request_and_extract_token(app, client, "judy@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     client.get("/performance")
     client.get("/performance")
@@ -496,6 +532,27 @@ def test_cors_header_only_reflects_an_allowed_origin(app, client):
 
     disallowed = client.get("/healthz", headers={"Origin": "https://evil.example.com"})
     assert "Access-Control-Allow-Origin" not in disallowed.headers
+
+
+def test_cors_does_not_trust_a_dev_origin_by_default(client):
+    # No DEV_CORS_ORIGIN set for this app instance (see the `app` fixture)
+    # -- a real production deployment never sets it either, so this is
+    # what api.perchmarkets.com actually enforces today.
+    disallowed = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+    assert "Access-Control-Allow-Origin" not in disallowed.headers
+
+
+def test_cors_trusts_a_dev_origin_only_when_explicitly_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEV_CORS_ORIGIN", "http://localhost:5199")
+    dev_app = create_app(users_db_path=tmp_path / "dev-users.db", journal_db_path=tmp_path / "dev-journal.db")
+    dev_client = dev_app.test_client()
+
+    allowed = dev_client.get("/healthz", headers={"Origin": "http://localhost:5199"})
+    assert allowed.headers.get("Access-Control-Allow-Origin") == "http://localhost:5199"
+
+    # Only the exact configured origin, not localhost origins in general.
+    still_disallowed = dev_client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+    assert "Access-Control-Allow-Origin" not in still_disallowed.headers
 
 
 def _post_event_beacon(client, body: dict):
@@ -529,7 +586,7 @@ def test_events_endpoint_silently_ignores_malformed_bodies(app, client):
 
 def test_events_endpoint_captures_account_id_once_signed_in(app, client):
     token = _request_and_extract_token(app, client, "ivy@example.com")
-    client.get(f"/auth/magic-link/verify?token={token}")
+    _verify_token(client, token)
 
     _post_event_beacon(client, {"event": "app_authenticated", "anon_id": "anon-3"})
 
