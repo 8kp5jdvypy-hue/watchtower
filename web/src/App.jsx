@@ -60,11 +60,12 @@ export default function App() {
 
   return (
     <>
+      <a href="#main-content" className="skip-link">Skip to content</a>
       <BootSequence />
       <Grain />
       <CustomCursor />
       <Nav />
-      <main>
+      <main id="main-content">
         <Hero />
         <MarketField />
         <AlertSequence />

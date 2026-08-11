@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import PerchMark from './PerchMark'
 import { useFinePointer, useReducedMotion } from '../hooks/usePrefs'
 import './AlertCard.css'
@@ -37,6 +37,15 @@ export default function AlertCard({ data, visible }) {
   const reduced = useReducedMotion()
   const tiltActive = fine && !reduced
   const [open, setOpen] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    function onKeyDown(e) {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [open])
 
   function onMove(e) {
     if (!tiltActive || !cardRef.current) return

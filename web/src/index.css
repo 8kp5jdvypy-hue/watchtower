@@ -96,6 +96,15 @@ button { font: inherit; color: inherit; }
 }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
 
+.skip-link {
+  position: absolute; top: -100%; left: 1rem; z-index: 1000;
+  background: var(--cyan); color: var(--bg);
+  font-family: var(--mono); font-size: 0.85rem; font-weight: 600;
+  padding: 0.75em 1.2em; border-radius: 4px; text-decoration: none;
+  transition: top 0.2s ease;
+}
+.skip-link:focus { top: 1rem; }
+
 .demo-tag {
   font-family: var(--mono);
   font-size: 0.62rem;

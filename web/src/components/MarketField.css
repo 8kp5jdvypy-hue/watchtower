@@ -94,4 +94,7 @@
   .mf-sym { animation: none; opacity: 0.5; }
   .mf-caption { opacity: 1; }
   .mf-kestrel { opacity: 0.55; }
+  /* Now rendering its final frame directly (see MarketField.jsx) instead
+     of the GSAP-only "3" it can never reach here -- show it. */
+  .mf-funnel { opacity: 1; }
 }
