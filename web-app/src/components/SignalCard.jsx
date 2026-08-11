@@ -1,4 +1,5 @@
 import PerchMark from './PerchMark'
+import { cardHeadline } from '../signalHeadlines'
 import './SignalCard.css'
 
 // Matches the `kind` values detectors.py actually produces -- anything
@@ -32,12 +33,23 @@ function relativeTime(tsUtc) {
 // cyan edge/bloom"); medium stays quieter.
 export default function SignalCard({ signal, onView }) {
   const isHigh = signal.tier === 'high'
+  const primaryKind = signal.kinds?.[0]
+  // No context on this list payload yet (only /signals/<id> has it -- see
+  // backend item 1's draft), so this is the reduced-fidelity version: kind
+  // + trend only, no level name. Falls back to the raw backend sentence
+  // for any kind without a mapping, or when it returns nothing.
+  const plainHeadline = cardHeadline(primaryKind, signal.trend)
+  // The eyebrow already names the primary kind below -- listing it again
+  // as its own tag would just repeat the same word twice in one card.
+  // Secondary kinds (a cluster with more than one detector firing) still
+  // get their tag.
+  const secondaryKinds = signal.kinds?.slice(1) ?? []
   return (
     <div className={`signal-card${isHigh ? ' is-high' : ''}`}>
       <div className="sc-head">
         <span className="sc-head-id">
           <PerchMark size={14} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
-          <span className="sc-eyebrow">PERCH DETECTED</span>
+          <span className="sc-eyebrow">{primaryKind ? kindLabel(primaryKind) : 'PERCH DETECTED'}</span>
         </span>
         <span className={`sc-tier sc-tier-${signal.tier}`}>{signal.tier}</span>
       </div>
@@ -47,10 +59,11 @@ export default function SignalCard({ signal, onView }) {
           {signal.symbol}
           <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
         </span>
-        <p className="sc-headline">{signal.headlines}</p>
-        {signal.kinds?.length > 0 && (
+        <p className="sc-headline">{plainHeadline || signal.headlines}</p>
+        {plainHeadline && <p className="sc-headline-raw">{signal.headlines}</p>}
+        {secondaryKinds.length > 0 && (
           <div className="sc-kinds">
-            {signal.kinds.map((k) => <span className="sc-kind-tag" key={k}>{kindLabel(k)}</span>)}
+            {secondaryKinds.map((k) => <span className="sc-kind-tag" key={k}>{kindLabel(k)}</span>)}
           </div>
         )}
       </div>

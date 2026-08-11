@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
+import { SMALL_SAMPLE_THRESHOLD, interpretHistory } from '../signalHistory'
 import PerchMark from './PerchMark'
 import './SignalDetail.css'
 
@@ -186,12 +187,18 @@ export default function SignalDetail({ id, onClose }) {
             <section className="sd-section">
               <h2 className="sd-section-title">Historical stats</h2>
               {data.history ? (
-                <p className="sd-history">
-                  <b>{data.history.sample_size}</b> historical observation{data.history.sample_size === 1 ? '' : 's'} of this
-                  same setup · <b>{pct(data.history.continuation_rate)}</b> continued in the same direction within{' '}
-                  {data.history.offset_min} min · avg follow-through{' '}
-                  <b>{data.history.avg_return_pct.toFixed(2)}%</b>
-                </p>
+                <>
+                  <p className="sd-history">
+                    <b>{data.history.sample_size}</b> historical observation{data.history.sample_size === 1 ? '' : 's'} of this
+                    same setup · <b>{pct(data.history.continuation_rate)}</b> continued in the same direction within{' '}
+                    {data.history.offset_min} min · avg follow-through{' '}
+                    <b>{data.history.avg_return_pct.toFixed(2)}%</b>
+                  </p>
+                  {data.history.sample_size < SMALL_SAMPLE_THRESHOLD && (
+                    <span className="sd-small-sample">Small sample — treat as weak evidence</span>
+                  )}
+                  <p className="sd-history-interpretation">{interpretHistory(data.history, data.trend)}</p>
+                </>
               ) : (
                 <p className="sd-history sd-history-empty">
                   Not enough historical data yet for this exact setup to report a reliable base rate.
