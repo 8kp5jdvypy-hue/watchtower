@@ -12,8 +12,12 @@ const CATEGORIES = [
   },
   {
     key: 'etfs', label: 'ETFs', status: 'live',
+    // SPY/QQQ/IWM/USO are the actual ETF-type symbols in the live
+    // watchlist (see tradebot/config.py's WATCHLIST) -- SMH/XLK aren't
+    // monitored today, so showing them here as "live" would overstate
+    // real coverage.
     desc: 'Sector and broad-market context, so a single name\'s move can be checked against what everything else is doing.',
-    symbols: [{ s: 'SPY', d: 'NORMAL' }, { s: 'QQQ', d: 'NORMAL' }, { s: 'SMH', d: 'UNUSUAL' }, { s: 'XLK', d: 'NORMAL' }],
+    symbols: [{ s: 'SPY', d: 'NORMAL' }, { s: 'QQQ', d: 'NORMAL' }, { s: 'IWM', d: 'UNUSUAL' }, { s: 'USO', d: 'NORMAL' }],
   },
   {
     key: 'crypto', label: 'Crypto', status: 'soon',
