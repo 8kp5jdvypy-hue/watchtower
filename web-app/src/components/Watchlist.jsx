@@ -1,22 +1,25 @@
 import { useCallback, useMemo } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { useQuotes } from '../hooks/useQuotes'
 import { tierWeight } from '../signalOrder'
 import PerchMark from './PerchMark'
 import './Watchlist.css'
 import './Views.css'
 
-// Deliberately no price or % change per row -- the API has no live
-// quote data to back that with (only a symbol list), and the brief and
-// this whole product are explicit that a real number beats a
-// convincing-looking fake one. What IS real and worth surfacing: which
-// watchlist names have an active signal today, cross-referenced from
-// the (real) signals endpoint.
+// Live price per row, via /quotes -- real last-trade price, nothing
+// more. No day % change here: the quote the API returns has bid/ask/
+// last only, no day-open or prior-close reference to compute a real
+// change against, so showing one would mean inventing a baseline. What
+// IS real and worth surfacing beyond price: which watchlist names have
+// an active signal today, cross-referenced from the (real) signals
+// endpoint.
 export default function Watchlist() {
   const fetchWatchlist = useCallback(() => api.watchlist(), [])
   const fetchToday = useCallback(() => api.signalsToday(), [])
   const { data, error, loading } = useApiData(fetchWatchlist)
   const { data: today } = useApiData(fetchToday)
+  const quotes = useQuotes(data?.symbols ?? [])
 
   const signaled = useMemo(() => {
     const map = new Map()
@@ -57,17 +60,21 @@ export default function Watchlist() {
         <div className="wl-rows">
           {orderedSymbols.map((symbol) => {
             const sig = signaled.get(symbol)
+            const quote = quotes[symbol]
             return (
               <div className={`wl-row${sig ? ' has-signal' : ''}`} key={symbol}>
                 <span className="wl-symbol">{symbol}</span>
-                {sig ? (
-                  <span className={`wl-badge wl-badge-${sig.tier}`}>
-                    <PerchMark size={11} state={sig.tier === 'high' ? 'alert' : 'confirmed'} accent={false} />
-                    Signal
-                  </span>
-                ) : (
-                  <span className="wl-quiet">quiet</span>
-                )}
+                <div className="wl-row-right">
+                  {quote != null && <span className="wl-price">${quote.last.toFixed(2)}</span>}
+                  {sig ? (
+                    <span className={`wl-badge wl-badge-${sig.tier}`}>
+                      <PerchMark size={11} state={sig.tier === 'high' ? 'alert' : 'confirmed'} accent={false} />
+                      Signal
+                    </span>
+                  ) : (
+                    <span className="wl-quiet">quiet</span>
+                  )}
+                </div>
               </div>
             )
           })}

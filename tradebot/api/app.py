@@ -41,6 +41,7 @@ from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind_performance, tier_performance
+from tradebot.marketdata import fetch_quotes
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
@@ -60,6 +61,11 @@ SESSION_LIFETIME_DAYS = 30
 # stale-across-workers inconsistency, since every worker eventually
 # converges on the same underlying data.
 PERFORMANCE_CACHE_TTL_SECONDS = 60
+# Quotes move fast; much shorter than /performance's TTL. Per-symbol, not
+# a single blob (see the /quotes route) -- multiple browser tabs polling
+# different symbol sets shouldn't multiply real Alpaca calls, but a
+# quote genuinely goes stale in seconds, not minutes.
+QUOTE_CACHE_TTL_SECONDS = 10
 
 # How many magic-link requests one email address / one IP can make
 # before being rate-limited, and the same for the two public write
@@ -154,6 +160,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     )
     app.email_sender = build_email_sender()
     app._performance_cache: dict = {"data": None, "computed_at": None}
+    app._quote_cache: dict = {}
 
     allowed_origins = {app.frontend_url, "http://localhost:5173"}
 
@@ -325,10 +332,37 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         active = custom or config.WATCHLIST
         return jsonify({"symbols": active, "is_custom": custom is not None})
 
+    @app.route("/quotes")
+    @login_required
+    def quotes():
+        # Same watchlist resolution as /watchlist -- this can't become a
+        # general quote-lookup proxy, only the account's own symbols are
+        # ever fetchable. Silently drops anything outside that set rather
+        # than 400ing, same "no oracle for what's allowed" discipline as
+        # /events elsewhere in this file.
+        requested = {s.strip().upper() for s in request.args.get("symbols", "").split(",") if s.strip()}
+        telegram_user_id = _linked_telegram_user_id(app.users_conn, g.account)
+        custom = users_db.get_watchlist(app.users_conn, telegram_user_id) if telegram_user_id else None
+        allowed = set(custom or config.WATCHLIST)
+        symbols = sorted(requested & allowed)
+
+        now = datetime.now(timezone.utc)
+        cache = app._quote_cache  # {symbol: (Quote, fetched_at)}
+        stale = [
+            s for s in symbols
+            if s not in cache or (now - cache[s][1]).total_seconds() > QUOTE_CACHE_TTL_SECONDS
+        ]
+        if stale:
+            fetched = fetch_quotes(stale)
+            for symbol, q in fetched.items():
+                cache[symbol] = (q, now)
+
+        return jsonify({"quotes": {s: _to_jsonable(cache[s][0]) for s in symbols if s in cache}})
+
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
-            "primary_kind, context_json "
+            "primary_kind, context_json, close "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -348,6 +382,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "tier": row[7], "trend": row[8], "alerted": bool(row[9]),
                 "primary_kind": primary_kind,
                 "context_summary": _context_summary(kinds_list, primary_kind, row[11]),
+                "close": row[12],
             })
         return result
 

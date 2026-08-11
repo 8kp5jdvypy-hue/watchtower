@@ -53,6 +53,7 @@
 .sc-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
 
 .sc-body { display: flex; flex-direction: column; }
+.sc-symbol-row { display: flex; align-items: baseline; gap: 0.6em; flex-wrap: wrap; }
 .sc-symbol {
   font-family: var(--display); font-weight: 600; font-size: 1.2rem; letter-spacing: -0.01em;
   display: inline-flex; align-items: center; gap: 0.4em; width: fit-content;
@@ -60,6 +61,9 @@
 .sc-trend-arrow { font-size: 0.7em; }
 .trend-up { color: var(--up); }
 .trend-down { color: var(--down); }
+/* Real quote (SIP) against price at detection -- absent, not zero,
+   whenever either side is missing (see SignalCard.jsx's changePct). */
+.sc-change { font-family: var(--mono); font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .sc-headline { color: var(--ink-dim); font-size: 0.86rem; line-height: 1.5; margin: 0.3rem 0 0; }
 /* The raw engine sentence, demoted to secondary text once a plain-English
    headline exists above it -- see SignalCard.jsx's cardHeadline(). Never
