@@ -3,8 +3,8 @@
   background: linear-gradient(165deg, rgba(16, 20, 27, 0.9), rgba(10, 13, 18, 0.95));
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 1.1rem 1.25rem 1rem;
-  margin-bottom: 0.85rem;
+  padding: 0.75rem 1rem 0.65rem;
+  margin-bottom: 0.5rem;
   animation: sc-materialize 0.4s cubic-bezier(.2,.8,.2,1) both;
 }
 @keyframes sc-materialize {
@@ -34,7 +34,7 @@
   box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.06), 0 20px 50px -30px rgba(52, 226, 255, 0.25);
 }
 
-.sc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7rem; }
+.sc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
 .sc-head-id { display: flex; align-items: center; gap: 0.5rem; }
 .sc-eyebrow {
   font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
@@ -44,7 +44,12 @@
   font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
   padding: 0.18rem 0.55rem; border-radius: 999px; font-weight: 600;
 }
-.sc-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan-dim); }
+/* var(--cyan) not var(--cyan-dim): the dim shade measures ~3.6:1 against
+   this badge's own composited background at this font size, below WCAG AA's
+   4.5:1 for normal text. Medium vs. high stays distinguishable via badge
+   fill strength (0.08 vs 0.14 alpha) and the .is-high card treatment below,
+   not via a barely-legible dim text color. */
+.sc-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
 .sc-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
 
 .sc-body { display: flex; flex-direction: column; }
@@ -55,9 +60,14 @@
 .sc-trend-arrow { font-size: 0.7em; }
 .trend-up { color: var(--up); }
 .trend-down { color: var(--down); }
-.sc-headline { color: var(--ink-dim); font-size: 0.86rem; line-height: 1.5; margin: 0.4rem 0 0; }
+.sc-headline { color: var(--ink-dim); font-size: 0.86rem; line-height: 1.5; margin: 0.3rem 0 0; }
+/* The raw engine sentence, demoted to secondary text once a plain-English
+   headline exists above it -- see SignalCard.jsx's cardHeadline(). Never
+   shown twice: for an unmapped kind, the raw sentence IS .sc-headline and
+   this line doesn't render at all. */
+.sc-headline-raw { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); line-height: 1.5; margin: 0.25rem 0 0; }
 
-.sc-kinds { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
+.sc-kinds { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; }
 .sc-kind-tag {
   font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.03em;
   color: var(--ink-faint); border: 1px solid var(--line); border-radius: 4px;
@@ -66,7 +76,7 @@
 
 .sc-foot {
   display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
-  margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px solid var(--line);
+  margin-top: 0.55rem; padding-top: 0.5rem; border-top: 1px solid var(--line);
   font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
 }
 .sc-view {
@@ -85,10 +95,10 @@
 .sc-view:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
 
 @media (max-width: 640px) {
-  /* 0.35rem/0.7rem padding at 0.7rem font-size lands well under a
-     comfortable tap target -- bump it up on touch-sized viewports
-     without changing how it reads on desktop. */
-  .sc-view { min-height: 40px; padding: 0.5rem 0.85rem; }
+  /* WCAG 2.5.8 target size (AA) is 24px, but 44px (Apple HIG / Android
+     Material's own target) is the bar the rest of this app already holds
+     mobile controls to -- see SignalDetail.css's .sd-close/.sd-retry. */
+  .sc-view { min-height: 44px; padding: 0.5rem 0.85rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

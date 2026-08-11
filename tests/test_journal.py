@@ -17,6 +17,7 @@ from tradebot.journal import (
     historical_performance,
     hour_performance,
     iv_rank,
+    kind_performance,
     get_contract_outcome,
     pending_contract_backfills,
     pending_contract_close_backfills,
@@ -367,6 +368,85 @@ def test_tier_performance_omits_tiers_below_min_sample(tmp_path):
         )
     result = tier_performance(conn)
     assert "high" not in result
+
+
+def test_kind_performance_groups_by_kind_and_computes_real_stats(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+
+    # 5 "gap", all up-trend, all continue (mark > close)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    # 5 "level_break", mixed outcomes: 2 continue, 3 reverse
+    for i, mark in enumerate([101, 102, 99, 98, 97]):
+        _write_cluster_with_mark(
+            conn, kind="level_break", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=100 + 5 * i)).isoformat(), score=2.0,
+        )
+
+    result = kind_performance(conn)
+    assert result["gap"].sample_size == 5
+    assert result["gap"].continuation_rate == pytest.approx(1.0)
+    assert result["level_break"].sample_size == 5
+    assert result["level_break"].continuation_rate == pytest.approx(0.4)  # 2/5 continued
+
+
+def test_kind_performance_omits_kinds_below_min_sample(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    assert MIN_HISTORY_SAMPLE == 5
+    for i in range(MIN_HISTORY_SAMPLE - 1):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=105,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    result = kind_performance(conn)
+    assert "gap" not in result
+
+
+def test_kind_performance_excludes_news_driven_rows_and_reports_the_count(tmp_path):
+    """Mirrors test_historical_performance_excludes_news_driven_rows_from_
+    the_sample -- kind_performance() and the modal's per-signal stats must
+    report on the same population (see kind_performance()'s docstring)."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 102, 101, 103, 104]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+    news_ids = [
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=100 + 5 * i)).isoformat(),
+        )
+        for i, mark in enumerate([50, 40])
+    ]
+    for news_id in news_ids:
+        conn.execute("UPDATE detections SET news_driven=1 WHERE id=?", (news_id,))
+    conn.commit()
+
+    result = kind_performance(conn)
+    assert result["gap"].sample_size == 5  # news-driven rows excluded, not just down-weighted
+    assert result["gap"].excluded_news_driven == 2
+
+
+def test_kind_performance_computes_median_and_mean_separately(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # signed returns (all up-trend, so signed == raw %): -1, -1, -1, -1, +20 --
+    # a single outlier that pulls the mean up hard without moving the median.
+    for i, mark in enumerate([99, 99, 99, 99, 120]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+    result = kind_performance(conn)
+    assert result["gap"].avg_return_pct == pytest.approx(3.2)  # mean of [-1,-1,-1,-1,+20]
+    assert result["gap"].median_return_pct == pytest.approx(-1.0)  # median of the same set
 
 
 def test_hour_performance_groups_by_et_hour(tmp_path):

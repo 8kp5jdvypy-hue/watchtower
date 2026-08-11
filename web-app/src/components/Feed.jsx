@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { bySeverity } from '../signalOrder'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
@@ -26,7 +27,7 @@ export default function Feed() {
           <p>Perch is watching. Nothing has crossed the threshold since it started tracking.</p>
         </div>
       )}
-      {data && data.signals.map((signal) => (
+      {data && bySeverity(data.signals).map((signal) => (
         <SignalCard key={signal.id} signal={signal} onView={setOpenId} />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}

@@ -42,6 +42,14 @@
 .stat-tile-label { color: var(--ink-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.4rem; font-family: var(--mono); }
 .stat-tile-value { font-family: var(--display); font-size: 1.35rem; font-weight: 600; color: var(--ink); }
 .stat-tile .headline { color: var(--ink-faint); font-size: 0.78rem; margin-top: 0.2rem; }
+/* Same amber "worth a second look" pill as SignalDetail.css's
+   .sd-small-sample -- a caveat, not a cyan "Perch confirmed this" fact. */
+.stat-tile-tag {
+  display: inline-block; margin-top: 0.5rem;
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.02em;
+  color: var(--amber); border: 1px solid rgba(255, 180, 84, 0.3); border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+}
 
 .card { background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 0.9rem 1.1rem; margin-bottom: 0.7rem; }
 .card-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
