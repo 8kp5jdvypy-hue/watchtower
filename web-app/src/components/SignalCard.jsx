@@ -33,17 +33,17 @@ function relativeTime(tsUtc) {
 // cyan edge/bloom"); medium stays quieter.
 export default function SignalCard({ signal, onView }) {
   const isHigh = signal.tier === 'high'
-  const primaryKind = signal.kinds?.[0]
-  // No context on this list payload yet (only /signals/<id> has it -- see
-  // backend item 1's draft), so this is the reduced-fidelity version: kind
-  // + trend only, no level name. Falls back to the raw backend sentence
-  // for any kind without a mapping, or when it returns nothing.
-  const plainHeadline = cardHeadline(primaryKind, signal.trend)
+  // signal.primary_kind is the real column (frozen at write time in
+  // runner.py -- not always kinds[0]). Falls back to kinds[0] only for
+  // pre-migration rows where primary_kind is null.
+  const primaryKind = signal.primary_kind || signal.kinds?.[0]
+  const plainHeadline = cardHeadline(primaryKind, signal.trend, signal.context_summary)
   // The eyebrow already names the primary kind below -- listing it again
   // as its own tag would just repeat the same word twice in one card.
   // Secondary kinds (a cluster with more than one detector firing) still
-  // get their tag.
-  const secondaryKinds = signal.kinds?.slice(1) ?? []
+  // get their tag. Filtered by value, not by slicing off index 0 -- the
+  // primary kind isn't guaranteed to be first in the kinds list.
+  const secondaryKinds = signal.kinds?.filter((k) => k !== primaryKind) ?? []
   return (
     <div className={`signal-card${isHigh ? ' is-high' : ''}`}>
       <div className="sc-head">

@@ -22,10 +22,17 @@ const LEVEL_NAMES = {
 }
 
 const HEADLINE_BUILDERS = {
+  // Requires a real level_name -- see /signals/<id> and /signals/feed's
+  // context_summary (tradebot/api/app.py's _context_summary()). No
+  // context_summary means either a pre-migration row or a genuinely
+  // unrecorded level: returning null here (not a vague "a key level")
+  // sends this kind through cardHeadline()'s fallback to the raw engine
+  // sentence instead of guessing.
   level_break: (trend, context) => {
-    const level = context?.level_name
-      ? LEVEL_NAMES[context.level_name] || context.level_name.replace(/_/g, ' ')
-      : 'a key level'
+    if (!context?.level_name) return null
+    const levelName = LEVEL_NAMES[context.level_name] || context.level_name.replace(/_/g, ' ')
+    const levelValue = typeof context.level_value === 'number' ? ` ($${context.level_value.toFixed(2)})` : ''
+    const level = `${levelName}${levelValue}`
     if (trend === 'up') return `Broke above ${level}`
     if (trend === 'down') return `Broke below ${level}`
     return `Broke through ${level}`
