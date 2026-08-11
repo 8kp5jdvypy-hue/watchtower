@@ -95,14 +95,23 @@ they're unset, which is only fine for local development:
   is what actually POSTs the token back to `/auth/magic-link/verify`
   once they press the button there — that route itself is a same-
   origin JSON POST, not something a plain emailed link can trigger on
-  its own), and the only origin the API's CORS headers allow. Set
+  its own), and the primary origin the API's CORS headers allow. Set
   to `https://app.perchmarkets.com` once the dashboard is deployed
   there (Phase 6); until then, magic-link login has nowhere real to
-  send people.
+  send people. See `DEV_CORS_ORIGIN` below for also trusting a local
+  frontend dev server.
 - `SESSION_COOKIE_DOMAIN` — set to `.perchmarkets.com` so the session
   cookie `api.perchmarkets.com` sets is also sent on requests from
   `app.perchmarkets.com`. Leave unset for local development (host-only
   cookie).
+
+One more, local development only — never set in production:
+
+- `DEV_CORS_ORIGIN` — an extra origin (e.g. `http://localhost:5173`)
+  the API's CORS headers trust, on top of `FRONTEND_URL`. Unset means
+  only the real frontend origin is ever trusted — a local dev origin
+  used to be hardcoded in and trusted unconditionally, in production
+  too; this is opt-in now.
 
 Local dev over plain `http://localhost` needs one more override: the
 session cookie is `Secure` by default (required in production, since

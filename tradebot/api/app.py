@@ -162,7 +162,17 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     app._performance_cache: dict = {"data": None, "computed_at": None}
     app._quote_cache: dict = {}
 
-    allowed_origins = {app.frontend_url, "http://localhost:5173"}
+    # Trusts app.frontend_url only, plus whatever a developer's own local
+    # frontend dev server is running on -- opt-in via DEV_CORS_ORIGIN
+    # (e.g. "http://localhost:5173"), never assumed. A hardcoded
+    # localhost origin used to be trusted unconditionally here, in
+    # production too; SESSION_COOKIE_SAMESITE=Lax already stopped that
+    # from being directly exploitable, but a public API has no business
+    # trusting a dev origin at all unless someone explicitly asked it to.
+    allowed_origins = {app.frontend_url}
+    dev_cors_origin = os.environ.get("DEV_CORS_ORIGIN")
+    if dev_cors_origin:
+        allowed_origins.add(dev_cors_origin)
 
     @app.after_request
     def add_cors_headers(response):

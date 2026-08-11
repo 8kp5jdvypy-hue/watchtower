@@ -514,6 +514,27 @@ def test_cors_header_only_reflects_an_allowed_origin(app, client):
     assert "Access-Control-Allow-Origin" not in disallowed.headers
 
 
+def test_cors_does_not_trust_a_dev_origin_by_default(client):
+    # No DEV_CORS_ORIGIN set for this app instance (see the `app` fixture)
+    # -- a real production deployment never sets it either, so this is
+    # what api.perchmarkets.com actually enforces today.
+    disallowed = client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+    assert "Access-Control-Allow-Origin" not in disallowed.headers
+
+
+def test_cors_trusts_a_dev_origin_only_when_explicitly_configured(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEV_CORS_ORIGIN", "http://localhost:5199")
+    dev_app = create_app(users_db_path=tmp_path / "dev-users.db", journal_db_path=tmp_path / "dev-journal.db")
+    dev_client = dev_app.test_client()
+
+    allowed = dev_client.get("/healthz", headers={"Origin": "http://localhost:5199"})
+    assert allowed.headers.get("Access-Control-Allow-Origin") == "http://localhost:5199"
+
+    # Only the exact configured origin, not localhost origins in general.
+    still_disallowed = dev_client.get("/healthz", headers={"Origin": "http://localhost:5173"})
+    assert "Access-Control-Allow-Origin" not in still_disallowed.headers
+
+
 def _post_event_beacon(client, body: dict):
     # Mirrors exactly how navigator.sendBeacon sends it client-side: a
     # raw text/plain body, not client.post(json=...) (which sets
