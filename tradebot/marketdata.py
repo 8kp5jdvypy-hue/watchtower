@@ -263,3 +263,16 @@ class LiveMarketData:
 
         self._check(symbol)
         return fetch_option_chain(symbol, expiry)
+
+
+def fetch_quotes(symbols: list[str]) -> dict[str, Quote]:
+    """Live mode only -- the only function in this module not scoped to a
+    single MarketData instance, since batching many symbols into one
+    vendor call is a different shape of operation than everything else
+    here (all per-symbol). Deferred import for the same reason
+    LiveMarketData's methods defer theirs: tradebot.vendors.alpaca
+    imports Quote from this module, so a top-level import here would be
+    circular."""
+    from tradebot.vendors.alpaca import fetch_latest_quotes
+
+    return fetch_latest_quotes(symbols)

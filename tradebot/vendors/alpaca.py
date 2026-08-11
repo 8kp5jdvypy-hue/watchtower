@@ -168,6 +168,31 @@ def fetch_latest_quote(symbol: str) -> MDQuote:
     )
 
 
+def fetch_latest_quotes(symbols: list[str]) -> dict[str, MDQuote]:
+    """Current NBBO quotes for many symbols in one request instead of N --
+    SIP, same reasoning as fetch_latest_quote above. Chunked the same way
+    fetch_daily_bars_bulk is (see BULK_FETCH_CHUNK_SIZE), though a
+    dashboard watchlist is never remotely close to that size in practice.
+    A symbol Alpaca has no quote for is simply absent from the result,
+    never padded with a fabricated entry -- same discipline as
+    fetch_daily_bars_bulk."""
+    client = _client()
+    out: dict[str, MDQuote] = {}
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockLatestQuoteRequest(symbol_or_symbols=chunk, feed=DataFeed.SIP)
+        response = _with_backoff(lambda r=request: client.get_stock_latest_quote(r))
+        for symbol, q in response.items():
+            out[symbol] = MDQuote(
+                symbol=symbol,
+                ts=q.timestamp.astimezone(timezone.utc),
+                bid=float(q.bid_price),
+                ask=float(q.ask_price),
+                last=float((q.bid_price + q.ask_price) / 2),
+            )
+    return out
+
+
 def fetch_option_chain(symbol: str, expiry: date) -> MDOptionChain:
     """The option chain for one underlying + expiry. Live mode only —
     there's no cached historical options data, so ReplayMarketData never
