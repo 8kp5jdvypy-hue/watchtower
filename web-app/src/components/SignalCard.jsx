@@ -17,8 +17,15 @@ function relativeTime(tsUtc) {
 // gives us -- no fabricated "importance score" beyond what's real. High
 // tier gets the stronger cyan treatment (the brief's "very important:
 // cyan edge/bloom"); medium stays quieter.
+// The whole card is the click target (not just the "View signal" label)
+// so hover/focus feedback on the card body actually means something --
+// a single button-as-card, not a card with a small link buried in the
+// footer, per the brief's "card should feel like it's transitioning
+// into the intelligence detail view" note. Falls back to a plain,
+// non-interactive div when no onView is passed.
 export default function SignalCard({ signal, quote, onView }) {
   const isHigh = signal.tier === 'high'
+  const Root = onView ? 'button' : 'div'
   // Real live quote (SIP, via /quotes) against price at detection --
   // both real fields, never estimated. Absent whenever either side is
   // missing: no quote fetched yet, the vendor had none for this symbol,
@@ -36,7 +43,11 @@ export default function SignalCard({ signal, quote, onView }) {
   // primary kind isn't guaranteed to be first in the kinds list.
   const secondaryKinds = signal.kinds?.filter((k) => k !== primaryKind) ?? []
   return (
-    <div className={`signal-card${isHigh ? ' is-high' : ''}`}>
+    <Root
+      type={onView ? 'button' : undefined}
+      className={`signal-card${isHigh ? ' is-high' : ''}`}
+      onClick={onView ? () => onView(signal.id) : undefined}
+    >
       <div className="sc-head">
         <span className="sc-head-id">
           <PerchMark size={14} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
@@ -72,11 +83,11 @@ export default function SignalCard({ signal, quote, onView }) {
       <div className="sc-foot">
         <span className="sc-time">{relativeTime(signal.ts_utc)}</span>
         {onView && (
-          <button type="button" className="sc-view" onClick={() => onView(signal.id)}>
-            View signal <span aria-hidden="true">→</span>
-          </button>
+          <span className="sc-view">
+            View signal <span className="sc-view-arrow" aria-hidden="true">→</span>
+          </span>
         )}
       </div>
-    </div>
+    </Root>
   )
 }

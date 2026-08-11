@@ -6,6 +6,17 @@
   max-width: 720px;
   width: 100%;
   margin: 0 auto;
+  animation: view-in var(--duration-reveal) var(--ease-perch) both;
+}
+/* A tab switch replaces the whole view (see App.jsx's ActiveComponent
+   swap) -- this is the one "page transition" moment in the app, kept to
+   a small settle rather than a slide so it never fights the signal
+   cards' own staggered entrance directly beneath it. */
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .view { animation: none; }
 }
 
 .view-eyebrow {
