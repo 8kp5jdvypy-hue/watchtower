@@ -8,6 +8,12 @@ flagged as recommended next work once the SIP migration ships.
 
 ## Top 3 (recommended next work)
 
+**Status (2026-08-12):** #1 is implemented — off-box backup shipping
+(gpg-encrypted, rclone to DigitalOcean Spaces) plus a documented
+restore procedure, branch `ops-offbox-backups`, pending review/merge.
+#2 and #3 are queued as next-up work below (not implemented) — approved
+to be *specified* now, not built yet.
+
 ### 1. Backups live on the same disk they're backing up
 
 **Likelihood: medium (VPS/disk loss is uncommon but real on a single
@@ -64,6 +70,20 @@ reads its age (same pattern `runner`'s healthcheck already uses for
 in the worker's loop + a `healthcheck:` block mirroring the existing
 `runner` one).
 
+**Next-up spec (queued, not implemented):**
+- `tradebot/telegram_bot/worker.py`: in the main drain loop, touch
+  `data/worker_heartbeat.json` (mirroring `runner.py`'s
+  `heartbeat.json` write) once per pass — a plain `{"ts": ...}` write
+  is enough, no new dependency.
+- `docker-compose.yml`: add a `healthcheck:` block to the `worker`
+  service reading that file's age, same shape as `runner`'s existing
+  one (`docker-compose.yml:53-66`) — same staleness threshold (900s)
+  unless the worker's normal loop cadence argues for a different
+  number.
+- No change to the deadman-switch logic itself (`worker.py:210-248`)
+  — this only gives Docker a way to *notice* the worker's own hang,
+  which today it structurally cannot.
+
 ### 3. Docker's healthcheck has no autoheal — "unhealthy" is observability, not recovery
 
 **Likelihood: medium-high (this is the exact case the healthcheck was
@@ -85,6 +105,18 @@ Docker marks unhealthy. One new service block in `docker-compose.yml`,
 no application code changes. Combined with #2's new worker healthcheck,
 this closes the loop for both known hang scenarios at once.
 **Effort: small** (one new service block; no code changes beyond #2's).
+
+**Next-up spec (queued, not implemented):**
+- `docker-compose.yml`: add an `autoheal` service (`willfarrell/autoheal`
+  image), mounted against `/var/run/docker.sock`, scoped via
+  `AUTOHEAL_CONTAINER_LABEL` (or per-container `autoheal: "true"`
+  labels on `runner` and, once #2 lands, `worker`) so it only restarts
+  the two services with real healthchecks — not `bot`/`api`/`caddy`,
+  which don't have one and shouldn't be auto-restarted on a false
+  signal.
+- Depends on #2 for the `worker` half of the benefit; the `runner`
+  half is usable standalone today since `runner` already has a
+  healthcheck.
 
 ## Everything else found, ranked
 
