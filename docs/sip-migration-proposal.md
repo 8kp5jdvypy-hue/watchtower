@@ -103,23 +103,23 @@ choice at all. This document treats it as explicitly out of scope
 
 **Direct answers to the two required questions:**
 
-- **Does `scripts/fetch_cache.py` use the vendor module's feed, or its
-  own?** The vendor module's. It has no `DataFeed` import and no feed
-  logic of its own — it imports and calls `fetch_daily_bars`/
-  `fetch_intraday_bars` directly from `tradebot.vendors.alpaca`
-  (confirmed: `from tradebot.vendors.alpaca import ... fetch_daily_bars,
-  fetch_intraday_bars`). Whatever those two functions do is exactly what
-  `fetch_cache.py` gets — no separate site to track or flip.
-- **Same question for `broad_scan.py`.** Also the vendor module's, one
-  layer further removed: `broad_scan.py` has no `DataFeed` import and no
-  Alpaca import at all. `build_snapshots_from_daily_bars()` takes
-  already-fetched `bars_by_symbol` as a plain argument — the actual
-  fetch is `vendors.alpaca.fetch_daily_bars_bulk` (site #3 above),
-  called by `tradebot/runner.py`'s orchestration and handed to
-  `broad_scan.py`. Same conclusion: no separate feed site, no separate
-  flip, and — see the last open question below — no separate backtest
-  scope decision either, since it's covered by whatever site #3's
-  config value is set to.
+- **`scripts/fetch_cache.py`** (`scripts/fetch_cache.py:32`):
+  `from tradebot.vendors.alpaca import AlpacaCredentialsError,
+  fetch_daily_bars, fetch_intraday_bars` — it calls the vendor module's
+  functions directly and has no `DataFeed` import and no feed logic of
+  its own anywhere in the file. **It fetches through the vendor
+  module's feed configuration and therefore follows
+  `DETECTOR_DATA_FEED` automatically** — no separate site to track or
+  flip.
+- **`tradebot/broad_scan.py`**: has no `DataFeed` import and no Alpaca
+  import at all, anywhere in the file. `build_snapshots_from_daily_bars()`
+  takes already-fetched `bars_by_symbol` as a plain argument — the
+  actual fetch is `vendors.alpaca.fetch_daily_bars_bulk` (site #3
+  above), called by `tradebot/runner.py`'s orchestration and handed to
+  `broad_scan.py`. **Same conclusion: it has no feed setting of its
+  own and automatically follows `DETECTOR_DATA_FEED`** through site #3
+  — see the last open question below for what this means for Phase 1's
+  backtest scope.
 
 ## One config value, not three literals
 
@@ -132,15 +132,17 @@ already works (`SESSION_COOKIE_SECURE`, `DEV_CORS_ORIGIN`, etc.):
 ```python
 # tradebot/vendors/alpaca.py, near the top, alongside the other module
 # constants (e.g. BULK_FETCH_CHUNK_SIZE) -- read once at import time.
-_DETECTOR_FEED_ENV = os.environ.get("DETECTOR_DATA_FEED", "iex").strip().lower()
-if _DETECTOR_FEED_ENV not in ("iex", "sip"):
-    raise ValueError(f"DETECTOR_DATA_FEED must be 'iex' or 'sip', got {_DETECTOR_FEED_ENV!r}")
-DETECTOR_FEED = DataFeed.SIP if _DETECTOR_FEED_ENV == "sip" else DataFeed.IEX
+_raw = os.environ.get("DETECTOR_DATA_FEED", "iex").strip().lower()
+if _raw not in ("iex", "sip"):
+    raise ValueError(f"DETECTOR_DATA_FEED must be 'iex' or 'sip', got {_raw!r}")
+DETECTOR_DATA_FEED = DataFeed.SIP if _raw == "sip" else DataFeed.IEX
 ```
 
-Sites #1-3 above change from `feed=DataFeed.IEX` to `feed=DETECTOR_FEED`.
+Sites #1-3 above change from `feed=DataFeed.IEX` to `feed=DETECTOR_DATA_FEED`.
 Sites #4-6 are untouched literals, exactly as today — this variable has
-no effect on them, by construction (they never reference it).
+no effect on them, by construction (they never reference it). One name
+throughout this document, for both the env var and the module constant
+it produces: `DETECTOR_DATA_FEED`.
 
 **Why this matters for cutover and rollback specifically**: since
 `docker-compose.yml`'s services already read `env_file: .env`, changing
@@ -191,28 +193,90 @@ regardless of what the live cache becomes later.
 
 **Nothing here touches the live scanner.** This is entirely a replay/
 backtest exercise, following the existing pattern, now unblocked by the
-entitlement check above:
+entitlement check above.
 
-1. Add a SIP-feed variant of the cache-fetch path — either a
-   `--feed sip` flag on `scripts/fetch_cache.py` (reading the same
-   `DETECTOR_FEED`-style choice, independently of the live
-   `DETECTOR_DATA_FEED` env var so a developer can build the SIP cache
-   without touching the live scanner's config at all) or a parallel
-   script — that pulls the same daily + 5-minute bar shapes
-   `ReplayMarketData` already expects, into a **separate** directory
-   (e.g. `data/cache-sip/{symbol}/`), for the same historical session
-   window already cached under IEX.
-2. Run `scripts/replay.py` (or `python -m tradebot.runner --replay-date`)
+**Prerequisite: ship the `DETECTOR_DATA_FEED` config-value code now,**
+not in Phase 3 — Phase 1's own tooling (step 1 below) needs
+`vendors/alpaca.py` to already recognize the env var. This is the
+"One config value, not three literals" change above and nothing else:
+still defaults to `"iex"`, a no-op for current live behavior, low-risk
+by construction. Approving this document covers shipping this small,
+inert code change alongside Phase 0's archive step — it's what makes
+Phase 1 possible, not a live feed change. Phase 3 (below) then only
+needs the `data_feed` column and whichever Decision point B option is
+chosen, plus the actual flip.
+
+### Why "rebuild the anchors" isn't a separate step — and why that's exactly the risk
+
+`avg_cum_volume_by_bar` is not a stored artifact anywhere — `build_anchors()`
+(`tradebot/detectors.py:115-162`) computes it **fresh, in memory, on
+every call**, purely from whatever `historical_session_bars` it's
+handed. Both the replay path and — critically — the **live** path
+source those bars the same way: `tradebot/runner.py`'s
+`history_by_symbol` (built at `runner.py:771` in replay and `runner.py:1014`
+in live, identical logic in both) calls `full_session_rth_bars()`
+(`runner.py:165-169`), which reads from `CACHE_DIR` — a hardcoded
+module constant (`runner.py:91` and, separately, `scripts/replay.py:43`),
+both pointing at `data/cache/`. **Even in live mode, the historical
+baseline never comes from a fresh vendor call — it always comes from
+whatever's sitting in `data/cache/` on disk.** Only *today's* live bars
+(via `LiveMarketData`) are fetched fresh through `DETECTOR_DATA_FEED`.
+
+This means "rebuild the anchors" has one, and only one, real mechanism:
+**refresh the contents of the cache directory `CACHE_DIR` points at**
+— there's no separate anchor-rebuild script or artifact to run. And it
+means the exact failure mode this migration exists to prevent
+(SIP-scale live volume compared against an IEX-scale baseline) doesn't
+just risk showing up in Phase 3 — it's the literal, mechanical default
+outcome of flipping `DETECTOR_DATA_FEED` alone, live or in a backtest,
+without also refreshing `data/cache/`'s contents. Phase 1 has to
+produce backtest evidence that's actually SIP-baselined, not
+SIP-current-bar-against-IEX-baseline, or the whole exercise measures
+the wrong thing.
+
+### Steps
+
+1. **Build a separate SIP cache**, without touching the live `.env` or
+   `data/cache/` at all: `scripts/fetch_cache.py` already accepts
+   `--cache-dir` (`scripts/fetch_cache.py:97`, pre-existing, no code
+   change needed there) and — per the feed-site audit above — already
+   fetches through `vendors.alpaca.fetch_daily_bars`/`fetch_intraday_bars`,
+   which will honor `DETECTOR_DATA_FEED` once Phase 3's config-value
+   change ships. A one-off invocation with a process-local env override:
+   ```
+   DETECTOR_DATA_FEED=sip python3 scripts/fetch_cache.py --cache-dir data/cache-sip
+   ```
+   populates `data/cache-sip/{symbol}/` with SIP bars for the same
+   historical session window already cached under IEX — the live
+   scanner's own `DETECTOR_DATA_FEED` (still `iex`) and `data/cache/`
+   are untouched by this.
+2. **Point replay tooling at the SIP cache for the SIP-side run.**
+   `CACHE_DIR` is currently a hardcoded constant, not a parameter, in
+   both `tradebot/runner.py:91` and `scripts/replay.py:43` — this needs
+   a small addition (a `--cache-dir` override on `scripts/replay.py`
+   and the replay code path in `tradebot/runner.py`, mirroring the flag
+   `fetch_cache.py` already has) as part of Phase 1's tooling work. If
+   that addition is deferred, the fallback is the same pattern
+   `scripts/compare_replay.py`'s own docstring already documents for
+   A/B comparisons — swap `data/cache/`'s contents out and back in
+   between runs — but an explicit `--cache-dir` flag is the cleaner,
+   safer version of the same idea and worth the small implementation
+   cost.
+3. Run `scripts/replay.py` (or `python -m tradebot.runner --replay-date`)
    twice over the same session set — once against `data/cache/` (IEX,
-   existing), once against `data/cache-sip/` (new) — into two separate
-   journal databases, the same A/B pattern `scripts/compare_replay.py`
-   already uses for calibration changes (its own docstring: "the tool
-   used to calibrate new detectors/thresholds... against real data
-   before trusting a default"). Two files, not one shared DB, for the
-   same reason that script already documents: re-running the same
-   session under a second data source into one DB would collide or
-   silently overwrite on `cluster_id()`.
-3. Diff the two runs and report, per detector kind and per tier:
+   existing, untouched), once against `data/cache-sip/` (new, from step
+   1, read via step 2's `--cache-dir`) — into two separate journal
+   databases, the same A/B pattern `scripts/compare_replay.py` already
+   uses for calibration changes (its own docstring: "the tool used to
+   calibrate new detectors/thresholds... against real data before
+   trusting a default"). Two files, not one shared DB, for the same
+   reason that script already documents: re-running the same session
+   under a second data source into one DB would collide or silently
+   overwrite on `cluster_id()`. Because of the anchor mechanism above,
+   the SIP-side run's anchors are correctly SIP-baselined by
+   construction — `build_anchors()` only ever sees what `--cache-dir`
+   pointed it at.
+4. Diff the two runs and report, per detector kind and per tier:
    - **Signal counts** — how many clusters fire under SIP vs. IEX,
      broken out the same way `tier_performance()`/`kind_performance()`
      already group results (by tier, by kind).
@@ -223,7 +287,7 @@ entitlement check above:
      range per symbol, since a single "20-42x" summary could be hiding
      real per-symbol variation that matters for a baseline that's
      currently built per-symbol.
-4. Report that evidence plainly — real counts and real distributions,
+5. Report that evidence plainly — real counts and real distributions,
    not a recommendation dressed as a finding. If the evidence shows
    `rvol_spike` (or any other detector) would need different thresholds
    under SIP, that goes back as a **separate proposal with specific
@@ -272,8 +336,8 @@ config-value mechanism above, since cutover is an env var flip, not a
 code change — so `code_version` can't be used to tell IEX-era rows from
 SIP-era rows after the fact. **Implementing either option below
 requires adding an explicit `data_feed` column to `detections`**,
-written from `DETECTOR_FEED`'s value at journal-write time — a schema
-addition, not something either option can skip.
+written from `DETECTOR_DATA_FEED`'s value at journal-write time — a
+schema addition, not something either option can skip.
 
 **Option 1 — post-cutover-only (recommended).** Once `data_feed`
 exists, filter all three stats functions to the currently-live feed
@@ -322,20 +386,35 @@ No live cutover happens while Phase 2 (either decision point) is open.
 
 Only once Phase 1 and both of Phase 2's decision points are resolved:
 
-1. Ship the `DETECTOR_FEED` config-value change (see "One config value,
-   not three literals" above) and, per Decision point B, the
-   `data_feed` column plus whichever stats treatment was chosen — as a
-   normal code change/deploy, same as any other. This step does **not**
-   itself flip the feed; `DETECTOR_DATA_FEED` still defaults to `"iex"`,
-   so this deploy is a no-op for live behavior until the env var is
-   actually set.
-2. **Flip at a session boundary, not mid-session.** `tradebot.runner`
-   already "runs once per trading day and exits at the close"
-   (`README.md`) — set `DETECTOR_DATA_FEED=sip` in `.env` and
-   `docker compose up -d` (no rebuild needed) during the window between
-   one session's close and the next session's open, so no single
-   session's bars are ever a mix of IEX and SIP mid-stream. Never flip
-   while `runner` is actively scanning.
+1. Ship the `data_feed` column plus whichever Decision point B stats
+   treatment was chosen — the `DETECTOR_DATA_FEED` config-value code
+   itself already shipped back in Phase 1's prerequisite, still
+   defaulting to `"iex"`. This step is a normal code change/deploy,
+   same as any other, and is still a no-op for live behavior until the
+   env var is actually set to `"sip"`.
+2. **Flip at a session boundary, not mid-session**, in this order —
+   `tradebot.runner` already "runs once per trading day and exits at
+   the close" (`README.md`), so do this between one session's close and
+   the next session's open:
+   a. **Refresh the live cache first.** Same anchor mechanism explained
+      in Phase 1: `data/cache/` is what `build_anchors()` actually reads
+      (`runner.py:91`/`:771`/`:1014`, `full_session_rth_bars()` at
+      `runner.py:165-169`), live mode included — it is never a fresh
+      vendor call. Overwrite it in place with SIP data, on the VPS,
+      after confirming Phase 0's archive copy is safe:
+      ```
+      DETECTOR_DATA_FEED=sip python3 scripts/fetch_cache.py
+      ```
+      (no `--cache-dir` override this time — this intentionally targets
+      the live `data/cache/` default.) Skipping this step is exactly
+      the failure mode this migration exists to prevent: the first
+      live SIP session would evaluate fresh SIP volume against a
+      baseline still built from IEX-cached history.
+   b. **Only then** set `DETECTOR_DATA_FEED=sip` in `.env` and
+      `docker compose up -d` (no rebuild needed) — so the moment SIP
+      data starts flowing live, `data/cache/` is already SIP-consistent
+      and no single session's bars or baseline are ever a mix of IEX
+      and SIP. Never flip while `runner` is actively scanning.
 3. **Record the cutover timestamp** — a dated entry in
    `docs/PROGRAM-STATE.md` (matching this doc's own "point-in-time
    facts" convention), which combined with the `data_feed` column is
@@ -413,11 +492,12 @@ once real backtest numbers exist to anchor them against.
 
 ## What approval unlocks at each stage
 
-- Approving this document: unlocks Phase 0 (archive) and Phase 1
-  (SIP replay tooling + backtest evidence-gathering) only. No live
-  feed change, no schema change.
+- Approving this document: unlocks Phase 0 (archive), the small inert
+  `DETECTOR_DATA_FEED` config-value code (still defaults to `"iex"`,
+  no live behavior change), and Phase 1 (SIP replay tooling + backtest
+  evidence-gathering). No live feed change, no schema change.
 - Phase 1's output, once delivered: two decision points on Phase 2 —
   recalibration (A) and stats treatment (B) — each its own approval.
-- Both resolved: unlocks Phase 3 — ship the config value + `data_feed`
-  column (still IEX by default), then a separate, deliberate
-  session-boundary flip of `DETECTOR_DATA_FEED` itself.
+- Both resolved: unlocks Phase 3 — ship the `data_feed` column (schema
+  change), then the actual session-boundary cache refresh + flip of
+  `DETECTOR_DATA_FEED` to `"sip"`.
