@@ -362,7 +362,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
-            "primary_kind, context_json "
+            "primary_kind, context_json, close "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -382,6 +382,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "tier": row[7], "trend": row[8], "alerted": bool(row[9]),
                 "primary_kind": primary_kind,
                 "context_summary": _context_summary(kinds_list, primary_kind, row[11]),
+                "close": row[12],
             })
         return result
 

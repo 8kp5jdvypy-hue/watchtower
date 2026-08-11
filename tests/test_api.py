@@ -263,6 +263,7 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     # fabricated into a guess.
     assert feed_body["signals"][0]["primary_kind"] is None
     assert feed_body["signals"][0]["context_summary"] is None
+    assert feed_body["signals"][0]["close"] == 450.0
 
 
 def test_signals_feed_includes_a_context_summary_for_level_break(app, client):
