@@ -26,7 +26,7 @@ export default function Feed() {
   return (
     <div className="view">
       <span className="view-eyebrow"><LiveStatus compact status={liveStatus} session={clock.session} lastSuccessAt={lastSuccessAt} /> SIGNALS</span>
-      <h1>Recent activity, across the whole watchlist.</h1>
+      <h1>Recent activity, across your watchlist and today's radar picks.</h1>
       <p className="view-subtitle">The last 20 HIGH/MEDIUM tier detections.</p>
 
       {loading && <p className="empty-state">Loading…</p>}
