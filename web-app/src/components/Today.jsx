@@ -1,16 +1,23 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../api'
-import { useApiData } from '../hooks/useApiData'
+import { DEFAULT_POLL_INTERVAL_MS, usePolling } from '../hooks/usePolling'
+import { useLiveStatus } from '../hooks/useLiveStatus'
 import { useMarketClock } from '../hooks/useMarketClock'
 import { useQuotes } from '../hooks/useQuotes'
 import { bySeverity } from '../signalOrder'
+import LiveStatus from './LiveStatus'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
 import './Views.css'
 import './WelcomeBanner.css'
+import './SignalArrival.css'
 
-const SESSION_LABEL = { pre: 'PRE-MARKET', open: 'MARKET OPEN', post: 'AFTER HOURS', closed: 'MARKET CLOSED' }
+// How long a just-arrived card keeps its arrival treatment (see
+// SignalArrival.css's signal-arrival-glow) before the wrapper class is
+// dropped -- kept a little longer than the CSS animation itself so the
+// glow never gets cut off mid-fade by a re-render.
+const ARRIVAL_HIGHLIGHT_MS = 1800
 
 function onboardingKey(accountId) {
   return `perch_onboarded_${accountId}`
@@ -18,11 +25,53 @@ function onboardingKey(accountId) {
 
 export default function Today({ account }) {
   const fetchToday = useCallback(() => api.signalsToday(), [])
-  const { data, error, loading } = useApiData(fetchToday)
+  const { data, error, loading, lastSuccessAt } = usePolling(fetchToday)
   const clock = useMarketClock()
+  const liveStatus = useLiveStatus({
+    loading, error, hasData: !!data, lastSuccessAt,
+    session: clock.session, intervalMs: DEFAULT_POLL_INTERVAL_MS,
+  })
   const [openId, setOpenId] = useState(null)
   const symbols = useMemo(() => [...new Set((data?.signals ?? []).map((s) => s.symbol))], [data])
   const quotes = useQuotes(symbols)
+
+  // Tracks which signal IDs are genuinely new since the LAST poll, not
+  // just new to this component instance -- the initial load is a batch,
+  // not an arrival, so nothing animates as "just arrived" until a second
+  // poll actually adds something to what was already there.
+  const seenIdsRef = useRef(null)
+  const arrivalTimersRef = useRef(new Map())
+  const [arrivedIds, setArrivedIds] = useState(() => new Set())
+
+  useEffect(() => {
+    if (!data) return
+    const currentIds = new Set(data.signals.map((s) => s.id))
+    if (seenIdsRef.current === null) {
+      seenIdsRef.current = currentIds
+      return
+    }
+    const newlyArrived = [...currentIds].filter((id) => !seenIdsRef.current.has(id))
+    seenIdsRef.current = currentIds
+    if (newlyArrived.length === 0) return
+    setArrivedIds((prev) => new Set([...prev, ...newlyArrived]))
+    newlyArrived.forEach((id) => {
+      const timer = setTimeout(() => {
+        setArrivedIds((prev) => {
+          if (!prev.has(id)) return prev
+          const next = new Set(prev)
+          next.delete(id)
+          return next
+        })
+        arrivalTimersRef.current.delete(id)
+      }, ARRIVAL_HIGHLIGHT_MS)
+      arrivalTimersRef.current.set(id, timer)
+    })
+  }, [data])
+
+  useEffect(() => {
+    const timers = arrivalTimersRef.current
+    return () => timers.forEach(clearTimeout)
+  }, [])
 
   // Shown once per account, on this browser -- the first time Today
   // ever renders with real data, not a multi-step tour, just enough
@@ -54,12 +103,13 @@ export default function Today({ account }) {
 
   return (
     <div className="view">
-      <span className="view-eyebrow"><span className="dot" /> PERCH / LIVE</span>
+      <LiveStatus status={liveStatus} session={clock.session} time={clock.time} lastSuccessAt={lastSuccessAt} />
       <h1>What deserves your attention right now.</h1>
-      <p className="view-subtitle">
-        {clock.time ? `${SESSION_LABEL[clock.session]} — ${clock.time} ET` : 'Loading market status…'}
-        {signalCount > 0 && ` · ${signalCount} thing${signalCount === 1 ? '' : 's'} worth knowing this session`}
-      </p>
+      {signalCount > 0 && (
+        <p className="view-subtitle">
+          {signalCount} thing{signalCount === 1 ? '' : 's'} worth knowing this session
+        </p>
+      )}
 
       {showWelcome && (
         <div className="welcome-banner">
@@ -79,7 +129,7 @@ export default function Today({ account }) {
       )}
 
       {loading && <p className="empty-state">Loading…</p>}
-      {error && <p className="empty-state">Couldn't load today's signals.</p>}
+      {error && !data && <p className="empty-state">Couldn't load today's signals.</p>}
       {data && data.signals.length === 0 && (
         <div className="quiet-state">
           <PerchMark size={30} state="idle" />
@@ -88,7 +138,13 @@ export default function Today({ account }) {
         </div>
       )}
       {data && bySeverity(data.signals).map((signal) => (
-        <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
+        arrivedIds.has(signal.id) ? (
+          <div className="signal-arrival" key={signal.id}>
+            <SignalCard signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
+          </div>
+        ) : (
+          <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
+        )
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>

@@ -204,6 +204,9 @@ export default function SignalDetail({ id, onClose }) {
                     same setup · <b>{pct(data.history.continuation_rate)}</b> continued in the same direction within{' '}
                     {data.history.offset_min} min · avg follow-through{' '}
                     <b>{data.history.avg_return_pct.toFixed(2)}%</b>
+                    {data.history.avg_return_atr != null && (
+                      <span className="sd-history-atr"> (≈{data.history.avg_return_atr.toFixed(2)}× ATR)</span>
+                    )}
                   </p>
                   {data.history.sample_size < SMALL_SAMPLE_THRESHOLD && (
                     <span className="sd-small-sample">Small sample — treat as weak evidence</span>

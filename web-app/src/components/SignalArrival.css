@@ -1,0 +1,34 @@
+/* Wraps a single SignalCard when it's genuinely new since the last poll
+   (see Today.jsx's arrival tracking) -- deliberately NOT touching
+   SignalCard.css's own entrance stagger (that plays for every card on
+   first mount, arrived-this-session or not). This adds one extra beat on
+   top, only for a card that just appeared in a live poll: a brief cyan
+   frame that blooms in and settles out, distinct from the initial-batch
+   stagger. The class is removed by Today.jsx once the animation ends,
+   so it only ever plays once per real arrival. */
+.signal-arrival {
+  position: relative;
+  animation: signal-arrival-settle var(--duration-reveal, 0.3s) var(--ease-perch, ease-out) both;
+}
+.signal-arrival::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: 9px;
+  border: 1px solid var(--cyan);
+  box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.12), 0 0 28px -8px rgba(52, 226, 255, 0.55);
+  pointer-events: none;
+  animation: signal-arrival-glow 1.6s ease-out forwards;
+}
+@keyframes signal-arrival-settle {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+@keyframes signal-arrival-glow {
+  0% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .signal-arrival { animation: none; }
+  .signal-arrival::after { animation: none; opacity: 0; }
+}

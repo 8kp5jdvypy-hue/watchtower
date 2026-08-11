@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 
+export const SESSION_LABEL = { pre: 'PRE-MARKET', open: 'MARKET OPEN', post: 'AFTER HOURS', closed: 'MARKET CLOSED' }
+
 // Real, computed from the actual current time -- not a fabricated
 // status. Regular session is 9:30-16:00 ET on weekdays; this
 // deliberately doesn't attempt holiday awareness (that would need a
