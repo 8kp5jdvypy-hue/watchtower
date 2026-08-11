@@ -1,11 +1,38 @@
 .signal-card {
   position: relative;
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
   background: linear-gradient(165deg, rgba(16, 20, 27, 0.9), rgba(10, 13, 18, 0.95));
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 1.1rem 1.25rem 1rem;
   margin-bottom: 0.85rem;
+  cursor: pointer;
   animation: sc-materialize 0.4s cubic-bezier(.2,.8,.2,1) both;
+  transition: border-color var(--duration-hover) var(--ease-perch),
+    box-shadow var(--duration-hover) var(--ease-perch),
+    transform var(--duration-hover) var(--ease-perch),
+    background var(--duration-hover) var(--ease-perch);
+}
+/* Restrained elevation + border illumination -- the same cyan the tier
+   badge already uses, just faint, so hovering a card previews the same
+   color language its "high" state uses at full strength. */
+.signal-card:hover, .signal-card:focus-visible {
+  border-color: rgba(52, 226, 255, 0.3);
+  background: linear-gradient(165deg, rgba(20, 25, 33, 0.92), rgba(12, 16, 22, 0.96));
+  box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.08), 0 16px 40px -24px rgba(0, 0, 0, 0.6);
+  transform: translateY(-2px);
+}
+.signal-card.is-high:hover, .signal-card.is-high:focus-visible {
+  border-color: rgba(52, 226, 255, 0.4);
+  box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.1), 0 20px 50px -28px rgba(52, 226, 255, 0.35);
+}
+.signal-card:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.signal-card:active { transform: translateY(-1px); }
+.signal-card:hover .sc-view-arrow, .signal-card:focus-visible .sc-view-arrow {
+  transform: translateX(3px);
 }
 @keyframes sc-materialize {
   from { opacity: 0; transform: translateY(6px); }
@@ -69,28 +96,38 @@
   margin-top: 0.85rem; padding-top: 0.7rem; border-top: 1px solid var(--line);
   font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
 }
+/* A visual affordance, not its own control -- the whole .signal-card is
+   the actual button now (see SignalCard.jsx), so this just previews the
+   same cyan the card's hover/focus state uses. */
 .sc-view {
   flex: none;
-  background: none;
+  display: inline-flex;
+  align-items: center;
   border: 1px solid rgba(52, 226, 255, 0.25);
   color: var(--cyan);
   border-radius: 5px;
   padding: 0.35rem 0.7rem;
-  cursor: pointer;
   font-family: var(--mono);
   font-size: 0.7rem;
   letter-spacing: 0.02em;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  transition: background var(--duration-hover) var(--ease-perch), border-color var(--duration-hover) var(--ease-perch);
 }
-.sc-view:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+.signal-card:hover .sc-view, .signal-card:focus-visible .sc-view {
+  background: rgba(52, 226, 255, 0.08);
+  border-color: rgba(52, 226, 255, 0.4);
+}
+.sc-view-arrow {
+  display: inline-block;
+  margin-left: 0.3em;
+  transition: transform var(--duration-hover) var(--ease-perch);
+}
 
 @media (max-width: 640px) {
-  /* 0.35rem/0.7rem padding at 0.7rem font-size lands well under a
-     comfortable tap target -- bump it up on touch-sized viewports
-     without changing how it reads on desktop. */
-  .sc-view { min-height: 40px; padding: 0.5rem 0.85rem; }
+  /* Card itself is the tap target now, but keep the visual chip roomy
+     enough to read as a real affordance at touch sizes. */
+  .sc-view { padding: 0.5rem 0.85rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .signal-card { animation: none; }
+  .signal-card { animation: none; transform: none; }
 }

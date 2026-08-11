@@ -44,6 +44,15 @@
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
 
+  /* Same curve perchmarkets.com already uses for its hero/nav/cursor
+     transitions (AlertCard.css, MagneticButton.css, Nav.css) -- naming
+     it here instead of re-deriving it lets every new dashboard
+     transition match the landing page without eyeballing it. */
+  --ease-perch: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --duration-micro: 0.15s;
+  --duration-hover: 0.2s;
+  --duration-reveal: 0.3s;
+
   color-scheme: dark;
 }
 
