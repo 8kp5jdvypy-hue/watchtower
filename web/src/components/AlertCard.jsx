@@ -4,9 +4,33 @@ import { useFinePointer, useReducedMotion } from '../hooks/usePrefs'
 import './AlertCard.css'
 import './PerchMark.css'
 
-// data shape: { symbol, kind, detail, time, meterPct, meterVal, figs: [{label,val}],
-// contexts: [{label,text}], why: [string] } -- one object per illustrative example,
-// so the NVDA/AMD/SPY switcher can swap the whole card's content at once.
+// data shape: { symbol, kind, tier, headline, technical, time, figs: [{label,val}],
+// contexts: [{label,text}], history: {sampleSize,continuationRate,offsetMin,avgReturnPct},
+// why: [string] } -- one object per illustrative example, so the NVDA/AMD/SPY
+// switcher can swap the whole card's content at once.
+
+// Mirrors web-app/src/signalHistory.js's SMALL_SAMPLE_THRESHOLD and
+// interpretHistory() exactly -- same threshold, same decent/mixed/weak
+// wording -- so the demo teaches the same honesty the real product shows,
+// not a simplified version of it. Self-contained on purpose (Tier 1.4):
+// this is a copy, not a shared import across the two separate projects.
+const SMALL_SAMPLE_THRESHOLD = 10
+
+function interpretHistory({ continuationRate, avgReturnPct }) {
+  const nearZero = Math.abs(avgReturnPct) < 0.1
+  if (continuationRate < 0.45 || (avgReturnPct < 0 && !nearZero)) {
+    return 'Historically weak follow-through for this setup.'
+  }
+  if (continuationRate >= 0.6 && avgReturnPct > 0 && !nearZero) {
+    return 'Historically decent follow-through for this setup.'
+  }
+  return 'Historically mixed results for this setup.'
+}
+
+function pct(value) {
+  return `${Math.round(value * 100)}%`
+}
+
 export default function AlertCard({ data, visible }) {
   const cardRef = useRef(null)
   const fine = useFinePointer()
@@ -30,7 +54,8 @@ export default function AlertCard({ data, visible }) {
     cardRef.current.style.setProperty('--ry', 0)
   }
 
-  const { symbol, kind, detail, time, meterPct, meterVal, figs, contexts, why } = data
+  const { symbol, kind, tier, headline, technical, time, figs, contexts, history, why } = data
+  const isHigh = tier === 'high'
 
   return (
     <div
@@ -42,28 +67,25 @@ export default function AlertCard({ data, visible }) {
     >
       <div className="ac-head">
         <span className="ac-head-id">
-          {/* A small, static identity anchor -- this card only ever shows
-              an already-confirmed signal, so there's no state to animate
-              through here (that happens upstream, in AlertSequence). */}
-          <PerchMark size={15} state="confirmed" accent={false} />
-          <span className="eyebrow"><span className="dot" /> PERCH DETECTED</span>
+          {/* Kind-label eyebrow, not a repeated "PERCH DETECTED" -- matches
+              the shipped SignalCard.jsx exactly (see Tier 1.3). */}
+          <PerchMark size={15} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
+          <span className="ac-kind-eyebrow">{kind}</span>
         </span>
-        <span className="demo-tag">Demo</span>
+        <span className="ac-head-badges">
+          <span className={`ac-tier ac-tier-${tier}`}>{tier}</span>
+          <span className="demo-tag">Demo</span>
+        </span>
       </div>
       <div className="ac-body">
         <span className="ac-symbol">{symbol}</span>
-        <span className="ac-kind">{kind}</span>
         <span className="ac-pulse" aria-hidden="true" />
-        <p className="ac-detail">{detail}</p>
+        <p className="ac-headline">{headline}</p>
+        <p className="ac-technical">{technical}</p>
       </div>
 
       <div className="ac-expand" aria-hidden={!open}>
         <div className="ac-expand-in">
-          <div className="ac-meter">
-            <span className="ac-meter-label">Signal strength</span>
-            <div className="ac-meter-track"><span className="ac-meter-fill" style={{ '--pct': meterPct }} /></div>
-            <span className="ac-meter-val">{meterVal}</span>
-          </div>
           <div className="ac-fig-row">
             {figs.map((f) => (
               <div className="ac-fig" key={f.label}><span>{f.label}</span><b>{f.val}</b></div>
@@ -72,8 +94,20 @@ export default function AlertCard({ data, visible }) {
           {contexts.map((c) => (
             <p className="ac-context" key={c.label}><b>{c.label} —</b> {c.text}</p>
           ))}
+          <div className="ac-history">
+            <span className="ac-history-label">Historical stats</span>
+            <p className="ac-history-line">
+              <b>{history.sampleSize}</b> historical observation{history.sampleSize === 1 ? '' : 's'} of this
+              same setup · <b>{pct(history.continuationRate)}</b> continued in the same direction within{' '}
+              {history.offsetMin} min · avg follow-through <b>{history.avgReturnPct.toFixed(2)}%</b>
+            </p>
+            {history.sampleSize < SMALL_SAMPLE_THRESHOLD && (
+              <span className="ac-small-sample">Small sample — treat as weak evidence</span>
+            )}
+            <p className="ac-history-interpretation">{interpretHistory(history)}</p>
+          </div>
           <div className="ac-why">
-            <span className="ac-why-label">Why Perch noticed</span>
+            <span className="ac-why-label">Why Perch flagged this</span>
             <ul>
               {why.map((w) => <li key={w}>{w}</li>)}
             </ul>

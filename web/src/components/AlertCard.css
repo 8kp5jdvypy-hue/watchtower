@@ -25,9 +25,12 @@
 .alert-card::before {
   content: '';
   position: absolute; inset: 0; border-radius: 6px; padding: 1px;
+  /* Cyan-only -- was a two-tone cyan/violet glow; violet has no
+     equivalent in the app's palette and no documented meaning here, so
+     it's dropped rather than reconciled (see Tier 3.1). */
   background:
     radial-gradient(220px circle at var(--mx) var(--my), rgba(52,226,255,0.55), transparent 55%),
-    linear-gradient(140deg, rgba(52,226,255,0.35), transparent 45%, transparent 60%, rgba(178,107,255,0.25));
+    linear-gradient(140deg, rgba(52,226,255,0.35), transparent 60%);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor; mask-composite: exclude;
   pointer-events: none;
@@ -38,10 +41,26 @@
 
 .ac-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .ac-head-id { display: flex; align-items: center; gap: 0.55rem; }
+/* Matches the app's .sc-eyebrow exactly -- neutral, not colored. The tier
+   badge (not the kind label) is what carries the "this matters" signal,
+   same as the shipped card. */
+.ac-kind-eyebrow {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.ac-head-badges { display: flex; align-items: center; gap: 0.5rem; }
+.ac-tier {
+  font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.18rem 0.55rem; border-radius: 999px; font-weight: 600;
+}
+.ac-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
+.ac-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
 .ac-body { display: flex; flex-direction: column; position: relative; }
 .ac-symbol { font-family: var(--display); font-weight: 600; font-size: var(--step-3); color: var(--ink); letter-spacing: -0.01em; }
-.ac-kind { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--amber); margin-top: 0.3rem; }
-.ac-detail { font-size: 0.92rem; color: var(--ink-dim); margin: 0.7rem 0 0; line-height: 1.5; }
+.ac-headline { font-size: 0.92rem; color: var(--ink-dim); margin: 0.7rem 0 0; line-height: 1.5; }
+/* The raw/technical sentence, demoted to secondary text under the plain
+   headline -- matches the app's .sc-headline-raw treatment. */
+.ac-technical { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-faint); margin: 0.4rem 0 0; line-height: 1.5; }
 
 /* Quiet, continuous "data is moving" cue -- only animates while the card
    is actually on screen, never in the background. */
@@ -66,24 +85,27 @@
 .alert-card.is-open .ac-expand { grid-template-rows: 1fr; }
 .ac-expand-in { overflow: hidden; }
 
-.ac-meter { margin-top: 1.1rem; }
-.ac-meter-label { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
-.ac-meter-track { height: 4px; background: var(--line); border-radius: 2px; margin: 0.5rem 0 0.35rem; overflow: hidden; }
-.ac-meter-fill {
-  display: block; height: 100%; width: 0%; border-radius: 2px;
-  background: linear-gradient(90deg, var(--cyan-dim), var(--cyan));
-  transition: width 0.6s cubic-bezier(.2,.8,.2,1) 0.1s;
-}
-.alert-card.is-open .ac-meter-fill { width: var(--pct); }
-.ac-meter-val { font-family: var(--mono); font-size: 0.76rem; color: var(--ink); }
-
-.ac-fig-row { display: flex; gap: 1.4rem; margin-top: 1rem; }
+.ac-fig-row { display: flex; gap: 1.4rem; margin-top: 1.1rem; }
 .ac-fig { display: flex; flex-direction: column; gap: 0.25rem; }
 .ac-fig span { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
 .ac-fig b { font-family: var(--display); font-size: 0.9rem; color: var(--ink); font-weight: 600; }
 
 .ac-context { font-size: 0.82rem; color: var(--ink-dim); line-height: 1.55; margin: 0.9rem 0 0; }
 .ac-context b { color: var(--ink); font-weight: 600; }
+
+/* Mirrors the app's .sd-history* block exactly, including the amber
+   small-sample tag (see AlertCard.jsx's interpretHistory()). */
+.ac-history { margin-top: 1rem; padding-top: 0.9rem; border-top: 1px solid var(--line); }
+.ac-history-label { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
+.ac-history-line { margin: 0.6rem 0 0; color: var(--ink-dim); font-size: 0.82rem; line-height: 1.6; }
+.ac-history-line b { color: var(--ink); }
+.ac-small-sample {
+  display: inline-block; margin-top: 0.5rem;
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.02em;
+  color: var(--amber); border: 1px solid rgba(255, 180, 84, 0.3); border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+}
+.ac-history-interpretation { margin: 0.55rem 0 0; color: var(--ink-dim); font-size: 0.82rem; line-height: 1.5; }
 
 .ac-why { margin-top: 1rem; padding-top: 0.9rem; border-top: 1px solid var(--line); }
 .ac-why-label { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-faint); }
