@@ -2,6 +2,7 @@ import PerchMark from './PerchMark'
 import { cardHeadline } from '../signalHeadlines'
 import { kindLabel } from '../kindLabels'
 import './SignalCard.css'
+import './SignalArrival.css'
 
 function relativeTime(tsUtc) {
   const diffMs = Date.now() - new Date(tsUtc).getTime()
@@ -23,7 +24,13 @@ function relativeTime(tsUtc) {
 // footer, per the brief's "card should feel like it's transitioning
 // into the intelligence detail view" note. Falls back to a plain,
 // non-interactive div when no onView is passed.
-export default function SignalCard({ signal, quote, onView }) {
+//
+// `arrived` toggles the signal-arrival glow directly on this element's
+// own className, rather than a caller wrapping this component in an
+// extra div. Same key, same component, every render -- so a card
+// settling out of its arrival glow is a className change, not a
+// remount that would cut the CSS animation off mid-fade (see Today.jsx).
+export default function SignalCard({ signal, quote, onView, arrived = false }) {
   const isHigh = signal.tier === 'high'
   const Root = onView ? 'button' : 'div'
   // Real live quote (SIP, via /quotes) against price at detection --
@@ -45,7 +52,7 @@ export default function SignalCard({ signal, quote, onView }) {
   return (
     <Root
       type={onView ? 'button' : undefined}
-      className={`signal-card${isHigh ? ' is-high' : ''}`}
+      className={`signal-card${isHigh ? ' is-high' : ''}${arrived ? ' signal-arrival' : ''}`}
       onClick={onView ? () => onView(signal.id) : undefined}
     >
       <div className="sc-head">
