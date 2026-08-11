@@ -49,6 +49,11 @@
 
 ## September — retention + revenue mechanics
 
+- [ ] Engine investigation: MEDIUM tier continuation significantly
+      <50% on both feeds (Decision A proposal, n=83) — investigate
+      what MEDIUM measures and whether it should be re-derived,
+      reframed as non-directional, or merged into LOG. Evidence-first,
+      no changes without approval. Separate proposal required.
 - [ ] Alert preferences: digest / quiet hours / HIGH-only (churn
       defense)
 - [ ] Weekly market-recap note (semi-automated)
