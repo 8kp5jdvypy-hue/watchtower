@@ -6,15 +6,56 @@ universe-wide volume-multiple line item, and a backtest-window
 recommendation. **This is evidence only — no recalibration decision
 (Decision A) or live cutover is made or implied here.**
 
-**Extension update (2026-08-12)**: the original 23-session pass below
-has been superseded by an 83-session rerun (widened per this doc's own
-recommendation) and **surfaced a materially different, more
-significant finding than the original pass did** — not just
-`rvol_spike`, but a broad decline across every detector kind and every
-tier under a properly-rebuilt SIP baseline, traced to SIP's wider
-ATR. See "Watchlist: signal counts" below for the corrected numbers and
-"What changed and why" for the mechanism. The universe section is
-unaffected and unchanged.
+**Correction (2026-08-12, second pass):** the first 83-session update
+to this report (below, in "What changed and why") reported a broad,
+~41% decline across every detector kind and tier under SIP, explained
+by a 21%-wider ATR(14). **That finding was substantially wrong** — an
+artifact of a second, unrelated mistake in how the SIP cache was
+built, caught while preparing the Decision A analysis, before it was
+used for anything. See "The second bug" below for the full account and
+corrected numbers. The real effect is real but much smaller: roughly a
+4% overall decline, concentrated in `round_number_break` and
+`rvol_spike`, with most other kinds nearly flat. The universe section
+was never affected by either bug and remains valid throughout.
+
+## The second bug: SIP's daily-bar cache was too shallow for ATR14
+
+While preparing the Decision A threshold analysis, a sanity check
+(counting distinct sessions with any detection in each journal)
+surfaced: `journal_iex90.db` had detections on all 83 replayed
+sessions, but `journal_sip90.db` had detections on only **51** — every
+session before 2026-05-18 was completely empty, then a hard cutover
+to a normal-looking count.
+
+Root cause: `scripts/fetch_cache.py`'s daily-bar fetch
+(`ensure_daily()`, `--daily-n`, default 60) is idempotent — it skips
+fetching if `daily.csv` already exists — and every SIP cache-extension
+pass in the earlier session only ever touched the *intraday* lookback
+(`MAX_LOOKBACK_DAYS`), never `--daily-n`. So `data/cache-sip/*/daily.csv`
+was left at its very first, default fetch: 60 daily bars, starting
+2026-05-15. `ATR(14)` needs the trailing 14 daily bars, i.e. 15 total
+(`tradebot/detectors.py`'s `atr()`), and `ReplayMarketData.daily_bars()`
+only returns bars dated *strictly before* the replayed session — so for
+every session before daily history had accumulated 15 prior bars (in
+practice, before 2026-05-18), `atr()` returned `None` and **every
+ATR-thresholded detector silently declined to fire, for all 17 symbols,
+for 32 of the 83 sessions.** The IEX cache never hit this because its
+`daily.csv` already held ~300 bars (built up over the project's real
+history, not a single one-shot fetch), so it never needed extending.
+
+This means the "83-session" SIP numbers reported below in the original
+pass were really an average over 51 real sessions and 32 structurally-
+empty ones — which mechanically drags every mean/rate down and
+manufactures the appearance of a much larger decline than is real,
+independent of any genuine SIP-vs-IEX effect.
+
+**Fix**: deleted the undersized `daily.csv` files, refetched with
+`--daily-n 150` (150 daily bars per symbol, back to 2026-01-06 —
+comfortably past the 15-bar minimum for the earliest replayed session,
+2026-04-01), copied the corrected files into the matched-intersection
+cache used for replay, and reran the SIP replay in the foreground.
+Verified before trusting the output: `SELECT DISTINCT session FROM
+detections` now returns all 83 sessions on the SIP side, matching IEX.
 
 ## Methodology
 
@@ -27,87 +68,79 @@ unaffected and unchanged.
   (`DETECTOR_DATA_FEED=sip python3 scripts/fetch_cache.py --cache-dir
   data/cache-sip`) — into two separate journal DBs, each run's session
   count and cache path printed and confirmed before trusting its
-  output. **Critically: each run's historical baseline
-  (`avg_cum_volume_by_bar`) was built from the SAME cache directory as
-  that run's live evaluation bars** — i.e. this measures the
-  migration's target end state (SIP-current vs. SIP-baseline, both
-  properly rebuilt), not the dangerous mixed state (SIP-current vs.
-  stale-IEX-baseline) the proposal's Phase 3 ordering exists to
-  prevent.
+  output (and, after the second bug above, confirmed again by checking
+  that every expected session actually produced detections, not just
+  that the header line looked right).
 - **Universe volume-multiple line item**: full active universe (13,026
   symbols, `tradebot.universe.active_symbols()`), daily bars only (no
   intraday, no detector replay — broad_scan's own screen is
   daily-bar-only, see `screen_snapshot()`), 30-day lookback, both feeds,
-  via `fetch_daily_bars_bulk` (chunked, ~9 bulk calls per feed).
-  Unaffected by the extension — not rerun, numbers below are unchanged
-  from the original pass.
+  via `fetch_daily_bars_bulk` (chunked, ~9 bulk calls per feed). Never
+  touched by either bug above — this doesn't use the replay/ATR path at
+  all — numbers below are unchanged from every prior pass.
 
 ## Watchlist: signal counts by kind and tier
 
 **Cluster-level tier totals** (one row per detection cluster,
 regardless of how many kinds fired together):
 
-| Tier | IEX (83 sessions) | SIP (83 sessions) | Δ |
+| Tier | IEX (83 sessions) | SIP (83 sessions, corrected) | Δ |
 |---|---|---|---|
-| high | 313 | 207 | -33.9% |
-| medium | 2689 | 1355 | -49.6% |
-| log | 9361 | 5722 | -38.9% |
+| high | 313 | 296 | -5.4% |
+| medium | 2689 | 2333 | -13.2% |
+| log | 9361 | 9213 | -1.6% |
+
+Mean clusters/day: **148.95 (IEX) → 142.67 (SIP), a 4.2% decline** —
+not the 41% originally (and wrongly) reported.
 
 **Per-kind instance counts:**
 
-| Kind | IEX | SIP | Δ |
+| Kind | IEX | SIP (corrected) | Δ |
 |---|---|---|---|
-| vwap_break | 6021 | 3641 | -39.5% |
-| level_break | 4245 | 2544 | -40.1% |
-| range_expansion | 2752 | 1494 | -45.7% |
-| round_number_break | 1023 | 578 | -43.5% |
-| gap | 223 | 124 | -44.4% |
-| rvol_spike | 24 | 5 | -79.2% |
+| vwap_break | 6021 | 5893 | -2.1% |
+| level_break | 4245 | 4152 | -2.2% |
+| range_expansion | 2752 | 2516 | -8.6% |
+| round_number_break | 1023 | 840 | -17.9% |
+| gap | 223 | 216 | -3.1% |
+| rvol_spike | 24 | 12 | -50.0% |
 
-**Every detector kind fires meaningfully less often under a
-properly-rebuilt SIP baseline — mean clusters/day drops from 148.95 to
-87.76, a 41% reduction.** This is a broader and more consequential
-finding than the original 23-session pass surfaced (that pass showed
-`rvol_spike` alone moving, by a small and thin-sample amount). With 83
-sessions, the pattern is unambiguous and consistent across every kind,
-including the ATR-priced ones the proposal's own risk analysis assumed
-were largely insulated from the feed choice ("narrower than 'the whole
-scanner breaks'" — see `vendors/alpaca.py`'s docstrings). That
-assumption doesn't hold up under this data.
+**The real picture is much narrower than the first (buggy) pass
+suggested.** `vwap_break`, `level_break`, and `gap` are nearly flat
+(2-3%) — the ATR-widening mechanism described below is real but small
+at the current sample size, not the dominant, broad effect originally
+reported. `range_expansion` shows a moderate decline (-8.6%).
+`round_number_break` shows the largest ATR-driven decline (-17.9%) —
+worth a closer look on its own if Decision A moves forward, since it's
+now the clearest outlier among the ATR-thresholded kinds.
+`rvol_spike` remains the single largest proportional decline (-50%,
+though at n=24→12, this was already known to be a thin sample even
+before the daily-cache bug, and is now down to n=12 — too thin to
+treat as more than directionally suggestive).
 
-### What changed and why: SIP's wider ATR, not just volume
+### What changed and why: SIP's wider ATR is real, but modest
 
-The proposal's risk analysis was entirely about `rvol_spike`'s
-volume-baseline mismatch. This backtest found a second, distinct
-mechanism affecting every ATR-thresholded detector
+SPY's average `atr14` across the corrected 83 sessions: **0.7246
+(IEX) vs. 0.7799 (SIP) — 7.6% wider**, not the 21% originally reported
+(that number was itself computed from the corrupted SIP journal, so it
+inherited the same bug). A ~7.6% wider ATR denominator is consistent
+with the modest declines seen above in the ATR-thresholded kinds
 (`level_break`, `range_expansion`, `vwap_break`, `round_number_break`,
-`gap` all price moves against `atr_units * ATR`):
+`gap`, all gated on `atr_units * ATR`) — real, but not the kind of
+effect that would justify a sweeping recalibration on its own.
 
-**SIP's consolidated tape produces a wider high-low range per bar than
-IEX alone — more venues contributing prints means more extreme highs
-and lows — which inflates ATR(14).** Measured directly: SPY's average
-`atr14` across these 83 sessions is **0.7246 under IEX vs. 0.8776 under
-SIP — 21% wider**. Since these detectors fire when a price move exceeds
-`atr_units × ATR`, a wider ATR denominator means the *same* absolute
-price move clears the bar less often. This isn't a bug in either feed —
-both ATRs are "correct" for what each feed actually saw — but it means
-**the migration's threshold-sensitivity isn't confined to `rvol_spike`
-and volume**. Any recalibration proposal (Decision A) that only
-re-examines `rvol_spike`'s volume threshold would miss this.
-
-**`rvol_spike` specifically**: 24 (IEX) → 5 (SIP), and HIGH-tier
-`rvol_spike` went from 3 → 0. Same direction as the original pass, now
-on a real sample. The proposal's feared failure mode (SIP volume
-against a stale IEX baseline exploding `rvol_spike`'s firing rate)
-remains avoidable as long as the baseline is genuinely rebuilt first —
-this data doesn't change that conclusion, it just confirms it on a
-much larger sample and reveals the ATR effect as an additional,
-separate consideration alongside it.
+**`rvol_spike` specifically**: 24 (IEX) → 12 (SIP corrected) — still
+the standout decline, and this one was never affected by the daily-bar
+bug (it depends on `avg_cum_volume_by_bar`, a separate baseline, not
+`atr14`). The proposal's original concern — a volume-baseline mismatch
+specific to `rvol_spike` — remains the best-supported finding in this
+whole report, now on a smaller but still real sample.
 
 ## Watchlist: volume-multiple distribution
 
 Per symbol, SIP:IEX cumulative-volume ratio across the 83 sessions
-(1,411 symbol-sessions total):
+(1,411 symbol-sessions total). Unaffected by the daily-bar bug (this
+is computed directly from intraday cache volume columns, not from the
+replay/ATR path):
 
 | Symbol | Mean | Median | Min | Max |
 |---|---|---|---|---|
@@ -138,9 +171,8 @@ outliers show up, as expected.
 
 ## broad_scan universe: volume-multiple distribution (its own line item, as requested)
 
-Unchanged from the original pass — not rerun, since it doesn't depend
-on the watchlist session-count issue above (this uses daily bars over
-a fixed 30-day lookback, not the intraday replay window).
+Unaffected by either bug above — this uses daily bars over a fixed
+30-day lookback and never touches the replay/ATR path at all.
 
 13,026 active universe symbols, daily bars, 30-day lookback. 12,829
 returned IEX data, 13,023 returned SIP data (SIP's broader
@@ -178,33 +210,34 @@ different from the watchlist's, not just a bigger version of it.
 
 **83 sessions, not 90** — `scripts/fetch_cache.py`'s
 `MAX_LOOKBACK_DAYS` safety cap (60 candidate days) stopped the first
-extension attempt at 40 sessions; overriding that cap for this one-off
-evidence-gathering run (not a change to the committed script) reached
-90. Of those 90, 83 overlapped with the existing 144-session IEX cache
-(2026-01-02 through 2026-08-05) — the other 7 were dates newer than the
-IEX cache's last cached date, excluded from the matched comparison for
-a clean apples-to-apples run.
+intraday-extension attempt at 40 sessions; overriding that cap for
+this one-off evidence-gathering run (not a change to the committed
+script) reached 90. Of those 90, 83 overlapped with the existing
+144-session IEX cache (2026-01-02 through 2026-08-05) — the other 7
+were dates newer than the IEX cache's last cached date, excluded from
+the matched comparison for a clean apples-to-apples run.
 
-**This resolves the original pass's main caveat.** `rvol_spike` now has
-n=24 (IEX) / n=5 (SIP) — better than the original n=16/n=6, though
-HIGH-tier `rvol_spike` specifically is still thin (3 → 0). The other
-five kinds now have samples in the hundreds to thousands per side,
-comfortably past `SCANNER_PLAN.md`'s own n=5-per-bucket caution for
-everything except `rvol_spike`'s HIGH tier and `gap`'s HIGH tier (8 →
-4). **A HIGH-tier-specific verdict for `rvol_spike` would still need a
-much larger window** — this pass doesn't resolve that, it just narrows
-what's still open going into Decision A.
+**This resolves the original pass's main caveat, on the corrected
+data.** `rvol_spike` now has n=24 (IEX) / n=12 (SIP) — better than the
+very first n=16/n=6 pass, though still thin, especially at HIGH tier.
+The other five kinds now have samples in the hundreds to thousands per
+side, comfortably past `SCANNER_PLAN.md`'s own n=5-per-bucket caution.
+**A HIGH-tier-specific verdict for `rvol_spike` would still need a much
+larger window** — this pass doesn't resolve that, it just narrows what
+was already known to be thin.
 
 ## Artifacts
 
 All gitignored (`data/`, `out/` — nothing here is committed):
 
-- `data/cache-sip/` — the built SIP cache, 17 symbols × 90 sessions
+- `data/cache-sip/` — the built SIP cache, 17 symbols × 90 sessions,
+  `daily.csv` now 150 bars deep per symbol (was 60 — see "The second
+  bug" above)
 - `data/cache-iex-subset90/`, `data/cache-sip-subset90/` — the
   83-session matched intersection actually replayed
 - `data/journal_iex90.db`, `data/journal_sip90.db` — full replay
-  output for this extended pass, queryable directly for anything
-  beyond what's summarized here
+  output for this extended pass (SIP side rebuilt after the daily-bar
+  fix), queryable directly for anything beyond what's summarized here
 - `out/replay_iex90.csv`, `out/replay_sip90.csv` — per-cluster CSV
   dumps
 - `data/_universe_iex_bars.pkl`, `data/_universe_sip_bars.pkl` — raw
