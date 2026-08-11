@@ -241,8 +241,8 @@ the wrong thing.
    `--cache-dir` (`scripts/fetch_cache.py:97`, pre-existing, no code
    change needed there) and — per the feed-site audit above — already
    fetches through `vendors.alpaca.fetch_daily_bars`/`fetch_intraday_bars`,
-   which will honor `DETECTOR_DATA_FEED` once Phase 3's config-value
-   change ships. A one-off invocation with a process-local env override:
+   which honor `DETECTOR_DATA_FEED` once this section's own prerequisite
+   has shipped. A one-off invocation with a process-local env override:
    ```
    DETECTOR_DATA_FEED=sip python3 scripts/fetch_cache.py --cache-dir data/cache-sip
    ```
