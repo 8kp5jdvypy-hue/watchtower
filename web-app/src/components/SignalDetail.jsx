@@ -3,21 +3,9 @@ import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
 import { SMALL_SAMPLE_THRESHOLD, interpretHistory } from '../signalHistory'
+import { kindLabel } from '../kindLabels'
 import PerchMark from './PerchMark'
 import './SignalDetail.css'
-
-const KIND_LABELS = {
-  level_break: 'Level break',
-  rvol_spike: 'Volume spike',
-  range_expansion: 'Range expansion',
-  vwap_break: 'VWAP break',
-  round_number_break: 'Round number',
-  gap: 'Gap',
-  relative_strength_break: 'Relative strength',
-}
-function kindLabel(kind) {
-  return KIND_LABELS[kind] || kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
 
 function absoluteTime(tsUtc) {
   return new Date(tsUtc).toLocaleString(undefined, {

@@ -1,21 +1,7 @@
 import PerchMark from './PerchMark'
 import { cardHeadline } from '../signalHeadlines'
+import { kindLabel } from '../kindLabels'
 import './SignalCard.css'
-
-// Matches the `kind` values detectors.py actually produces -- anything
-// not in this map falls back to a de-slugged version of the raw value,
-// so a new detector kind never renders as a blank tag.
-const KIND_LABELS = {
-  level_break: 'Level break',
-  rvol_spike: 'Volume spike',
-  range_expansion: 'Range expansion',
-  vwap_break: 'VWAP break',
-  round_number_break: 'Round number',
-  gap: 'Gap',
-}
-function kindLabel(kind) {
-  return KIND_LABELS[kind] || kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
 
 function relativeTime(tsUtc) {
   const diffMs = Date.now() - new Date(tsUtc).getTime()
