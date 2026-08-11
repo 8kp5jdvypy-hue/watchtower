@@ -5,6 +5,7 @@ import { SESSION_LABEL, useMarketClock } from './hooks/useMarketClock'
 import PerchMark from './components/PerchMark'
 import AmbientField from './components/AmbientField'
 import Login from './components/Login'
+import VerifyMagicLink from './components/VerifyMagicLink'
 import Today from './components/Today'
 import Watchlist from './components/Watchlist'
 import Feed from './components/Feed'
@@ -42,9 +43,17 @@ function LoadingShell() {
   )
 }
 
+function getMagicLinkToken() {
+  return new URLSearchParams(window.location.search).get('token')
+}
+
 function App() {
   const [account, setAccount] = useState(undefined) // undefined = still checking, null = signed out
   const [activeTab, setActiveTab] = useState('today')
+  // Set from the URL once, at mount -- cleared (see handleVerified) once
+  // it's been used, never re-derived from the URL again, so nothing
+  // re-shows the confirm screen for a token that's already been spent.
+  const [magicLinkToken, setMagicLinkToken] = useState(getMagicLinkToken)
   const trackedAuthRef = useRef(false)
   const clock = useMarketClock()
 
@@ -56,6 +65,15 @@ function App() {
     checkSession()
   }, [checkSession])
 
+  function handleVerified() {
+    const params = new URLSearchParams(window.location.search)
+    params.delete('token')
+    const rest = params.toString()
+    window.history.replaceState(null, '', rest ? `${window.location.pathname}?${rest}` : window.location.pathname)
+    setMagicLinkToken(null)
+    checkSession()
+  }
+
   // Fires once per real session, not on every re-render or tab switch --
   // this is "a signed-in session exists," the funnel's last real step,
   // not a page-view counter (see tradebot/funnel_events.py's ALLOWED_EVENTS).
@@ -66,15 +84,27 @@ function App() {
     }
   }, [account])
 
+  // Checked before the loading/signed-out branches below on purpose: a
+  // token in the URL means "not signed in yet, about to be" regardless
+  // of where checkSession's own request happens to be — showing the
+  // confirm button immediately avoids a loading-spinner-then-Login
+  // flash before it. Skipped once `account` actually resolves truthy
+  // (an already-valid session hit this URL with a stale token attached)
+  // so a real session is never held hostage behind a dead link.
+  if (magicLinkToken && !account) {
+    return <VerifyMagicLink token={magicLinkToken} onVerified={handleVerified} />
+  }
+
   if (account === undefined) {
     return <LoadingShell />
   }
 
   if (account === null) {
-    // Clicking the emailed magic link hits the API directly and ends in
-    // a full-page redirect back here (see tradebot/api/app.py's
-    // /auth/magic-link/verify) — that reload re-runs checkSession via
-    // the effect above, so nothing more is needed here.
+    // The emailed link lands on VerifyMagicLink above, not here directly
+    // — see tradebot/api/app.py's /auth/magic-link/verify, which is a
+    // same-origin POST now, not a bare GET a passive page load could
+    // trigger. handleVerified re-runs checkSession once that POST
+    // succeeds, which is what gets a signed-in visitor out of Login.
     return <Login />
   }
 

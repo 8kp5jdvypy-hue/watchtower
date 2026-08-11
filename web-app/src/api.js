@@ -27,6 +27,12 @@ async function request(path, options = {}) {
 
 export const api = {
   requestMagicLink: (email) => request('/auth/magic-link/request', { method: 'POST', body: JSON.stringify({ email }) }),
+  // POST, not the token-in-a-GET the emailed link used to hit directly --
+  // see VerifyMagicLink.jsx for why. request()'s default
+  // Content-Type: application/json is load-bearing here, not incidental:
+  // it's what forces the CORS preflight that keeps this un-forgeable
+  // from any origin other than this app.
+  verifyMagicLink: (token) => request('/auth/magic-link/verify', { method: 'POST', body: JSON.stringify({ token }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
   me: () => request('/me'),
   watchlist: () => request('/watchlist'),

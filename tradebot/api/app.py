@@ -32,7 +32,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, g, jsonify, redirect, request, session
+from flask import Flask, g, jsonify, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 logger = logging.getLogger(__name__)
@@ -271,7 +271,11 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not rate_limit.allow(app.users_conn, f"magic_link:ip:{request.remote_addr}", *_MAGIC_LINK_PER_IP, now=now):
             return jsonify({"error": "too many requests, try again shortly"}), 429
         token = accounts.create_magic_link_token(app.users_conn, email, now)
-        link_url = f"{request.host_url.rstrip('/')}/auth/magic-link/verify?token={token}"
+        # Points at the frontend's own confirmation screen
+        # (VerifyMagicLink.jsx), not directly at /auth/magic-link/verify
+        # below -- see that route's comment for why a bare GET can never
+        # be the thing that actually signs someone in.
+        link_url = f"{app.frontend_url.rstrip('/')}/?token={token}"
         try:
             app.email_sender.send_magic_link(email, link_url)
         except Exception:
@@ -290,9 +294,24 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # whether an address is a known user.
         return jsonify({"ok": True}), 202
 
-    @app.route("/auth/magic-link/verify")
+    @app.route("/auth/magic-link/verify", methods=["POST"])
     def verify_magic_link():
-        token = request.args.get("token", "")
+        # POST with a JSON body, not the GET-with-token-in-the-query this
+        # used to be. A bare GET is triggerable by anything that merely
+        # LOADS a URL -- an <img src="…?token=…">, an email-scanning
+        # security appliance prefetching links, a <link rel=prefetch> --
+        # with no click and no JS, and the Set-Cookie in the response
+        # would land regardless of how the request was triggered. A JSON
+        # POST can't be forged the same way: request()'s
+        # Content-Type: application/json (see web-app/src/api.js) forces
+        # a CORS preflight, and add_cors_headers above only allows it
+        # from app.frontend_url -- an attacker page's fetch() never gets
+        # past that, and a plain auto-submitting HTML <form> can't set a
+        # JSON content-type at all. See web-app/src/components/
+        # VerifyMagicLink.jsx for the confirmation screen this now
+        # requires an actual button press on.
+        data = request.get_json(silent=True) or {}
+        token = data.get("token") or ""
         now = datetime.now(timezone.utc)
         email = accounts.verify_magic_link_token(app.users_conn, token, now)
         if email is None:
@@ -300,7 +319,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         account = accounts.get_or_create_account_for_email(app.users_conn, email)
         session.permanent = True  # opts into PERMANENT_SESSION_LIFETIME instead of an unbounded session
         session["account_id"] = account.id
-        return redirect(app.frontend_url)
+        return jsonify({"ok": True})
 
     @app.route("/auth/logout", methods=["POST"])
     def logout():

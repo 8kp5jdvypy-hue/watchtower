@@ -90,11 +90,15 @@ they're unset, which is only fine for local development:
 - `SESSION_SECRET_KEY` — signs the login session cookie. Generate one
   with `python3 -c "import secrets; print(secrets.token_hex(32))"` and
   never reuse the built-in dev default in production.
-- `FRONTEND_URL` — where `/auth/magic-link/verify` redirects after a
-  successful login, and the only origin the API's CORS headers allow.
-  Set to `https://app.perchmarkets.com` once the dashboard is deployed
+- `FRONTEND_URL` — where the magic-link email points people (its own
+  confirmation screen, `web-app/src/components/VerifyMagicLink.jsx`,
+  is what actually POSTs the token back to `/auth/magic-link/verify`
+  once they press the button there — that route itself is a same-
+  origin JSON POST, not something a plain emailed link can trigger on
+  its own), and the only origin the API's CORS headers allow. Set
+  to `https://app.perchmarkets.com` once the dashboard is deployed
   there (Phase 6); until then, magic-link login has nowhere real to
-  redirect to.
+  send people.
 - `SESSION_COOKIE_DOMAIN` — set to `.perchmarkets.com` so the session
   cookie `api.perchmarkets.com` sets is also sent on requests from
   `app.perchmarkets.com`. Leave unset for local development (host-only
