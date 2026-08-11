@@ -116,6 +116,46 @@ class Decision(str, Enum):
     # rule in tradebot.events: news is suppression/context, never a
     # reason to burn budget on an alert nobody will see.
     SUPPRESS_NEWS_BLACKOUT = "news_blackout"
+    # Set directly by runner.py, same shape as SUPPRESS_NEWS_BLACKOUT
+    # above — a HIGH cluster that's a non-escalating repeat of a recent
+    # same-symbol cluster (tradebot.dedup) never reaches evaluate()
+    # either, so a duplicate never burns the daily cap or cooldown.
+    SUPPRESS_DUPLICATE = "duplicate_event"
+
+
+class SuppressionCategory(str, Enum):
+    """Coarse, structured counterpart to the free-text suppress_reason
+    column journal.py has always written. Deliberately additive — never
+    replaces suppress_reason's existing string values, since
+    tradebot.telegram_bot.handlers has an exact-string dependency on
+    suppress_reason='cooldown_active'. This is the field a future
+    consumer (dashboard, quality metrics) should group/filter on instead
+    of parsing suppress_reason's several different free-text shapes."""
+
+    BUDGET_CAP = "budget_cap"
+    BUDGET_COOLDOWN = "budget_cooldown"
+    NEWS_BLACKOUT = "news_blackout"
+    DATA_INTEGRITY = "data_integrity"
+    DUPLICATE = "duplicate"
+    QUEUED_DIGEST = "queued_digest"
+
+
+_DECISION_TO_SUPPRESSION_CATEGORY: dict[Decision, SuppressionCategory] = {
+    Decision.SUPPRESS_CAP: SuppressionCategory.BUDGET_CAP,
+    Decision.CAP_REACHED_NOTICE: SuppressionCategory.BUDGET_CAP,
+    Decision.SUPPRESS_COOLDOWN: SuppressionCategory.BUDGET_COOLDOWN,
+    Decision.SUPPRESS_NEWS_BLACKOUT: SuppressionCategory.NEWS_BLACKOUT,
+    Decision.SUPPRESS_DUPLICATE: SuppressionCategory.DUPLICATE,
+    Decision.QUEUED_FOR_DIGEST: SuppressionCategory.QUEUED_DIGEST,
+    Decision.QUEUED_FOR_EOD: SuppressionCategory.QUEUED_DIGEST,
+}
+
+
+def suppression_category_for_decision(decision: Decision) -> SuppressionCategory | None:
+    """None for Decision.SEND (nothing was suppressed) and for any future
+    Decision member nobody has mapped yet — a missing mapping should
+    read as 'uncategorized', never crash the caller."""
+    return _DECISION_TO_SUPPRESSION_CATEGORY.get(decision)
 
 
 @dataclass

@@ -17,7 +17,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from tradebot.alerts import AlertBudget, Cluster, Decision, TelegramAlerter
+from tradebot.alerts import (
+    AlertBudget,
+    Cluster,
+    Decision,
+    SuppressionCategory,
+    TelegramAlerter,
+    suppression_category_for_decision,
+)
 from tradebot.telegram_bot import outbox
 
 
@@ -48,6 +55,30 @@ def _cluster(symbol="TSLA", kinds="gap", tier="high", score=5.0, cid="abc123") -
         trend="up",
         code_version="f665fba",
     )
+
+
+def test_suppression_category_for_decision_covers_every_suppression_and_queue_decision():
+    """Every Decision member that represents a candidate NOT reaching a
+    subscriber should map to a SuppressionCategory; SEND (the only one
+    that does reach a subscriber) should map to None."""
+    expected = {
+        Decision.SEND: None,
+        Decision.CAP_REACHED_NOTICE: SuppressionCategory.BUDGET_CAP,
+        Decision.SUPPRESS_CAP: SuppressionCategory.BUDGET_CAP,
+        Decision.SUPPRESS_COOLDOWN: SuppressionCategory.BUDGET_COOLDOWN,
+        Decision.QUEUED_FOR_DIGEST: SuppressionCategory.QUEUED_DIGEST,
+        Decision.QUEUED_FOR_EOD: SuppressionCategory.QUEUED_DIGEST,
+        Decision.SUPPRESS_NEWS_BLACKOUT: SuppressionCategory.NEWS_BLACKOUT,
+        Decision.SUPPRESS_DUPLICATE: SuppressionCategory.DUPLICATE,
+    }
+    # Fails loudly if a future Decision member is added without updating
+    # this test AND the real mapping — the mapping itself already
+    # defaults an unmapped member to None via .get(), which is the right
+    # runtime behavior (never crash), but this test still wants every
+    # member accounted for explicitly.
+    assert set(expected) == set(Decision)
+    for decision, category in expected.items():
+        assert suppression_category_for_decision(decision) == category
 
 
 def test_high_tier_sends_up_to_the_daily_cap_then_notices_once_then_suppresses():

@@ -120,6 +120,89 @@ CREATE TABLE IF NOT EXISTS feedback (
     message TEXT NOT NULL,
     ts_utc TEXT NOT NULL
 );
+
+-- Perch-native identity (see tradebot.accounts). A Telegram user, a web
+-- login, and (later) a mobile login all resolve to one of these rows via
+-- linked_identities — this table, not `users`, is the root of "who is
+-- this" once more than one surface exists. `email` is nullable: an
+-- account created by linking Telegram first (the common case today, via
+-- the one-time migration) has no email until its owner logs into the
+-- web dashboard and claims one. SQLite's UNIQUE index treats each NULL
+-- as distinct, so any number of email-less accounts can coexist.
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE,
+    plan TEXT NOT NULL DEFAULT 'beta',
+    founding_member INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Many identities -> one account. provider is 'telegram' today;
+-- 'apple'/'google' land whenever mobile does, same shape, no schema
+-- change needed.
+CREATE TABLE IF NOT EXISTS linked_identities (
+    account_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_user_id TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (provider, provider_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_linked_identities_account ON linked_identities(account_id);
+
+-- Passwordless web login. A token is single-use (consumed_at) and
+-- short-lived (expires_at) — see tradebot.accounts.verify_magic_link_token.
+CREATE TABLE IF NOT EXISTS magic_link_tokens (
+    token TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT
+);
+
+-- Minimal, anonymous product-funnel log -- see tradebot.funnel_events
+-- for the write path and the reviewed ALLOWED_EVENTS set. anon_id is a
+-- random value the frontend generates and stores in localStorage, not
+-- derived from anything identifying; account_id is filled in by the API
+-- from the session once a visitor has signed in, so a signup funnel can
+-- be traced end to end without anything before that point being tied
+-- to a real person.
+CREATE TABLE IF NOT EXISTS funnel_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event TEXT NOT NULL,
+    anon_id TEXT NOT NULL,
+    account_id TEXT,
+    props_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_funnel_events_event ON funnel_events(event, ts_utc);
+
+-- Fixed-window rate limiting -- see tradebot.rate_limit. One row per
+-- (bucket_key, window_start); bucket_key encodes both what's being
+-- limited and its scope, e.g. "magic_link:email:alice@example.com" or
+-- "events:ip:203.0.113.4", so the same table serves every endpoint
+-- that needs this without a schema change per endpoint.
+CREATE TABLE IF NOT EXISTS rate_limit_counters (
+    bucket_key TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_key, window_start)
+);
+
+-- Client-side error reports -- see tradebot.client_errors. Deliberately
+-- separate from funnel_events: different read pattern ("show me the
+-- last 50 errors"), different retention concerns, and mixing product
+-- analytics with crash reports in one table would make both harder to
+-- query honestly.
+CREATE TABLE IF NOT EXISTS client_errors (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    message TEXT NOT NULL,
+    stack TEXT,
+    url TEXT,
+    user_agent TEXT,
+    account_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_client_errors_ts ON client_errors(ts_utc);
 """
 
 
@@ -152,6 +235,13 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     _add_column_if_missing(conn, "users", "plan", "TEXT NOT NULL DEFAULT 'beta'")
     _add_column_if_missing(conn, "users", "founding_member", "INTEGER NOT NULL DEFAULT 1")
     _add_column_if_missing(conn, "users", "waitlisted_at", "TEXT")
+    # How much signal a user wants (see onboarding's "how much signal do
+    # you want?" step) — 'quiet' raises the per-user HIGH-tier score
+    # floor above the global TIER_HIGH cutoff; 'balanced' (the default,
+    # including for every pre-existing row) is today's unchanged
+    # behavior; 'aggressive' also personally forwards the hourly MEDIUM
+    # digest, not just HIGH alerts. See tradebot.telegram_bot.delivery.
+    _add_column_if_missing(conn, "users", "alert_sensitivity", "TEXT NOT NULL DEFAULT 'balanced'")
     return conn
 
 
@@ -198,6 +288,7 @@ class User:
     plan: str
     founding_member: bool
     waitlisted_at: str | None
+    alert_sensitivity: str
 
     @property
     def is_onboarded(self) -> bool:
@@ -249,7 +340,7 @@ _USER_COLUMNS = (
     "quiet_hours_start, quiet_hours_end, tier, is_admin, paused_until, pause_reason, "
     "locked_until, lock_reason, max_trades_per_day, max_daily_loss, max_position_size, "
     "pending_limits_json, halted_session, onboarding_step, account_size, risk_per_trade_pct, "
-    "telegram_unreachable_at, plan, founding_member, waitlisted_at"
+    "telegram_unreachable_at, plan, founding_member, waitlisted_at, alert_sensitivity"
 )
 
 
@@ -259,6 +350,7 @@ def _row_to_user(row) -> User:
         tier, is_admin, paused_until, pause_reason, locked_until, lock_reason,
         max_trades, max_loss, max_size, pending_json, halted_session, onboarding_step,
         account_size, risk_per_trade_pct, telegram_unreachable_at, plan, founding_member, waitlisted_at,
+        alert_sensitivity,
     ) = row
     return User(
         telegram_user_id=uid, chat_id=chat_id, username=username, created_at=created_at,
@@ -269,7 +361,7 @@ def _row_to_user(row) -> User:
         max_position_size=max_size, pending_limits=json.loads(pending_json), halted_session=halted_session,
         onboarding_step=onboarding_step, account_size=account_size, risk_per_trade_pct=risk_per_trade_pct,
         telegram_unreachable_at=telegram_unreachable_at, plan=plan, founding_member=bool(founding_member),
-        waitlisted_at=waitlisted_at,
+        waitlisted_at=waitlisted_at, alert_sensitivity=alert_sensitivity,
     )
 
 
@@ -331,6 +423,18 @@ def set_quiet_hours(conn: sqlite3.Connection, telegram_user_id: int, start: str,
     conn.execute(
         "UPDATE users SET quiet_hours_start = ?, quiet_hours_end = ? WHERE telegram_user_id = ?",
         (start, end, telegram_user_id),
+    )
+    conn.commit()
+
+
+ALERT_SENSITIVITIES = ("quiet", "balanced", "aggressive")
+
+
+def set_alert_sensitivity(conn: sqlite3.Connection, telegram_user_id: int, sensitivity: str) -> None:
+    if sensitivity not in ALERT_SENSITIVITIES:
+        raise ValueError(f"unknown alert_sensitivity: {sensitivity!r} (expected one of {ALERT_SENSITIVITIES})")
+    conn.execute(
+        "UPDATE users SET alert_sensitivity = ? WHERE telegram_user_id = ?", (sensitivity, telegram_user_id)
     )
     conn.commit()
 
@@ -847,8 +951,12 @@ def _hold_time_bucket_stats(trades: list[Trade]) -> dict[str, BucketStats | None
     return result
 
 
-def personal_stats(conn: sqlite3.Connection, telegram_user_id: int) -> dict:
-    trades = list_trades(conn, telegram_user_id)
+def personal_stats(conn: sqlite3.Connection, telegram_user_id: int, trades: list[Trade] | None = None) -> dict:
+    """trades: pass an already-fetched list_trades() result to skip a
+    second identical query — every existing caller that doesn't have one
+    handy still gets it fetched here, unchanged."""
+    if trades is None:
+        trades = list_trades(conn, telegram_user_id)
 
     by_detector = {kind: _bucket_stats([t for t in trades if t.kind == kind]) for kind in sorted({t.kind for t in trades if t.kind})}
     by_symbol = {symbol: _bucket_stats([t for t in trades if t.symbol == symbol]) for symbol in sorted({t.symbol for t in trades})}

@@ -1,0 +1,75 @@
+@font-face {
+  font-family: 'Space Grotesk';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/SpaceGrotesk.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url('/fonts/JetBrainsMono.woff2') format('woff2');
+}
+
+:root {
+  /* Same family as perchmarkets.com's own tokens -- this is the one
+     thing that has to match exactly for the app to read as the same
+     product, not just a similarly-colored one. */
+  --bg: #05070a;
+  --bg-1: #0a0d12;
+  --bg-2: #10141b;
+  --line: #1c222c;
+  --ink: #eef2f6;
+  --ink-dim: #8b95a3;
+  --ink-faint: #737f94;
+
+  /* Signal is the exception, not the rule -- see index.css comment on
+     the landing page for the same rule. Cyan means "Perch noticed." */
+  --cyan: #34e2ff;
+  --cyan-dim: #1a7d8f;
+  --amber: #ffb454;
+
+  /* Real price direction is functional information, not brand
+     decoration -- unlike the landing page (which deliberately avoids
+     green=good/red=bad as a storytelling color), the app is showing
+     actual signed numbers a user needs to read at a glance. Tuned down
+     from a stock green/red so they sit quietly next to cyan rather
+     than competing with it. */
+  --up: #34d399;
+  --down: #fb7185;
+
+  --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+html { background: var(--bg); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 0.95rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+button, input { font-family: inherit; }
+a { color: inherit; text-decoration: none; }
+::selection { background: var(--cyan); color: var(--bg); }
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

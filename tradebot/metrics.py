@@ -25,12 +25,19 @@ def _label_key(name: str, labels: dict) -> str:
     return f"{name}{{{tags}}}"
 
 
-def increment(name: str, path: Path | None = None, **labels) -> None:
-    """Increments a counter by 1 and persists it. Safe to call from
-    multiple threads (guarded by a lock) or multiple processes (each
-    read-modify-write is small and infrequent — alert rejections, not a
-    hot path — so the rare lost update under real concurrent processes
-    is an acceptable tradeoff against adding a real metrics backend).
+def increment(name: str, path: Path | None = None, amount: int = 1, **labels) -> None:
+    """Increments a counter by `amount` (default 1, unchanged from every
+    call site written before this parameter existed) and persists it.
+    Safe to call from multiple threads (guarded by a lock) or multiple
+    processes (each read-modify-write is small and infrequent — alert
+    rejections, not a hot path — so the rare lost update under real
+    concurrent processes is an acceptable tradeoff against adding a real
+    metrics backend).
+
+    amount lets a caller accumulate a running total (e.g.
+    tradebot.broad_scan's *_latency_ms_total counters) instead of calling
+    this once per unit, which would be its own hot-path cost for exactly
+    the callers most likely to run over a large batch.
 
     path defaults to None (resolved to DEFAULT_METRICS_PATH at call
     time, not import time) so tests can monkeypatch
@@ -45,7 +52,7 @@ def increment(name: str, path: Path | None = None, **labels) -> None:
                 data = json.loads(path.read_text())
             except (json.JSONDecodeError, OSError):
                 data = {}
-        data[key] = data.get(key, 0) + 1
+        data[key] = data.get(key, 0) + amount
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, sort_keys=True))
 

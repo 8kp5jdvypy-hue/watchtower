@@ -74,17 +74,29 @@ def test_render_high_alert_golden_matches_the_target_render_exactly():
         "\n"
         "Broke below the $370 round number and took out the prior low on a range 15x its 14-day average.\n"
         "\n"
-        "<code>Last         $366.00\n"
-        "Prior close  $377.68\n"
-        "Session      $379.50–$384.44\n"
-        "Score        15.77 ATR\n"
-        "ATR(14)      1.77\n"
-        "Similar      35% cont. (n=20)\n"
-        "Contract     none tradable</code>\n"
+        "<code>Signal strength     6.0 / 6\n"
+        "Last                $366.00\n"
+        "Prior close         $377.68\n"
+        "Session             $379.50–$384.44\n"
+        "ATR(14)             1.77\n"
+        "Similar setups      20 historical observations\n"
+        "30m follow-through  35.00%\n"
+        "Contract            none tradable</code>\n"
         "\n"
         "level break · range expansion · round number\n"
         "<i>12:05 ET · fd153a · Not advice.</i>"
     )
+
+
+def test_render_high_alert_signal_strength_caps_at_six_for_an_outlier_score():
+    """Signal Strength is a display-only cap on the raw ATR score, not a
+    change to real scoring/tiering — cluster.score itself (used for
+    tier_for_score and the daily cap/cooldown logic) is untouched."""
+    text = templates.render_high_alert(_cluster(score=15.77), _anchors(), _quote(), None, None)
+    assert "Signal strength     6.0 / 6" in text
+
+    text_uncapped = templates.render_high_alert(_cluster(score=4.7), _anchors(), _quote(), None, None)
+    assert "Signal strength     4.7 / 6" in text_uncapped
 
 
 def test_render_high_alert_body_is_under_12_visual_lines():
@@ -111,18 +123,19 @@ def test_render_high_alert_has_no_exclamation_marks():
 
 def test_render_high_alert_shows_a_tradable_contract():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), _selection(), _history())
-    assert "Contract     $365.00P 8/14 · BE +2.90% (2.90 ATR)" in text
+    assert "Contract            $365.00P 8/14 · BE +2.90% (2.90 ATR)" in text
 
 
 def test_render_high_alert_never_omits_a_row_when_breakeven_and_history_are_none():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, None)
-    assert "Contract     none tradable" in text
-    assert "Similar      —" in text
+    assert "Contract            none tradable" in text
+    assert "Similar setups      —" in text
+    assert "30m follow-through  —" in text
 
 
 def test_render_high_alert_dashes_missing_atr_instead_of_omitting_the_row():
     text = templates.render_high_alert(_cluster(atr14=None), _anchors(), _quote(), None, None)
-    assert "ATR(14)      —" in text
+    assert "ATR(14)             —" in text
 
 
 def test_render_high_alert_never_exposes_the_full_uuid():
@@ -140,16 +153,20 @@ def test_render_high_alert_humanizes_detector_kinds_on_the_tag_line():
 def test_render_high_alert_news_driven_replaces_similar_setups_line():
     """Continuation stats are built on technical-setup history and don't
     transfer to an event-driven move — see tradebot.events module
-    docstring. news_driven=True must override the Similar row even though
-    a (real) history sample was passed in."""
+    docstring. news_driven=True must override the Similar setups row
+    (and drop the follow-through row entirely — there's nothing to
+    report follow-through on) even though a (real) history sample was
+    passed in."""
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history(), news_driven=True)
-    assert "Similar      continuation stats do not apply" in text
-    assert "35% cont." not in text  # the (contaminated) sample must not leak through
+    assert "Similar setups   continuation stats do not apply" in text
+    assert "35.00%" not in text  # the (contaminated) sample must not leak through
+    assert "follow-through" not in text
 
 
 def test_render_high_alert_shows_real_similar_setups_when_not_news_driven():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history(), news_driven=False)
-    assert "35% cont." in text
+    assert "Similar setups      20 historical observations" in text
+    assert "30m follow-through  35.00%" in text
     assert "continuation stats do not apply" not in text
 
 
@@ -478,7 +495,7 @@ def test_render_weekly_recap_golden_good_week():
         "HIGH tier alerts published: 20\n"
         "NO TRADE (system said sit this one out): 4 of 20 tracked\n"
         "\n"
-        "Hit rate: +60.00%   Avg move: +0.35% (n=20, +30m)\n"
+        "Hit rate: 60.00%   Avg move: +0.35% (n=20, +30m)\n"
         "That's not statistically different from a coin flip this week (z=0.89).\n"
         "\n"
         "<i>12:05 ET · Not advice.</i>"
@@ -506,7 +523,7 @@ def test_render_weekly_recap_golden_bad_week_uses_the_identical_template():
         "HIGH tier alerts published: 20\n"
         "NO TRADE (system said sit this one out): 4 of 20 tracked\n"
         "\n"
-        "Hit rate: +20.00%   Avg move: -0.90% (n=20, +30m)\n"
+        "Hit rate: 20.00%   Avg move: -0.90% (n=20, +30m)\n"
         "That's statistically worse than a coin flip this week (z=-2.68).\n"
         "\n"
         "<i>12:05 ET · Not advice.</i>"
@@ -541,6 +558,7 @@ def test_no_message_type_uses_financial_advice_wording_or_exclamation_marks():
         templates.render_weekly_recap(_weekly_recap(), when),
         templates.render_pinned_status(None, when),
         templates.render_contract_outcome(_contract_outcome(), when),
+        templates.render_example(_real_win(), _day_hit_rate(), when),
     ]
     for text in messages:
         assert "!" not in text
@@ -564,3 +582,67 @@ def test_render_sample_alert_is_labeled_as_a_real_example_not_a_promise():
     assert "+3.47%" in text
     assert "one real win, not the average" in text.lower()
     assert "/performance" in text
+
+
+def _real_win(**overrides):
+    from tradebot.telegram_bot.performance import RealWin
+
+    fields = dict(
+        detection_id="abc123", symbol="META", kinds="vwap_break", headline="META broke above VWAP (598.42), 0.77 ATR",
+        trend="up", close=599.82, mark_price=620.62, return_pct=3.47, offset_min=30, ts_utc="2026-04-08T16:05:00+00:00",
+    )
+    fields.update(overrides)
+    return RealWin(**fields)
+
+
+def _day_hit_rate(**overrides):
+    from tradebot.telegram_bot.performance import DayHitRate
+
+    fields = dict(session="2026-06-17", hit_rate=0.5, sample_size=20, offset_min=30)
+    fields.update(overrides)
+    return DayHitRate(**fields)
+
+
+def test_render_example_golden_both_present():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(), _day_hit_rate(), when)
+    assert text == (
+        "<b>One of the more notable real wins</b>\n"
+        "\n"
+        "META · VWAP break — bullish, calls favored\n"
+        "META broke above VWAP (598.42), 0.77 ATR\n"
+        "Entry ~$599.82 → +30m $620.62 (+3.47%)\n"
+        "\n"
+        "One real day's HIGH-tier hit rate — 2026-06-17: 50.00% (n=20)\n"
+        "\n"
+        "Real, but not typical — most real wins here are much smaller, and the overall record is "
+        "a coin flip. /performance has the full, unfiltered picture.\n"
+        "\n"
+        "<i>16:00 ET · Not advice.</i>"
+    )
+
+
+def test_render_example_puts_favored_on_a_down_win():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(trend="down", symbol="USO"), _day_hit_rate(), when)
+    assert "bearish, puts favored" in text
+
+
+def test_render_example_says_so_when_no_real_win_exists_yet():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(None, _day_hit_rate(), when)
+    assert "no real win in the journal yet" in text.lower()
+    assert "favored" not in text.lower()
+
+
+def test_render_example_says_so_when_no_real_day_exists_yet():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(_real_win(), None, when)
+    assert "no real day with enough tracked alerts" in text.lower()
+
+
+def test_render_example_never_fabricates_either_half():
+    when = datetime(2026, 8, 6, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_example(None, None, when)
+    assert "no real win" in text.lower()
+    assert "no real day" in text.lower()

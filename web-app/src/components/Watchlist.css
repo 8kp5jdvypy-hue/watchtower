@@ -1,0 +1,18 @@
+.wl-rows { border-top: 1px solid var(--line); }
+.wl-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.85rem 0.2rem; border-bottom: 1px solid var(--line);
+  transition: background 0.2s ease;
+}
+.wl-row.has-signal { background: rgba(52, 226, 255, 0.03); }
+.wl-symbol { font-family: var(--display); font-weight: 600; font-size: 0.98rem; color: var(--ink); }
+.wl-quiet { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
+.wl-badge {
+  display: inline-flex; align-items: center; gap: 0.4em;
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 0.25rem 0.6rem; border-radius: 999px;
+}
+/* var(--cyan), not var(--cyan-dim) -- see SignalCard.css's .sc-tier-medium
+   for the same WCAG AA contrast fix and the reasoning behind it. */
+.wl-badge-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
+.wl-badge-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }

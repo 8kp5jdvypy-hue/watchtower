@@ -1,0 +1,101 @@
+.login-shell {
+  position: relative;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse 70% 55% at 50% 30%, #0a0f16, var(--bg) 70%);
+  padding: 1.5rem;
+}
+.login-card {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2.75rem 2.25rem;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+  animation: login-settle 0.4s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes login-settle { from { opacity: 0; transform: translateY(6px); } }
+
+.login-mark { margin: 0 auto 1.1rem; transition: filter 0.3s ease; }
+.login-card h1 {
+  margin: 0 0 0.5rem;
+  font-family: var(--display); font-weight: 600; letter-spacing: -0.005em;
+  font-size: 1.3rem; color: var(--ink);
+}
+.login-card > p { color: var(--ink-dim); font-size: 0.9rem; line-height: 1.5; margin: 0 0 1.75rem; }
+
+.login-form { display: flex; flex-direction: column; gap: 0.75rem; }
+.login-form input {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.8rem 0.95rem; color: var(--ink); font-size: 1rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.login-form input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(52,226,255,0.12); }
+.login-form input[aria-invalid="true"] { border-color: var(--down); }
+.login-form button {
+  background: var(--cyan); color: var(--bg); border: none; border-radius: 6px;
+  padding: 0.8rem; font-weight: 600; cursor: pointer; font-size: 0.95rem;
+  font-family: var(--display); letter-spacing: 0.01em;
+  transition: opacity 0.2s ease, transform 0.15s ease;
+}
+.login-form button:hover:not(:disabled) { opacity: 0.9; }
+.login-form button:active:not(:disabled) { transform: scale(0.98); }
+.login-form button:disabled { opacity: 0.55; cursor: default; }
+
+.login-error {
+  color: var(--down); font-size: 0.82rem; margin: 0; text-align: left;
+  display: flex; align-items: center; gap: 0.4em;
+}
+.login-error::before { content: '!'; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; border-radius: 50%; background: var(--down); color: var(--bg); font-size: 0.65rem; font-weight: 700; flex: none; }
+
+/* The framing this whole component exists to deliver -- not an
+   apology for missing a feature, a stated advantage. Not flexbox: this
+   text wraps to two lines at card width, and a flex row centers the
+   dot against the whole two-line block, leaving it floating between
+   the lines instead of sitting with the first word. */
+.login-passwordless {
+  margin: 1.4rem 0 0; font-family: var(--mono); font-size: 0.7rem;
+  letter-spacing: 0.05em; color: var(--ink-faint); line-height: 1.6;
+}
+.login-passwordless .dot {
+  display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--cyan); box-shadow: 0 0 6px 1px var(--cyan);
+  margin-right: 0.55em; vertical-align: middle;
+}
+
+.login-switch { margin: 1.1rem 0 0 !important; font-size: 0.85rem !important; }
+.login-switch button {
+  background: none; border: none; padding: 0; margin: 0;
+  color: var(--cyan); font-size: inherit; font-family: inherit; cursor: pointer;
+  border-bottom: 1px solid rgba(52,226,255,0.35);
+}
+.login-switch button:hover { border-color: var(--cyan); }
+
+/* Success state -- the mark itself carries most of the "arrived"
+   feeling (state="confirmed" on it, set from the component), so this
+   stays quiet: no huge checkmark, no confetti-adjacent flourish. */
+.login-sent { animation: login-settle 0.35s cubic-bezier(.2,.8,.2,1) both; }
+.login-sent-eyebrow {
+  display: inline-flex; align-items: center; gap: 0.5em;
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em;
+  color: var(--cyan); margin-bottom: 0.9rem;
+}
+.login-sent-eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px 1px var(--cyan); }
+.login-sent-body { color: var(--ink); font-size: 0.95rem; line-height: 1.55; margin: 0 0 0.5rem; }
+.login-sent-body b { color: var(--cyan); font-weight: 600; word-break: break-word; }
+.login-sent-sub { color: var(--ink-dim); font-size: 0.82rem; line-height: 1.5; margin: 0 0 1.5rem; }
+.login-different-email {
+  background: none; border: 1px solid var(--line); color: var(--ink-dim);
+  border-radius: 6px; padding: 0.6rem 1rem; font-size: 0.8rem; font-family: var(--mono);
+  cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+}
+.login-different-email:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+@media (max-width: 420px) {
+  .login-card { padding: 2.25rem 1.5rem; }
+}

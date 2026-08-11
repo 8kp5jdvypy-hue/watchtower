@@ -22,9 +22,11 @@ from alpaca.data.requests import (
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOptionContractsRequest
+from alpaca.trading.enums import AssetClass, AssetStatus
+from alpaca.trading.requests import GetAssetsRequest, GetOptionContractsRequest
 
 from tradebot.detectors import Bar
+from tradebot.marketdata import AssetInfo as MDAssetInfo
 from tradebot.marketdata import OptionChain as MDOptionChain
 from tradebot.marketdata import OptionContract as MDOptionContract
 from tradebot.marketdata import Quote as MDQuote
@@ -198,6 +200,77 @@ def fetch_option_chain(symbol: str, expiry: date) -> MDOptionChain:
             )
         )
     return MDOptionChain(symbol=symbol, expiry=expiry, contracts=contracts)
+
+
+# Alpaca's bars endpoint takes the symbol list as a URL query parameter —
+# live-verified 2026-08-08: a single request for all ~13,000 active
+# universe symbols at once fails with "414 Request-URI Too Large" (nginx,
+# not an Alpaca-specific limit). 1,000-3,000 symbols per request measured
+# working fine (1.8-4.5s); 1,500 is used as a conservative, tested-safe
+# chunk size, not the actual observed ceiling.
+BULK_FETCH_CHUNK_SIZE = 1500
+
+
+def fetch_daily_bars_bulk(symbols: list[str], lookback_days: int = 30) -> dict[str, list[Bar]]:
+    """Daily bars for many symbols in a handful of requests instead of
+    one per symbol — this is what makes Stage 1 broad scanning
+    (tradebot.broad_scan) affordable across the full active universe
+    (tradebot.universe) instead of the fixed watchlist. Chunked
+    automatically (see BULK_FETCH_CHUNK_SIZE); a symbol Alpaca has no
+    bars for (new listing, halted, etc.) is simply absent from the
+    result, never padded with an empty/fabricated entry."""
+    client = _client()
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=lookback_days)
+    out: dict[str, list[Bar]] = {}
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockBarsRequest(
+            symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start, end=end, feed=DataFeed.IEX,
+        )
+        response = _with_backoff(lambda r=request: client.get_stock_bars(r))
+        for symbol, raw_bars in response.data.items():
+            out[symbol] = _to_bars(symbol, raw_bars)
+    return out
+
+
+def fetch_us_equity_assets() -> list[MDAssetInfo]:
+    """Every currently-ACTIVE US equity/ETF asset Alpaca's Trading API
+    knows about — one call, ~14,000 rows as of this writing (live-checked
+    2026-08-08 against the paper endpoint: 14,195 active us_equity
+    assets). This is the Trading API (the same one used for options
+    contract metadata), not the Market Data API — asset listing isn't
+    gated by a market-data plan tier the way bar/quote history is.
+
+    options_enabled/overnight_eligible are derived from the real,
+    live-observed `attributes` vocabulary ('has_options',
+    'overnight_tradable', 'overnight_halted', plus 'ipo',
+    'fractional_eh_enabled', 'ptp_no_exception'/'ptp_with_exception',
+    'options_late_close' seen on the same sample) — not guessed from
+    Alpaca's docs. See MDAssetInfo's docstring for why the raw list is
+    kept too, and why an untagged asset's overnight eligibility is None,
+    not False.
+    """
+    client = _trading_client()
+    request = GetAssetsRequest(asset_class=AssetClass.US_EQUITY, status=AssetStatus.ACTIVE)
+    assets = _with_backoff(lambda: client.get_all_assets(request))
+
+    out = []
+    for a in assets:
+        attrs = tuple(str(x) for x in (a.attributes or ()))
+        overnight = True if "overnight_tradable" in attrs else (False if "overnight_halted" in attrs else None)
+        out.append(
+            MDAssetInfo(
+                symbol=a.symbol,
+                exchange=str(a.exchange).removeprefix("AssetExchange."),
+                name=a.name or a.symbol,
+                tradable=bool(a.tradable),
+                options_enabled="has_options" in attrs,
+                overnight_eligible=overnight,
+                attributes=attrs,
+            )
+        )
+    return out
 
 
 def fetch_option_day_volume(occ_symbol: str, session_date: date) -> int | None:

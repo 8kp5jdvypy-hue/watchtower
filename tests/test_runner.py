@@ -20,7 +20,16 @@ from tradebot.journal import connect as journal_connect
 from tradebot.journal import write_cluster
 import tradebot.runner as runner_mod
 from tradebot.detectors import atr as compute_atr
-from tradebot.runner import HeartbeatStats, evaluate_bar, is_halted_bar, is_stale, process_new_bar, session_bounds
+from tradebot.runner import (
+    HeartbeatStats,
+    bar_gap_minutes,
+    evaluate_bar,
+    is_bar_gap,
+    is_halted_bar,
+    is_stale,
+    process_new_bar,
+    session_bounds,
+)
 
 
 def test_is_stale_true_past_the_threshold():
@@ -41,6 +50,49 @@ def test_is_halted_bar_detects_zero_volume():
     assert is_halted_bar(Bar("BE", ts, 10, 10.5, 9.5, 10.2, volume=100)) is False
 
 
+def test_bar_gap_minutes_none_with_fewer_than_two_bars():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    assert bar_gap_minutes([]) is None
+    assert bar_gap_minutes([Bar("TSLA", ts, 100, 100, 100, 100, volume=100)]) is None
+
+
+def test_bar_gap_minutes_measures_the_open_to_open_delta():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=15), 100, 100, 100, 100, volume=100),
+    ]
+    assert bar_gap_minutes(bars) == 15.0
+
+
+def test_is_bar_gap_false_on_the_expected_five_minute_cadence():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=5), 100, 100, 100, 100, volume=100),
+    ]
+    assert is_bar_gap(bars) is False
+
+
+def test_is_bar_gap_true_when_a_bar_was_silently_skipped():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=10), 100, 100, 100, 100, volume=100),  # a 5-min bar never arrived
+    ]
+    assert is_bar_gap(bars) is True
+
+
+def test_is_bar_gap_respects_tolerance_minutes():
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=6), 100, 100, 100, 100, volume=100),  # 1 min of jitter
+    ]
+    assert is_bar_gap(bars, tolerance_minutes=0.0) is True
+    assert is_bar_gap(bars, tolerance_minutes=2.0) is False
+
+
 def test_session_bounds_regular_day():
     open_ts, close_ts = session_bounds(date(2026, 7, 23))
     assert open_ts.hour == 13 and open_ts.minute == 30  # 09:30 ET in UTC (EDT)
@@ -56,6 +108,74 @@ def test_session_bounds_honors_early_close():
 def test_session_bounds_rejects_non_trading_day():
     with pytest.raises(ValueError):
         session_bounds(date(2026, 7, 25))  # a Saturday
+
+
+def test_run_live_idles_cleanly_on_a_non_trading_day_instead_of_crashing(monkeypatch):
+    """Regression test: run_live() used to call session_bounds() (which
+    raises ValueError for a non-trading day) before any other check, so a
+    process supervisor that starts it unconditionally every day — as
+    docker-compose.yml's `restart: unless-stopped` does, with no backoff
+    — would crash-loop all weekend. It must idle and return cleanly
+    instead."""
+    saturday_utc = datetime(2026, 8, 8, 15, 0, tzinfo=timezone.utc)  # a real Saturday
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return saturday_utc
+
+    monkeypatch.setattr(runner_mod, "datetime", _FrozenDatetime)
+    sleep_calls = []
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: sleep_calls.append(seconds))
+
+    stats = runner_mod.run_live(ConsoleAlerter())
+
+    assert stats.session_date == saturday_utc.astimezone(runner_mod.ET).date()
+    assert sleep_calls == [runner_mod.OFF_SESSION_IDLE_SECONDS]
+
+
+def test_run_live_does_not_resend_the_close_report_on_a_restart_after_close(monkeypatch, tmp_path):
+    """Regression test for a real live incident (2026-08-10): Docker's
+    `restart: unless-stopped` restarts run_live() on ANY exit, including
+    the clean one at the end of a normal trading day. Without a
+    same-session guard on the close side (the open side already has one
+    — see maybe_send_session_open_messages' docstring), every restart
+    landing after today's close fell straight through the while loop's
+    first `loop_start >= close_ts` check and resent the full close report
+    (log summary + heartbeat) again — a fast, unthrottled restart loop
+    that spammed Telegram once per restart for hours."""
+    trading_day = date(2026, 7, 23)
+    open_ts, close_ts = runner_mod.session_bounds(trading_day)
+    after_close = close_ts + timedelta(minutes=5)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return after_close
+
+    monkeypatch.setattr(runner_mod, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(runner_mod, "SESSION_CLOSE_STATE_FILE", tmp_path / "session_close_state.json")
+    monkeypatch.setattr(runner_mod, "SESSION_OPEN_STATE_FILE", tmp_path / "session_open_state.json")
+    monkeypatch.setattr(runner_mod, "HALT_FILE", tmp_path / "HALT")
+    monkeypatch.setattr(runner_mod, "HEARTBEAT_FILE", tmp_path / "heartbeat.json")
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: None)
+
+    sent = []
+
+    class _SpyAlerter:
+        def send(self, text, priority=None, alert_id=None):
+            sent.append(text)
+
+    db_path = tmp_path / "journal.db"
+
+    first = runner_mod.run_live(_SpyAlerter(), db_path=db_path)
+    assert first.session_date == trading_day
+    assert len(sent) > 0  # the real close report, sent exactly once
+
+    sent.clear()
+    second = runner_mod.run_live(_SpyAlerter(), db_path=db_path)
+    assert second.session_date == trading_day
+    assert sent == []  # the restart must NOT resend it
 
 
 def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
@@ -94,7 +214,7 @@ def _high_tier_fixture():
 
 def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -113,7 +233,7 @@ def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(mon
 
 def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_text_on_a_high_send(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -140,7 +260,7 @@ def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_tex
 
 def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_the_alert(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -162,6 +282,38 @@ def test_process_new_bar_swallows_a_subscriber_hook_exception_without_dropping_t
     assert any("fan-out failed" in e for e in stats.errors)
     row = conn.execute("SELECT alerted FROM detections").fetchone()
     assert row[0] == 1  # the alert itself still went out despite the hook blowing up
+
+
+def test_process_new_bar_suppresses_on_a_bar_gap_without_journaling_or_evaluating(monkeypatch):
+    """Same precedent as the existing halted-bar (zero-volume) skip: no
+    Detection was ever produced, so nothing should be journaled — the
+    gap is visible only via stats.data_gaps and the data_health_suppression
+    metric, not a detections row."""
+    ts = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", ts, 100, 100, 100, 100, volume=100),
+        Bar("TSLA", ts + timedelta(minutes=15), 100, 100, 100, 100, volume=100),
+    ]
+    anchors, _, _ = _high_tier_fixture()
+
+    called = []
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, b, a: called.append(1) or None)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bars[-1].ts)
+    stats = HeartbeatStats(start_time=bars[-1].ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bars[-1].ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), bars, anchors, quote_fn, chain_fn, stats)
+
+    assert called == []  # evaluate_bar never even ran
+    assert any("bar gap" in g for g in stats.data_gaps)
+    assert conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 0
 
 
 def test_evaluate_bar_cluster_atr14_matches_the_primary_detectors_own_atr():
@@ -214,7 +366,7 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", metrics_path)
 
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -232,11 +384,15 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
 
     assert any("alert suppressed by data guard" in r.message and "rule=crossed_quote" in r.message for r in caplog.records)
 
-    row = conn.execute("SELECT alerted, suppress_reason FROM detections").fetchone()
+    row = conn.execute("SELECT alerted, suppress_reason, suppress_category FROM detections").fetchone()
     assert row[0] == 0
     assert row[1].startswith("data_integrity_failed: crossed_quote")
+    assert row[2] == "data_integrity"
 
-    assert metrics_mod.read_all(metrics_path) == {"validator_rejection{rule=crossed_quote}": 1}
+    assert metrics_mod.read_all(metrics_path) == {
+        "validator_rejection{rule=crossed_quote}": 1,
+        "suppression{category=data_integrity}": 1,
+    }
 
 
 def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
@@ -247,7 +403,7 @@ def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}  # bullish -> calls
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -293,7 +449,7 @@ def test_process_new_bar_passes_the_real_entry_mid_to_the_subscriber_hook(monkey
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -332,7 +488,7 @@ def test_process_new_bar_blackouts_a_contract_when_a_real_earnings_event_falls_b
 
     anchors, bar, result = _high_tier_fixture()
     result = {**result, "trend": "up"}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     # earnings between today (2026-07-23) and the expiry the fixture below
@@ -376,13 +532,95 @@ def _flat_quote_fn(bar):
     return quote_fn
 
 
+def test_process_new_bar_suppresses_a_non_escalating_repeat_as_a_duplicate_without_burning_the_cap(monkeypatch):
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts, max_high_per_day=8)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    # Same score, 10 minutes later — well inside the default 30-minute
+    # dedup window, not a material escalation.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    result2 = {**result, "ts": result["ts"] + timedelta(minutes=10)}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
+        _flat_quote_fn(bar2), _no_op_chain_fn, stats,
+    )
+
+    rows = conn.execute(
+        "SELECT alerted, suppress_reason, suppress_category, lifecycle_state, related_detection_id "
+        "FROM detections ORDER BY ts_utc"
+    ).fetchall()
+    assert len(rows) == 2
+    first_id = conn.execute("SELECT id FROM detections ORDER BY ts_utc LIMIT 1").fetchone()[0]
+    assert rows[0][0] == 1 and rows[0][3] == "watch" and rows[0][4] is None
+    assert rows[1][0] == 0  # not alerted
+    assert rows[1][1] == f"duplicate_event:{first_id}"
+    assert rows[1][2] == "duplicate"
+    assert rows[1][3] == "confirmed"
+    assert rows[1][4] == first_id
+
+    # The duplicate must not have burned a daily-cap slot — budget still
+    # has all 8 real sends available (1 used by the first cluster).
+    assert len(budget._high_sent_today) == 1
+
+
+def test_process_new_bar_still_sends_a_material_escalation_within_the_dedup_window(monkeypatch):
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts, max_high_per_day=8)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _flat_quote_fn(bar), _no_op_chain_fn, stats,
+    )
+
+    # Much higher score, a DIFFERENT detector kind (the realistic dedup
+    # case — a second, different signal on the same symbol shortly after
+    # the first), still inside the window — a real escalation. Using the
+    # same kind as the first cluster would also trip AlertBudget's own
+    # unrelated 45-minute per-(symbol,kind) cooldown, which would
+    # confound this test's one variable (dedup letting an escalation
+    # through) with a second, different suppression mechanism.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    escalated_detection = Detection("TSLA", "vwap_break", bar2.ts, 20.0, "a bigger break", {})
+    result2 = {
+        **result, "ts": result["ts"] + timedelta(minutes=10), "score": 20.0,
+        "kinds": "vwap_break", "primary_kind": "vwap_break", "primary_headline": "a bigger break",
+        "headlines": "a bigger break", "primary_detection": escalated_detection, "detections": [escalated_detection],
+    }
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
+        _flat_quote_fn(bar2), _no_op_chain_fn, stats,
+    )
+
+    rows = conn.execute("SELECT alerted, suppress_reason, lifecycle_state FROM detections ORDER BY ts_utc").fetchall()
+    assert len(rows) == 2
+    assert rows[1][0] == 1  # sent normally, not suppressed
+    assert rows[1][1] is None
+    assert rows[1][2] == "confirmed"  # still tagged confirmed for lifecycle visibility
+    assert len(budget._high_sent_today) == 2  # both real sends counted
+
+
 def test_process_new_bar_suppresses_high_alert_inside_a_suppress_severity_event_window(monkeypatch):
     """News as suppression, not an alert source: a HIGH cluster whose bar
     close falls inside a 'suppress' severity event window must never be
     sent, and the journal must say why — see tradebot.events module
     docstring."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -397,11 +635,12 @@ def test_process_new_bar_suppresses_high_alert_inside_a_suppress_severity_event_
         _flat_quote_fn(bar), _no_op_chain_fn, stats,
     )
 
-    row = conn.execute("SELECT alerted, suppress_reason, tier, news_driven FROM detections").fetchone()
+    row = conn.execute("SELECT alerted, suppress_reason, suppress_category, tier, news_driven FROM detections").fetchone()
     assert row[0] == 0  # never alerted
     assert row[1] == "news_blackout:8-K:material event"
-    assert row[2] == "high"  # the journal's ground-truth tier is score-based and unaffected
-    assert row[3] == 1
+    assert row[2] == "news_blackout"  # structured counterpart, parallel to the free-text reason above
+    assert row[3] == "high"  # the journal's ground-truth tier is score-based and unaffected
+    assert row[4] == 1
     assert stats.suppression_counts["news_blackout"] == 1
 
 
@@ -409,7 +648,7 @@ def test_process_new_bar_downgrades_high_alert_inside_a_downgrade_severity_event
     """A 'downgrade' severity window still gets a look — just batched into
     the medium digest instead of pushed immediately as HIGH."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -447,7 +686,7 @@ def test_process_new_bar_event_window_suppression_does_not_burn_cap_or_cooldown(
     the per-(symbol, kind) cooldown for an alert nobody ever saw, blocking a
     later, legitimate alert of the same kind."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -464,12 +703,19 @@ def test_process_new_bar_event_window_suppression_does_not_burn_cap_or_cooldown(
 
     # A second bar, same symbol/kind, at the SAME budget "now" — if the
     # first (suppressed) alert had wrongly started the cooldown, this one
-    # would see zero elapsed time and get suppressed too. Its bar close is
-    # past the event window's end (which runs to result["ts"] + 5min), so
-    # only the cooldown could stop it.
-    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=10), 100.2, 100.7, 100.0, 100.4, volume=10_000)
-    result2 = {**result, "ts": result["ts"] + timedelta(minutes=10)}
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result2)
+    # would see zero elapsed time and get suppressed too. Its RESULT ts
+    # (below, independent of bar2's own ts since evaluate_bar is mocked)
+    # is past both the event window's end (result["ts"] + 5min) AND the
+    # dedup module's default DEDUP_WINDOW_MINUTES (30) — a cluster inside
+    # the dedup window would get suppressed as a duplicate of the first
+    # one too, which is real, correct, *new* behavior (tradebot.dedup)
+    # but would confound this test's one variable: proving cooldown
+    # specifically was never wrongly started by a suppressed alert. bar2
+    # itself stays on the normal 5-minute cadence — a wider gap there
+    # would trip the unrelated bar-gap data-health check.
+    bar2 = Bar("TSLA", bar.ts + timedelta(minutes=5), 100.2, 100.7, 100.0, 100.4, volume=10_000)
+    result2 = {**result, "ts": result["ts"] + timedelta(minutes=35)}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result2)
 
     process_new_bar(
         conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar, bar2], anchors,
@@ -492,7 +738,7 @@ def test_process_new_bar_tags_but_does_not_reroute_non_high_tiers_inside_an_even
     docstring."""
     anchors, bar, result = _high_tier_fixture()
     medium_result = {**result, "score": 3.0}  # below HIGH threshold
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: medium_result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: medium_result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -518,7 +764,7 @@ def test_process_new_bar_journals_the_primary_kind_and_symbol_class(monkeypatch)
     primary_kind and symbol_class must be real, queryable columns so any
     stat can be recomputed later without guessing."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     budget = AlertBudget(now=lambda: bar.ts)
@@ -537,7 +783,7 @@ def test_process_new_bar_records_which_event_kind_and_severity_applied(monkeypat
     """set_news_driven's kind/severity snapshot (see journal.py) must
     reflect the ACTUAL window that fired, not just a bare boolean."""
     anchors, bar, result = _high_tier_fixture()
-    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch: result)
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
 
     conn = journal_connect(":memory:")
     add_event_window(
@@ -848,6 +1094,58 @@ def test_weekly_recap_fires_again_the_following_week(tmp_path):
     assert "2026-08-03" in alerter.sent[1][0]
 
 
+# ---------------------------------------------------------------------- #
+# Session-open messages — see runner.maybe_send_session_open_messages.
+# Guards the morning briefing + pre-open card against duplicate sends
+# when run_live() is invoked more than once for the same session_date
+# (e.g. a supervised container restart after a clean end-of-session
+# exit, or a human re-running scripts/start.sh mid-morning).
+# ---------------------------------------------------------------------- #
+
+
+def test_session_open_messages_send_once(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    session_date = date(2026, 8, 10)
+    now = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
+
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, now, state_path=state_path)
+
+    assert len(alerter.sent) == 2  # morning briefing + pre-open card
+    assert state_path.exists()
+
+
+def test_session_open_messages_do_not_resend_for_the_same_session(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    session_date = date(2026, 8, 10)
+    first_call = datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc)
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, first_call, state_path=state_path)
+
+    # A restart later the same session (e.g. after a crash, or a Docker
+    # restart following a clean end-of-session exit) must not resend.
+    restart = datetime(2026, 8, 10, 20, 0, tzinfo=timezone.utc)
+    runner_mod.maybe_send_session_open_messages(conn, alerter, session_date, restart, state_path=state_path)
+
+    assert len(alerter.sent) == 2  # still just the first call's two sends
+
+
+def test_session_open_messages_send_again_for_a_new_session(tmp_path):
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    state_path = tmp_path / "session_open_state.json"
+    runner_mod.maybe_send_session_open_messages(
+        conn, alerter, date(2026, 8, 10), datetime(2026, 8, 10, 13, 0, tzinfo=timezone.utc), state_path=state_path
+    )
+    runner_mod.maybe_send_session_open_messages(
+        conn, alerter, date(2026, 8, 11), datetime(2026, 8, 11, 13, 0, tzinfo=timezone.utc), state_path=state_path
+    )
+
+    assert len(alerter.sent) == 4  # two sessions, two sends each
+
+
 class _FakeResponse:
     def __init__(self, result, status_code=200):
         self._result = result
@@ -941,3 +1239,116 @@ def test_weekly_recap_catches_up_correctly_after_a_skipped_run(tmp_path):
 
     assert len(alerter.sent) == 2
     assert "2026-08-03" in alerter.sent[1][0]  # covers the week that was missed, up to the following Monday
+
+
+def test_send_medium_digest_if_due_calls_the_optional_personal_fanout_fn():
+    """personal_fanout_fn is how 'aggressive'-sensitivity subscribers get
+    the MEDIUM digest personally (see delivery.make_medium_fanout_fn) —
+    None (the default, used by replay and every other existing caller)
+    must leave behavior exactly as it was before this parameter existed."""
+    from tradebot.alerts import AlertBudget, Cluster
+
+    def _medium_cluster(cid):
+        return Cluster(
+            id=cid, ts_utc="2026-07-23T14:00:00+00:00", session="2026-07-23", symbol="TSLA",
+            kinds="gap", headlines="h", primary_headline="h", score=2.0, tier="medium",
+            close=100.0, atr14=1.0, trend="up", code_version="v1",
+        )
+
+    clock = {"t": datetime(2026, 7, 23, 13, 5, tzinfo=timezone.utc)}
+    budget = AlertBudget(now=lambda: clock["t"])
+    budget.evaluate(_medium_cluster("m1"))
+    clock["t"] += timedelta(hours=1, minutes=5)  # cross the hour boundary so the digest is due
+
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    fanout_calls = []
+
+    def fanout(clusters, text, when):
+        fanout_calls.append(([c.id for c in clusters], text, when))
+
+    runner_mod.send_medium_digest_if_due(budget, alerter, conn, clock["t"], fanout)
+
+    assert len(alerter.sent) == 1  # the ops-channel digest still goes out exactly as before
+    assert len(fanout_calls) == 1
+    assert fanout_calls[0][0] == ["m1"]
+    assert fanout_calls[0][1] == alerter.sent[0][0]  # the SAME rendered text, not a second copy
+
+
+def test_send_medium_digest_if_due_without_a_fanout_fn_behaves_exactly_as_before():
+    from tradebot.alerts import AlertBudget, Cluster
+
+    cluster = Cluster(
+        id="m1", ts_utc="2026-07-23T14:00:00+00:00", session="2026-07-23", symbol="TSLA",
+        kinds="gap", headlines="h", primary_headline="h", score=2.0, tier="medium",
+        close=100.0, atr14=1.0, trend="up", code_version="v1",
+    )
+    clock = {"t": datetime(2026, 7, 23, 13, 5, tzinfo=timezone.utc)}
+    budget = AlertBudget(now=lambda: clock["t"])
+    budget.evaluate(cluster)
+    clock["t"] += timedelta(hours=1, minutes=5)
+
+    conn = journal_connect(":memory:")
+    alerter = _FakeAlerter()
+    runner_mod.send_medium_digest_if_due(budget, alerter, conn, clock["t"])  # no fanout fn — must not raise
+
+    assert len(alerter.sent) == 1
+
+
+# ---------------------------------------------------------------------- #
+# run_broad_scan — Stage 1 orchestration (universe -> bulk fetch -> cheap
+# screen -> promoted symbols). fetch_bars_fn is injected so this never
+# touches the real Alpaca adapter.
+# ---------------------------------------------------------------------- #
+
+
+def test_run_broad_scan_promotes_only_symbols_that_screen_as_unusual():
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+
+    def fake_asset(symbol):
+        return AssetInfo(symbol=symbol, exchange="NASDAQ", name=symbol, tradable=True, options_enabled=True, overnight_eligible=None, attributes=())
+
+    universe_mod.refresh_universe(
+        universe_conn, lambda: [fake_asset("QUIET"), fake_asset("LOUD")], datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(symbols, lookback_days):
+        assert set(symbols) == {"QUIET", "LOUD"}
+        quiet_bars = [Bar("QUIET", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)]
+        loud_bars = [Bar("LOUD", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        loud_bars.append(Bar("LOUD", datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        return {"QUIET": quiet_bars, "LOUD": loud_bars}
+
+    promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    assert promoted == ["LOUD"]
+
+
+def test_run_broad_scan_respects_the_promotion_limit():
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = [f"SYM{i}" for i in range(5)]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(fetched_symbols, lookback_days):
+        out = {}
+        for i, s in enumerate(fetched_symbols):
+            bars = [Bar(s, datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+            bars.append(Bar(s, datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000 * (i + 1))))
+            out[s] = bars
+        return out
+
+    promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars, promotion_limit=2)
+    assert len(promoted) == 2
+    assert promoted == ["SYM4", "SYM3"]  # strongest first

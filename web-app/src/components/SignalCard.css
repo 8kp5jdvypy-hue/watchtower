@@ -1,0 +1,106 @@
+.signal-card {
+  position: relative;
+  background: linear-gradient(165deg, rgba(16, 20, 27, 0.9), rgba(10, 13, 18, 0.95));
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.65rem;
+  margin-bottom: 0.5rem;
+  animation: sc-materialize 0.4s cubic-bezier(.2,.8,.2,1) both;
+}
+@keyframes sc-materialize {
+  from { opacity: 0; transform: translateY(6px); }
+}
+/* Cards genuinely appear together (one fetch, one render) -- a real
+   moment worth a real stagger, not simulated real-time arrival. Capped
+   at 8 steps so a long feed doesn't leave the last cards waiting. */
+.signal-card:nth-child(1) { animation-delay: 0.02s; }
+.signal-card:nth-child(2) { animation-delay: 0.08s; }
+.signal-card:nth-child(3) { animation-delay: 0.14s; }
+.signal-card:nth-child(4) { animation-delay: 0.2s; }
+.signal-card:nth-child(5) { animation-delay: 0.26s; }
+.signal-card:nth-child(6) { animation-delay: 0.32s; }
+.signal-card:nth-child(7) { animation-delay: 0.38s; }
+.signal-card:nth-child(n+8) { animation-delay: 0.44s; }
+/* High tier gets the "very important: cyan edge/bloom" treatment --
+   quiet by default, a touch of glow, never a flashing border. The left
+   accent bar is the one addition purely for glance-ability: a border/
+   shadow tint alone is too subtle to read as "important" while
+   scanning a list quickly, and severity has to be readable without
+   stopping to compare cards side by side. */
+.signal-card.is-high {
+  border-color: rgba(52, 226, 255, 0.25);
+  border-left: 3px solid var(--cyan);
+  padding-left: calc(1.25rem - 3px);
+  box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.06), 0 20px 50px -30px rgba(52, 226, 255, 0.25);
+}
+
+.sc-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem; }
+.sc-head-id { display: flex; align-items: center; gap: 0.5rem; }
+.sc-eyebrow {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.sc-tier {
+  font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.18rem 0.55rem; border-radius: 999px; font-weight: 600;
+}
+/* var(--cyan) not var(--cyan-dim): the dim shade measures ~3.6:1 against
+   this badge's own composited background at this font size, below WCAG AA's
+   4.5:1 for normal text. Medium vs. high stays distinguishable via badge
+   fill strength (0.08 vs 0.14 alpha) and the .is-high card treatment below,
+   not via a barely-legible dim text color. */
+.sc-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
+.sc-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
+
+.sc-body { display: flex; flex-direction: column; }
+.sc-symbol {
+  font-family: var(--display); font-weight: 600; font-size: 1.2rem; letter-spacing: -0.01em;
+  display: inline-flex; align-items: center; gap: 0.4em; width: fit-content;
+}
+.sc-trend-arrow { font-size: 0.7em; }
+.trend-up { color: var(--up); }
+.trend-down { color: var(--down); }
+.sc-headline { color: var(--ink-dim); font-size: 0.86rem; line-height: 1.5; margin: 0.3rem 0 0; }
+/* The raw engine sentence, demoted to secondary text once a plain-English
+   headline exists above it -- see SignalCard.jsx's cardHeadline(). Never
+   shown twice: for an unmapped kind, the raw sentence IS .sc-headline and
+   this line doesn't render at all. */
+.sc-headline-raw { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); line-height: 1.5; margin: 0.25rem 0 0; }
+
+.sc-kinds { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; }
+.sc-kind-tag {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.03em;
+  color: var(--ink-faint); border: 1px solid var(--line); border-radius: 4px;
+  padding: 0.18rem 0.5rem;
+}
+
+.sc-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+  margin-top: 0.55rem; padding-top: 0.5rem; border-top: 1px solid var(--line);
+  font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint);
+}
+.sc-view {
+  flex: none;
+  background: none;
+  border: 1px solid rgba(52, 226, 255, 0.25);
+  color: var(--cyan);
+  border-radius: 5px;
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+.sc-view:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+
+@media (max-width: 640px) {
+  /* WCAG 2.5.8 target size (AA) is 24px, but 44px (Apple HIG / Android
+     Material's own target) is the bar the rest of this app already holds
+     mobile controls to -- see SignalDetail.css's .sd-close/.sd-retry. */
+  .sc-view { min-height: 44px; padding: 0.5rem 0.85rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .signal-card { animation: none; }
+}

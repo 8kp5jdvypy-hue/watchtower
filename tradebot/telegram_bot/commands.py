@@ -6,14 +6,16 @@ that verification: if you change a command here, update it in BotFather
 refuse to start.
 
 Fetched from the live bot via getMyCommands on 2026-08-06 and confirmed
-to match this list at that time.
+to match this list at that time. Re-synced 2026-08-08 for the Kestrel ->
+Perch rebrand (/start's description text) via BotClient.set_my_commands.
 """
 from __future__ import annotations
 
 COMMANDS: list[tuple[str, str]] = [
-    ("start", "Set up Kestrel and see how it works"),
+    ("start", "Set up Perch and see how it works"),
     ("status", "Bot health, market state, alerts today"),
     ("performance", "Real track record, including losing streaks"),
+    ("example", "A real win and a real day's hit rate"),
     ("me", "Your trading stats and biggest leaks"),
     ("took", "Log a trade you entered"),
     ("closed", "Log an exit"),

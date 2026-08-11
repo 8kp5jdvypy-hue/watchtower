@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Mapping, Sequence
 
+from tradebot.config import DEFAULT_MARKET_PROXY, MARKET_PROXY_SYMBOLS
+
 # Calibrated 2026-08-05 (6-symbol watchlist, 577 clusters): mean 2.40
 # HIGH/day. Re-checked 2026-08-05 after adding vwap_break and
 # round_number_break (1106 clusters): still mean 2.95 HIGH/day, no
@@ -436,6 +438,78 @@ def gap(
 
 
 DETECTORS = (level_break, rvol_spike, range_expansion, vwap_break, round_number_break, gap)
+
+
+def relative_strength_break(
+    bars: Sequence[Bar],
+    anchors: DailyAnchors,
+    market_bars: Mapping[str, Sequence[Bar]] | None = None,
+    atr_units: float = 1.0,  # PLACEHOLDER — needs a replay calibration pass, see detectors.py:13-35's discipline
+    market_proxy: str = DEFAULT_MARKET_PROXY,
+) -> Detection | None:
+    """Fires when `symbol`'s own return since this session's open diverges
+    from the broad market's (market_proxy, default SPY) return by more
+    than atr_units * ATR, expressed as a $ divergence normalized by the
+    symbol's own ATR — never a bare percentage (see CLAUDE.md: all
+    thresholds in ATR units). Distinguishes "everything is moving" from
+    "this symbol is behaving unusually" — nothing else in DETECTORS
+    checks a symbol against anything but its own history.
+
+    market_bars is a {symbol: bars} map the caller (runner.py) builds
+    once per tick from the same MarketData instances it already holds
+    for every WATCHLIST symbol (SPY/QQQ are always in WATCHLIST) — no
+    new vendor fetch. Symbol and proxy bars are aligned by same-session
+    bar INDEX, not by looking up the proxy's own DailyAnchors, so this
+    has no dependency on WATCHLIST iteration order.
+
+    Returns None — never raises — on any missing/short/misaligned
+    market_bars, same fail-conservative discipline as every other
+    None-guard in this module: a signal that can't be corroborated
+    against the market isn't fabricated, it's just not fired."""
+    _check_symbol(bars, anchors)
+    if len(bars) < 2 or bars[-1].symbol in MARKET_PROXY_SYMBOLS:
+        return None
+    window = atr(bars)
+    if window is None or window <= 0:
+        return None
+    if not market_bars:
+        return None
+    proxy_bars = market_bars.get(market_proxy)
+    if not proxy_bars or len(proxy_bars) < len(bars):
+        return None  # proxy hasn't caught up to this bar yet — never fabricate alignment
+
+    last, prev = bars[-1], bars[-2]
+    proxy_last, proxy_prev = proxy_bars[len(bars) - 1], proxy_bars[len(bars) - 2]
+    symbol_open, proxy_open = bars[0], proxy_bars[0]
+    if symbol_open.close <= 0 or proxy_open.close <= 0:
+        return None
+
+    def divergence_dollars(sym_bar: Bar, proxy_bar: Bar) -> float:
+        symbol_return = (sym_bar.close - symbol_open.close) / symbol_open.close
+        market_return = (proxy_bar.close - proxy_open.close) / proxy_open.close
+        return (symbol_return - market_return) * sym_bar.close
+
+    move = divergence_dollars(last, proxy_last)
+    prev_move = divergence_dollars(prev, proxy_prev)
+    threshold = atr_units * window
+    if abs(move) <= threshold:
+        return None
+    if abs(prev_move) > threshold and (move > 0) == (prev_move > 0):
+        return None  # already diverging as of the previous bar — not a fresh crossing
+
+    direction = "outperforming" if move > 0 else "underperforming"
+    score = abs(move) / window
+    return Detection(
+        symbol=last.symbol,
+        kind="relative_strength_break",
+        ts=bar_close_ts(last),
+        score=score,
+        headline=f"{last.symbol} {direction} {market_proxy} by {score:.2f} ATR since the open",
+        context={"market_proxy": market_proxy, "divergence": move, "atr14": window},
+    )
+
+
+CONTEXT_DETECTORS = (relative_strength_break,)
 
 
 def score_cluster(detections: Sequence[Detection]) -> float:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from tradebot.rendering.fields import atr, dash, money, pct, qty, ratio, ts
+from tradebot.rendering.fields import atr, dash, money, pct, qty, rate, ratio, ts
 
 
 def test_money():
@@ -17,6 +17,14 @@ def test_pct_always_signed():
     assert pct(0.22) == "+0.22%"
     assert pct(-0.01) == "-0.01%"
     assert pct(0) == "+0.00%"
+
+
+def test_rate_is_unsigned():
+    # a hit rate / win rate is a magnitude — never a leading '+' that
+    # would read as "gained 49.57%" instead of "won 49.57% of the time".
+    assert rate(49.57) == "49.57%"
+    assert rate(100) == "100.00%"
+    assert rate(0) == "0.00%"
 
 
 def test_atr():

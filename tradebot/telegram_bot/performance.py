@@ -283,3 +283,125 @@ def weekly_recap(
         total_no_trade=no_trade_count,
         no_trade_tracked_count=tracked_count,
     )
+
+
+# --------------------------------------------------------------------------
+# /example — a real win and a real day's hit rate, randomly picked from
+# the journal each time. See tradebot.rendering.templates.render_example.
+#
+# The randomness is which REAL record gets shown, never a generated
+# number: every field here comes straight out of detections/marks, the
+# same tables /performance reads. Never invent a result to make a
+# demo/marketing moment look better — see the incident that prompted
+# this design (a request for a "random win generator" was declined in
+# favor of this).
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RealWin:
+    detection_id: str
+    symbol: str
+    kinds: str
+    headline: str
+    trend: str  # "up" | "down" -> which option side this favored (see render_example)
+    close: float
+    mark_price: float
+    return_pct: float  # signed, always > 0 by construction (this IS a win)
+    offset_min: int
+    ts_utc: str
+
+
+def random_real_win(
+    conn: sqlite3.Connection, tier: str = "high", offset_min: int = 30, rng=None, notable_percentile: float = 90
+) -> RealWin | None:
+    """A random REAL winning detection — restricted to the top
+    `notable_percentile` of real wins currently in the journal (by
+    return_pct), recomputed live every call rather than a fixed cutoff,
+    so it can't quietly go stale as more sessions accumulate.
+
+    This is a deliberate design choice, not an oversight: the median
+    real win in this journal is under 1%, so a uniform random pick over
+    EVERY win mostly shows unremarkable ones. Restricting the pool to a
+    disclosed top slice — and having render_example LABEL it as "one of
+    the more notable real wins," not a typical one — is honest curation.
+    Quietly cherry-picking the single best win and presenting it as if
+    it were a neutral sample would not be; the difference is disclosure,
+    not the underlying data. See journal.hour_performance's docstring
+    for the same "don't pretend a filtered view is the whole picture"
+    discipline applied elsewhere in this project.
+
+    None if the journal has no real win to show yet, never a fabricated
+    one to fill the gap."""
+    import random as _random
+
+    rng = rng or _random
+    rows = conn.execute(
+        """
+        SELECT d.id, d.symbol, d.kinds, d.headlines, d.trend, d.close, m.price, d.ts_utc
+        FROM detections d
+        JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        WHERE d.tier = ?
+        """,
+        (offset_min, tier),
+    ).fetchall()
+    wins = []
+    for detection_id, symbol, kinds, headlines, trend, close, price, ts_utc in rows:
+        raw = (price - close) / close * 100
+        signed = raw if trend == "up" else -raw
+        if signed > 0:
+            wins.append(
+                RealWin(
+                    detection_id=detection_id, symbol=symbol, kinds=kinds, headline=headlines, trend=trend,
+                    close=close, mark_price=price, return_pct=signed, offset_min=offset_min, ts_utc=ts_utc,
+                )
+            )
+    if not wins:
+        return None
+    wins.sort(key=lambda w: w.return_pct)
+    cutoff = int(len(wins) * notable_percentile / 100)
+    notable = wins[cutoff:] or wins[-1:]
+    return rng.choice(notable)
+
+
+@dataclass(frozen=True)
+class DayHitRate:
+    session: str
+    hit_rate: float
+    sample_size: int
+    offset_min: int
+
+
+def random_real_day_hit_rate(
+    conn: sqlite3.Connection, tier: str = "high", offset_min: int = 30, min_sample: int = MIN_HISTORY_SAMPLE, rng=None
+) -> DayHitRate | None:
+    """A uniformly random REAL session's real hit rate — only among
+    sessions with at least min_sample tracked alerts that day, same
+    never-a-stat-on-too-little-data discipline as everywhere else.
+    None if no real session clears that bar yet."""
+    import random as _random
+
+    rng = rng or _random
+    rows = conn.execute(
+        """
+        SELECT d.session, d.close, d.trend, m.price
+        FROM detections d
+        JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        WHERE d.tier = ?
+        """,
+        (offset_min, tier),
+    ).fetchall()
+    by_session: dict[str, list[bool]] = {}
+    for session, close, trend, price in rows:
+        raw = (price - close) / close * 100
+        signed = raw if trend == "up" else -raw
+        by_session.setdefault(session, []).append(signed > 0)
+
+    candidates = [
+        DayHitRate(session=session, hit_rate=sum(hits) / len(hits), sample_size=len(hits), offset_min=offset_min)
+        for session, hits in by_session.items()
+        if len(hits) >= min_sample
+    ]
+    if not candidates:
+        return None
+    return rng.choice(candidates)

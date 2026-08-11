@@ -2,7 +2,7 @@
 string out. No formatting logic anywhere else in the codebase; every
 number is composed from tradebot.rendering.fields.
 
-Voice: Kestrel is calm and precise. The thesis is patience, and the copy
+Voice: Perch is calm and precise. The thesis is patience, and the copy
 has to sound like it — no rockets, no urgency emoji, no exclamation
 marks. Telegram HTML parse mode (not MarkdownV2 — fewer escaping bugs).
 All interpolated text is html.escape()'d. Exactly one emoji per message,
@@ -16,14 +16,14 @@ from __future__ import annotations
 import html
 from datetime import date, datetime
 
-from tradebot.rendering.fields import atr, dash, money, pct, qty, ts
+from tradebot.rendering.fields import atr, dash, money, pct, qty, rate, ts
 
 TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
 BIAS_LABEL = {"up": "BULLISH", "down": "BEARISH"}
 DISCLAIMER = "Not advice."
 
 # Detector kind -> the human label it gets on a tag line or digest row.
-# Kestrel never shows a raw kind string (round_number_break, etc.) to a
+# Perch never shows a raw kind string (round_number_break, etc.) to a
 # reader.
 KIND_LABELS = {
     "level_break": "level break",
@@ -57,7 +57,7 @@ def _footer(when: datetime, short_id: str | None = None) -> str:
     return "<i>" + " · ".join(html.escape(p) for p in parts) + "</i>"
 
 
-# Kestrel never collapses these into one "no tradable contract" line —
+# Perch never collapses these into one "no tradable contract" line —
 # they're different failures and a reader needs to know which one:
 # a liquidity problem says nothing about whether the trade idea is any
 # good, but a breakeven that exceeds the typical move says the idea may
@@ -102,21 +102,56 @@ def _render_similar(history) -> str:
 
 NEWS_DRIVEN_SIMILAR_TEXT = "continuation stats do not apply"
 
+# The alert shows Signal Strength — a raw ATR-based score, capped for
+# display — and separately, Historical Follow-Through — a real measured
+# rate. Never blended into one "confidence" number: the first is how
+# unusual THIS bar was; the second is how similar setups actually played
+# out. See tradebot.telegram_bot.performance.significance_check for the
+# fuller statistical-significance verdict shown in /performance and
+# /start, which a single alert has no room to restate — this cap only
+# keeps an outlier score (a 15+ ATR move is real but rare) from reading
+# as an arbitrarily large, made-up-looking number.
+MAX_DISPLAY_SIGNAL_STRENGTH = 6.0
 
-def _render_similar_row(history, news_driven: bool) -> str:
-    """continuation stats are built on technical-setup history and don't
-    transfer to an event-driven move — see tradebot.events module
-    docstring. A news-driven alert always gets the override, even if a
-    (contaminated) history sample happens to exist for it."""
+# Fallback label when there's no real history sample to attach an actual
+# offset_min to (see _history_rows) — 30m is the convention every other
+# follow-through stat in this project already uses by default (see
+# journal.historical_performance, telegram_bot.performance.track_record).
+DEFAULT_FOLLOWTHROUGH_OFFSET_MIN = 30
+
+
+def _signal_strength(score: float) -> str:
+    return f"{min(score, MAX_DISPLAY_SIGNAL_STRENGTH):.1f} / {MAX_DISPLAY_SIGNAL_STRENGTH:.0f}"
+
+
+def _history_rows(history, news_driven: bool) -> list[tuple[str, str]]:
+    """Two separate, always-present rows — Similar setups (a real sample
+    size) and NNm follow-through (a real continuation rate) — never
+    merged into one line, and never a stat built on a sample that doesn't
+    apply. news_driven collapses both into the same override this alert
+    has always shown for an event-driven move (see tradebot.events):
+    there is no "follow-through" to report when the base rate itself
+    doesn't transfer."""
     if news_driven:
-        return NEWS_DRIVEN_SIMILAR_TEXT
-    return dash(history, _render_similar)
+        return [("Similar setups", NEWS_DRIVEN_SIMILAR_TEXT)]
+    if history is None:
+        return [
+            ("Similar setups", "—"),
+            (f"{DEFAULT_FOLLOWTHROUGH_OFFSET_MIN}m follow-through", "—"),
+        ]
+    return [
+        ("Similar setups", f"{qty(history.sample_size)} historical observations"),
+        (f"{history.offset_min}m follow-through", rate(history.continuation_rate * 100)),
+    ]
 
 
 def render_high_alert(cluster, anchors, quote, selection, history, news_driven: bool = False) -> str:
     """The single-ticker, full-detail HIGH alert. Fixed field order,
-    every time: headline -> rationale -> stats block -> tag line ->
-    footer.
+    every time: headline -> rationale -> stats block (signal strength,
+    price context, real ATR, similar-setups follow-through, contract
+    idea) -> tag line -> footer. Never tells the reader to trade — the
+    contract row is an idea with a real breakeven or an explicit,
+    reasoned NO TRADE, and the footer's "Not advice." is unconditional.
 
     `cluster.primary_headline` is the highest-scoring constituent
     detection's own headline — the rationale is that one sentence, not
@@ -126,8 +161,8 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
     the two NO TRADE causes print differently, never collapsed into one.
     `news_driven`: this cluster overlaps a known event window (earnings,
     an EDGAR filing, a macro print) — see tradebot.events. Replaces the
-    Similar Setups line rather than showing a technical base rate that
-    doesn't apply.
+    Similar Setups / follow-through rows rather than showing a technical
+    base rate that doesn't apply.
     """
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
     bias = BIAS_LABEL.get(cluster.trend, "NEUTRAL")
@@ -137,12 +172,12 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
     headline = f"<b>{tier_emoji} {cluster.tier.upper()} · {symbol} · {bias}</b>"
 
     rows = [
+        ("Signal strength", _signal_strength(cluster.score)),
         ("Last", money(quote.last)),
         ("Prior close", money(anchors.prior_close)),
         ("Session", f"{money(anchors.prior_low)}–{money(anchors.prior_high)}"),
-        ("Score", atr(cluster.score)),
         ("ATR(14)", dash(cluster.atr14, lambda v: f"{v:.2f}")),
-        ("Similar", _render_similar_row(history, news_driven)),
+        *_history_rows(history, news_driven),
         ("Contract", _render_contract(selection)),
     ]
 
@@ -409,7 +444,7 @@ def render_weekly_recap(recap, when: datetime) -> str:
     else:
         sign = "+" if recap.avg_return_pct >= 0 else ""
         lines.append(
-            f"Hit rate: {pct(recap.hit_rate * 100)}   Avg move: {sign}{recap.avg_return_pct:.2f}% "
+            f"Hit rate: {rate(recap.hit_rate * 100)}   Avg move: {sign}{recap.avg_return_pct:.2f}% "
             f"(n={qty(recap.sample_size)}, +{recap.offset_min}m)"
         )
         sig = recap.significance
@@ -466,3 +501,43 @@ def render_sample_alert() -> str:
         "One real win, not the average — /performance has the full, unfiltered track record, "
         "losing stretches included."
     )
+
+
+def render_example(win, day, when: datetime) -> str:
+    """/example — one of the more notable real wins (see
+    performance.random_real_win's docstring: restricted to a disclosed
+    top slice of real outcomes, not a uniform sample — most real wins in
+    this journal are under 1%) plus a real day's hit rate, freshly and
+    randomly picked every call. Both halves are real records, not
+    generated numbers — this renderer only ever formats what it's
+    handed; either half can be None if the journal doesn't have one yet,
+    stated plainly instead of skipped or faked. The "notable, not
+    typical" framing is not optional decoration — it is the thing that
+    keeps this honest instead of a cherry-picked highlight reel."""
+    lines = ["<b>One of the more notable real wins</b>", ""]
+    if win is None:
+        lines.append("No real win in the journal yet to show.")
+    else:
+        right = "call" if win.trend == "up" else "put"
+        bias = "bullish" if win.trend == "up" else "bearish"
+        lines += [
+            f"{html.escape(win.symbol)} · {_kind_tag(win.kinds)} — {bias}, {right}s favored",
+            html.escape(win.headline),
+            f"Entry ~{money(win.close)} → +{win.offset_min}m {money(win.mark_price)} (+{win.return_pct:.2f}%)",
+        ]
+    lines.append("")
+    if day is None:
+        lines.append("No real day with enough tracked alerts yet for a day's hit rate.")
+    else:
+        lines.append(
+            f"One real day's HIGH-tier hit rate — {html.escape(day.session)}: "
+            f"{rate(day.hit_rate * 100)} (n={qty(day.sample_size)})"
+        )
+    lines += [
+        "",
+        "Real, but not typical — most real wins here are much smaller, and the overall record is "
+        "a coin flip. /performance has the full, unfiltered picture.",
+        "",
+        _footer(when),
+    ]
+    return "\n".join(lines)

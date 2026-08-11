@@ -392,6 +392,25 @@ def test_personal_stats_reports_once_min_sample_is_met():
     assert overall.avg_pnl_pct == pytest.approx(10.0)
 
 
+def test_personal_stats_accepts_a_pre_fetched_trades_list_without_requerying():
+    """personal_stats() used to always call list_trades() itself even when
+    a caller (tradebot.api.app's /activity) had already fetched the exact
+    same list a moment earlier — passing it in should skip that second
+    query and still produce the identical result."""
+    conn = _conn()
+    db.get_or_create_user(conn, 1, 1, "a")
+    now = datetime.now(timezone.utc)
+    for i in range(db.MIN_STAT_SAMPLE):
+        trade = db.log_took(conn, 1, detection_id=f"d{i}", symbol="TSLA", kind="gap", tier="high",
+                             alert_ts_utc=now.isoformat(), taken_at=now, entry_price=5.0)
+        db.log_closed(conn, trade.id, exit_price=5.5, closed_at=now)
+
+    pre_fetched = db.list_trades(conn, 1)
+    via_pre_fetched = db.personal_stats(conn, 1, trades=pre_fetched)
+    via_internal_fetch = db.personal_stats(conn, 1)
+    assert via_pre_fetched == via_internal_fetch
+
+
 def test_log_took_auto_fills_direction_from_the_alert():
     conn = _conn()
     db.get_or_create_user(conn, 1, 1, "a")

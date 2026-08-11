@@ -158,11 +158,11 @@ def test_total_alerts_vs_no_trade_only_counts_tracked_rows():
 # ---------------------------------------------------------------------- #
 
 
-def _seed_on(conn, ts, close, mark, kind="gap", trend="up"):
+def _seed_on(conn, ts, close, mark, kind="gap", trend="up", symbol="TEST"):
     did = write_cluster(
-        conn, session=ts.date().isoformat(), symbol="TEST", ts_utc=ts.isoformat(),
+        conn, session=ts.date().isoformat(), symbol=symbol, ts_utc=ts.isoformat(),
         kinds=kind, headlines="h", score=5.0, close=close, atr14=1.0, trend=trend,
-        detections=[Detection("TEST", kind, ts, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        detections=[Detection(symbol, kind, ts, 5.0, "h", {})], code_version_str="abc", alerted=True,
     )
     conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, mark))
     conn.commit()
@@ -218,3 +218,93 @@ def test_weekly_recap_computes_a_bad_week_exactly_like_a_good_one():
     assert recap.hit_rate == 0.0
     assert recap.avg_return_pct < 0
     assert recap.significance is not None  # computed exactly the same as a winning week would be
+
+
+# ---------------------------------------------------------------------- #
+# /example — random_real_win / random_real_day_hit_rate. Randomness is
+# WHICH real record gets picked, never a generated result — these tests
+# use a seeded rng so the "random" choice is deterministic to assert on.
+# ---------------------------------------------------------------------- #
+
+
+class _FixedChoiceRng:
+    """Picks a specific item by identity/position rather than truly at
+    random — deterministic tests without needing to seed real random.Random
+    and hope for a particular draw."""
+
+    def __init__(self, index=0):
+        self.index = index
+
+    def choice(self, seq):
+        return seq[self.index]
+
+
+def test_random_real_win_only_ever_returns_a_real_positive_return():
+    conn = connect(":memory:")
+    # a real win (up, continued) and a real loss (up, reversed) in the same journal
+    _seed_on(conn, BASE, 100, 101, trend="up")  # win: +1%
+    _seed_on(conn, BASE + timedelta(minutes=5), 100, 99, trend="up")  # loss: -1%
+
+    win = performance.random_real_win(conn)
+    assert win is not None
+    assert win.return_pct > 0
+    assert win.trend == "up"
+
+
+def test_random_real_win_none_when_the_journal_has_no_win_yet():
+    conn = connect(":memory:")
+    _seed_on(conn, BASE, 100, 99, trend="up")  # only a loss on record
+    assert performance.random_real_win(conn) is None
+
+
+def test_random_real_win_picks_among_multiple_real_wins():
+    conn = connect(":memory:")
+    _seed_on(conn, BASE, 100, 101, trend="up", symbol="AAA")
+    _seed_on(conn, BASE + timedelta(minutes=5), 100, 102, trend="up", symbol="BBB")
+
+    # notable_percentile=0 -> the whole pool, not just the top slice —
+    # isolates "does choice actually vary" from the filtering behavior,
+    # which gets its own test below.
+    first = performance.random_real_win(conn, rng=_FixedChoiceRng(0), notable_percentile=0)
+    second = performance.random_real_win(conn, rng=_FixedChoiceRng(1), notable_percentile=0)
+    assert {first.symbol, second.symbol} == {"AAA", "BBB"}
+
+
+def test_random_real_win_restricts_to_the_notable_top_slice_by_default():
+    """Regression for the actual point of the feature: most real wins
+    are small (this journal's real median is under 1%), so a uniform
+    sample mostly shows unremarkable ones. The default pool must be
+    restricted to genuinely bigger real wins, not just any real win —
+    see performance.random_real_win's docstring for why disclosing this
+    (render_example's "notable, not typical" framing) makes it honest
+    curation rather than a silent cherry-pick."""
+    conn = connect(":memory:")
+    # 9 small real wins (+0.1%) and 1 much bigger real win (+5%) — with
+    # notable_percentile=90 (the default), only the top ~10% should ever
+    # be eligible, i.e. only the +5% one.
+    for i in range(9):
+        _seed_on(conn, BASE + timedelta(minutes=5 * i), 100.0, 100.1, trend="up", symbol=f"SMALL{i}")
+    _seed_on(conn, BASE + timedelta(minutes=100), 100.0, 105.0, trend="up", symbol="BIG")
+
+    for _ in range(10):
+        win = performance.random_real_win(conn)
+        assert win.symbol == "BIG"
+
+
+def test_random_real_day_hit_rate_requires_min_sample_per_day():
+    conn = connect(":memory:")
+    # only 2 tracked alerts this session -> below MIN_HISTORY_SAMPLE (5)
+    _seed_on(conn, BASE, 100, 101)
+    _seed_on(conn, BASE + timedelta(minutes=5), 100, 99)
+    assert performance.random_real_day_hit_rate(conn) is None
+
+
+def test_random_real_day_hit_rate_on_a_real_session_with_enough_samples():
+    conn = connect(":memory:")
+    for i in range(6):
+        _seed_on(conn, BASE + timedelta(minutes=5 * i), 100, 101 if i < 4 else 99)
+    day = performance.random_real_day_hit_rate(conn)
+    assert day is not None
+    assert day.sample_size == 6
+    assert day.hit_rate == pytest.approx(4 / 6)
+    assert day.session == BASE.date().isoformat()

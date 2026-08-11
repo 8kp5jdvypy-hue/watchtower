@@ -23,3 +23,14 @@ DEEP_LIQUIDITY_SYMBOLS = frozenset({
 
 def liquidity_class(symbol: str) -> str:
     return "deep" if symbol in DEEP_LIQUIDITY_SYMBOLS else "thin"
+
+
+# Broad-market proxies for tradebot.detectors.relative_strength_break.
+# Both are already in WATCHLIST, so no new vendor fetch is needed — see
+# that detector's docstring. Scoped to SPY only for v1 (DEFAULT_MARKET_
+# PROXY); QQQ is listed for a possible future blend/tech-specific proxy,
+# not used yet. No sector-ETF mapping exists here or anywhere in the
+# codebase — a true sector-relative signal would need one sourced for
+# real, not invented.
+MARKET_PROXY_SYMBOLS = ("SPY", "QQQ")
+DEFAULT_MARKET_PROXY = "SPY"

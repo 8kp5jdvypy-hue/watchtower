@@ -3,6 +3,7 @@ rule exercised through the actual /limits handler (not just the db layer).
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -110,8 +111,8 @@ def test_start_labels_beta_and_repositions_as_discipline_tool_not_a_proven_edge(
     reply = handlers.handle_start(_ctx(users_conn, journal_conn))
     assert "beta" in reply.text.lower()
     assert "discipline and journaling system" in reply.text.lower()
-    assert "not a proven trading edge" in reply.text.lower()
-    assert "may pause" in reply.text.lower()
+    assert "not a promise of" in reply.text.lower()
+    assert "pause" in reply.text.lower()
 
 
 def test_start_states_plainly_when_the_hit_rate_is_not_yet_significant():
@@ -201,10 +202,13 @@ def test_ack_risk_button_states_beta_pricing_before_timezone():
 
 def test_completing_onboarding_sends_a_real_sample_alert():
     """The 'here's what you actually get' moment — a real historical
-    alert, not a mockup, right when onboarding finishes."""
+    alert, not a mockup, right when onboarding finishes (the 'custom'
+    quiet-hours path, the last of the two ways onboarding can finish —
+    see also callbacks.handle_speak_timing_button's 'always'/'market_hours'
+    branches, covered in test_callbacks.py)."""
     users_conn, journal_conn = _setup(onboarded=False)
-    db.set_onboarding_step(users_conn, 1, "limits")
-    reply = handlers._handle_limits_text(_ctx(users_conn, journal_conn), "5 200 10")
+    db.set_onboarding_step(users_conn, 1, "quiet_hours")
+    reply = handlers._handle_quiet_hours_text(_ctx(users_conn, journal_conn), "none")
     assert db.get_user(users_conn, 1).is_onboarded
     assert "you're set" in reply.text.lower()
     assert "what an alert actually looks like" in reply.text.lower()
@@ -223,6 +227,32 @@ def test_status_reports_market_state_and_users_own_lock_state():
     assert "paused" in reply.text.lower()
     assert "market" in reply.text.lower() or "live" in reply.text.lower() or "closed" in reply.text.lower()
     assert "beta" in reply.text.lower()
+
+
+def _write_heartbeat(path: Path, ts_utc: str) -> None:
+    path.write_text(json.dumps({"ts_utc": ts_utc}))
+
+
+def test_status_does_not_flag_stale_over_a_weekend_with_the_market_closed():
+    """Regression: an old heartbeat is expected and correct while the
+    market's closed (see runner.py's OFF_SESSION_IDLE_SECONDS — it
+    doesn't write a heartbeat at all outside a trading session), not a
+    fault worth alarming someone checking /status over the weekend."""
+    users_conn, journal_conn = _setup()
+    ctx = _ctx(users_conn, journal_conn, market_open=False)
+    old_ts = (NOW - timedelta(days=2)).isoformat()
+    _write_heartbeat(ctx.app.heartbeat_file, old_ts)
+    reply = handlers.handle_status(ctx)
+    assert "stale" not in reply.text.lower()
+
+
+def test_status_still_flags_a_genuinely_stale_feed_during_market_hours():
+    users_conn, journal_conn = _setup()
+    ctx = _ctx(users_conn, journal_conn, market_open=True)
+    old_ts = (NOW - timedelta(minutes=30)).isoformat()
+    _write_heartbeat(ctx.app.heartbeat_file, old_ts)
+    reply = handlers.handle_status(ctx)
+    assert "stale" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #
@@ -275,6 +305,41 @@ def test_performance_never_calls_a_coin_flip_hit_rate_a_measured_real_edge():
     reply = handlers.handle_performance(_ctx(users_conn, journal_conn))
     assert "not yet statistically different from a coin flip" in reply.text.lower()
     assert "measured, real edge" not in reply.text.lower()
+
+
+# ---------------------------------------------------------------------- #
+# /example
+# ---------------------------------------------------------------------- #
+
+
+def test_example_with_an_empty_journal_says_so_honestly():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_example(_ctx(users_conn, journal_conn))
+    assert "no real win in the journal yet" in reply.text.lower()
+    assert "no real day with enough tracked alerts" in reply.text.lower()
+
+
+def test_example_shows_a_real_win_with_the_correct_option_side():
+    users_conn, journal_conn = _setup()
+    base = NOW
+    for i in range(6):
+        did = write_cluster(
+            journal_conn, session=base.date().isoformat(), symbol="TSLA", ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="TSLA gapped up", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection("TSLA", "gap", base, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        journal_conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, 105))
+    journal_conn.commit()
+
+    reply = handlers.handle_example(_ctx(users_conn, journal_conn))
+    assert "TSLA" in reply.text
+    assert "calls favored" in reply.text.lower()
+    assert "TSLA gapped up" in reply.text
+    assert "hit rate" in reply.text.lower()
+    assert "100.00%" in reply.text  # every seeded alert continued -> a real, if unrealistic, day rate
+    assert "+100.00%" not in reply.text  # hit rate is a magnitude, not a signed move — no leading '+'
+    assert "not typical" in reply.text.lower()
+    assert "coin flip" in reply.text.lower()
 
 
 # ---------------------------------------------------------------------- #
@@ -643,8 +708,8 @@ def test_help_lists_commands_and_a_gambling_resource_line():
 
 def test_help_in_a_group_points_people_to_dm_the_bot():
     users_conn, journal_conn = _setup()
-    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username="KestrelBot"))
-    assert "@KestrelBot" in reply.text
+    reply = handlers.handle_help(_ctx(users_conn, journal_conn, chat_type="group", bot_username="PerchBot"))
+    assert "@PerchBot" in reply.text
     assert "/start" in reply.text
     assert "DM" in reply.text
 
@@ -725,9 +790,12 @@ def test_halt_as_admin_engages_a_global_halt():
 
 def test_no_usage_hint_text_has_an_unescaped_angle_bracket():
     users_conn, journal_conn = _setup(onboarded=False)
-    db.set_onboarding_step(users_conn, 1, "limits")
+    db.set_onboarding_step(users_conn, 1, "quiet_hours")
     _assert_html_safe(handlers.handle_start(_ctx(users_conn, journal_conn)).text)
-    _assert_html_safe(handlers._handle_limits_text(_ctx(users_conn, journal_conn), "not three numbers").text)
+    _assert_html_safe(handlers._handle_quiet_hours_text(_ctx(users_conn, journal_conn), "not a time range").text)
+
+    users_conn, journal_conn = _setup()
+    _assert_html_safe(handlers.handle_limits(_ctx(users_conn, journal_conn)).text)  # the /limits usage hint itself
 
     users_conn, journal_conn = _setup()
     _assert_html_safe(handlers.handle_took(_ctx(users_conn, journal_conn)).text)

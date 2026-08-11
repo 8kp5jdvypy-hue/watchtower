@@ -8,15 +8,15 @@ from datetime import datetime, timedelta, timezone
 
 from tradebot.alerts import Cluster
 from tradebot.telegram_bot import db, outbox
-from tradebot.telegram_bot.delivery import make_subscriber_hook
+from tradebot.telegram_bot.delivery import QUIET_SENSITIVITY_MIN_SCORE, make_medium_fanout_fn, make_subscriber_hook
 
 NOW = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
 
 
-def _cluster(symbol="TSLA") -> Cluster:
+def _cluster(symbol="TSLA", score=5.0) -> Cluster:
     return Cluster(
         id="abc123", ts_utc=NOW.isoformat(), session=NOW.date().isoformat(), symbol=symbol,
-        kinds="gap", headlines="h", primary_headline="h", score=5.0, tier="high",
+        kinds="gap", headlines="h", primary_headline="h", score=score, tier="high",
         close=250.0, atr14=2.0, trend="up", code_version="v1",
     )
 
@@ -169,3 +169,82 @@ def test_no_position_size_followup_on_a_no_trade_alert():
 
     hook(_cluster(), "text", None)
     assert _outbox_rows(conn, "abc123:sizing") == []
+
+
+# ---------------------------------------------------------------------- #
+# Alert sensitivity — 'quiet' raises a subscriber's own HIGH-tier floor;
+# 'balanced'/'aggressive' see every real HIGH alert unchanged.
+# ---------------------------------------------------------------------- #
+
+
+def test_quiet_subscriber_is_excluded_from_a_below_floor_high_alert():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_alert_sensitivity(conn, 1, "quiet")
+    hook = make_subscriber_hook(conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(score=QUIET_SENSITIVITY_MIN_SCORE - 0.1), "text")
+    assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+
+
+def test_quiet_subscriber_still_gets_a_strong_enough_alert():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_alert_sensitivity(conn, 1, "quiet")
+    hook = make_subscriber_hook(conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(score=QUIET_SENSITIVITY_MIN_SCORE), "text")
+    assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 1
+
+
+def test_balanced_and_aggressive_subscribers_are_unaffected_by_the_quiet_floor():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    _onboarded_subscriber(conn, 2)
+    db.set_alert_sensitivity(conn, 1, "balanced")
+    db.set_alert_sensitivity(conn, 2, "aggressive")
+    hook = make_subscriber_hook(conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    hook(_cluster(score=QUIET_SENSITIVITY_MIN_SCORE - 0.1), "text")
+    rows = _outbox_rows(conn, "abc123")
+    assert [r[0] for r in rows] == [1, 2]
+
+
+# ---------------------------------------------------------------------- #
+# Personal MEDIUM-digest fan-out — 'aggressive' subscribers only.
+# ---------------------------------------------------------------------- #
+
+
+def test_medium_fanout_reaches_only_aggressive_subscribers_on_watchlist():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)  # default 'balanced' — must NOT receive the digest
+    _onboarded_subscriber(conn, 2)
+    db.set_alert_sensitivity(conn, 2, "aggressive")
+    fanout = make_medium_fanout_fn(conn, lambda now: now.date(), default_watchlist=["TSLA"])
+
+    fanout([_cluster(symbol="TSLA")], "<b>digest</b>", NOW)
+
+    assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 1
+    row = conn.execute("SELECT chat_id, text, priority FROM outbox").fetchone()
+    assert row == (2, "<b>digest</b>", outbox.PRIORITY_NORMAL)
+
+
+def test_medium_fanout_dedupes_a_subscriber_matching_multiple_symbols():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1)
+    db.set_alert_sensitivity(conn, 1, "aggressive")
+    fanout = make_medium_fanout_fn(conn, lambda now: now.date(), default_watchlist=["TSLA", "SPY"])
+
+    fanout([_cluster(symbol="TSLA"), _cluster(symbol="SPY")], "text", NOW)
+
+    assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 1
+
+
+def test_medium_fanout_respects_watchlist_and_sends_nothing_when_no_match():
+    conn = db.connect(":memory:")
+    _onboarded_subscriber(conn, 1, symbol_watchlist=["QQQ"])
+    db.set_alert_sensitivity(conn, 1, "aggressive")
+    fanout = make_medium_fanout_fn(conn, lambda now: now.date(), default_watchlist=["TSLA", "QQQ"])
+
+    fanout([_cluster(symbol="TSLA")], "text", NOW)
+    assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0

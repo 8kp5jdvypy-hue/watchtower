@@ -27,7 +27,7 @@ class AppConfig:
     incidents_path: Path | None = None  # None -> tradebot.incidents' own default path
     high_tier_daily_cap: int = 8
     bar_minutes: int = 5
-    bot_name: str = "Kestrel"
+    bot_name: str = "Perch"
     bot_username: str | None = None
     allowed_user_ids: frozenset | None = None  # None/empty = unrestricted, matches admin_ids' precedent
     channel_commands_enabled: bool = False

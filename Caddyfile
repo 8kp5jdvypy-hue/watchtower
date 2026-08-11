@@ -1,0 +1,9 @@
+# Reverse proxy + automatic TLS (Let's Encrypt) for the internal API.
+# See docker-compose.yml's `caddy` service and docs/DEPLOYMENT.md's DNS
+# note — api.perchmarkets.com's DNS record must be "DNS only" (grey
+# cloud, not proxied) in Cloudflare so Caddy can complete the ACME
+# challenge and terminate TLS itself, instead of Cloudflare terminating
+# it first.
+api.perchmarkets.com {
+    reverse_proxy api:8000
+}

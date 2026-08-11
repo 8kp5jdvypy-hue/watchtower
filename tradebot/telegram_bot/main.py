@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from tradebot import accounts
 from tradebot.config import WATCHLIST
 from tradebot.journal import connect as journal_connect
 from tradebot.runner import CALENDAR, ET, HALT_FILE, HEARTBEAT_FILE
@@ -100,6 +101,9 @@ def main() -> None:
         client.set_my_commands(commands.COMMANDS)
 
     users_conn = db.connect()
+    migrated = accounts.migrate_existing_telegram_users(users_conn)
+    if migrated:
+        logger.info("accounts: migrated %d Telegram user(s) to a linked account", migrated)
     journal_conn = journal_connect(check_same_thread=False)
     bot_username = client.get_me().get("username")
     app_config = build_app_config(bot_username)

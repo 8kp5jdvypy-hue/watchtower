@@ -32,16 +32,18 @@ three must be running for live alerting to actually work end to end.
 
 ## Setup
 
-No `requirements.txt` yet — the only third-party dependencies are:
-
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install requests exchange_calendars alpaca-py pytest
+pip install -r requirements-dev.txt   # adds pytest on top of requirements.txt
 ```
 
 Everything else is Python standard library — deliberate, see e.g.
 `tradebot/metrics.py`'s docstring on avoiding a `statsd`/`prometheus_client`
 dependency for a bot this size; the same call was made throughout.
+
+For running this on a VPS instead of a laptop (Docker Compose +
+systemd + backups), see `docs/DEPLOYMENT.md` — everything below this
+point describes the bare-metal/macOS dev setup.
 
 Create a `.env` in the repo root (never committed — see `.gitignore`)
 with at least `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`,
@@ -53,6 +55,95 @@ set -a && source .env && set +a
 ```
 
 ## Running
+
+### Quick start (recommended) — the wrapper kit
+
+Three scripts in `scripts/` bring the whole live stack up and down and
+keep this Mac from sleeping while it runs (a sleeping Mac freezes all
+three processes, so the scanner stops evaluating bars — see the
+`caffeinate` note below):
+
+```bash
+scripts/start.sh                 # start worker + bot + runner + caffeinate guardian
+scripts/start.sh --sync-commands # same, but also push commands.py to BotFather first
+scripts/status.sh                # one-glance health: procs, heartbeat age, HALT, incidents, power
+scripts/stop.sh                  # graceful SIGTERM to all (add --force to SIGKILL stragglers)
+```
+
+`start.sh` is idempotent — a process already running is left alone, not
+doubled. It writes a pidfile per process under `data/*.pid`, which
+`status.sh` and `stop.sh` read. `status.sh` exits non-zero when
+something's wrong (a process down, a stale heartbeat during market
+hours, or an open incident), so it doubles as a monitor/cron probe.
+
+**caffeinate + power.** `start.sh` launches `caffeinate -dimsu -w <runner
+pid>`, which holds an idle-sleep assertion for exactly as long as the
+scanner lives. This blocks *idle* sleep, but on **battery** a closed lid
+or low charge can still sleep the Mac. For a reliable market-hours run:
+**plug into AC power and keep the lid open.** `status.sh` warns when
+you're on battery.
+
+### Auto-start before the market open (launchd)
+
+`scripts/com.watchtower.kestrel.autostart.plist` is a LaunchAgent that
+runs `start.sh` at **7:20 AM America/Denver, Mon-Fri** (9:20 AM ET, 10
+min before the open). It survives reboots. Install it once:
+
+```bash
+cp scripts/com.watchtower.kestrel.autostart.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.watchtower.kestrel.autostart.plist
+# run it now to confirm it works (idempotent — won't double anything):
+launchctl kickstart -k gui/$(id -u)/com.watchtower.kestrel.autostart
+launchctl print gui/$(id -u)/com.watchtower.kestrel.autostart | grep -E "state|last exit code"
+```
+
+To remove it: `launchctl bootout gui/$(id -u)/com.watchtower.kestrel.autostart`.
+Its output is captured to `data/launchd_autostart.log`.
+
+**Waking the Mac for it.** launchd fires the job on schedule but will
+NOT wake a sleeping Mac — and because the scanner exits at the market
+close each day (taking its caffeinate guardian with it), the Mac can
+sleep overnight and miss the 7:20 trigger. Schedule a wake a few minutes
+earlier (requires `sudo`, run in a real Terminal):
+
+```bash
+sudo pmset repeat wakeorpoweron MTWRF 07:15:00   # wake weekdays at 7:15 MT
+pmset -g sched                                   # verify the repeating wake
+```
+
+With the wake + the LaunchAgent, the stack comes up unattended before
+every open. Keep the Mac plugged into AC power so the wake isn't blocked
+on battery.
+
+### Auto-restart if something crashes mid-day (launchd watchdog)
+
+`scripts/watchdog.sh` checks every 5 minutes whether the bot, worker, or
+(during market hours only) the runner have died, and re-runs `start.sh`
+— already idempotent — to bring back only what's missing. This is what
+actually recovers from a mid-session crash; the autostart LaunchAgent
+above only covers the pre-open start. Install it once:
+
+```bash
+cp scripts/com.perch.watchdog.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.perch.watchdog.plist
+launchctl print gui/$(id -u)/com.perch.watchdog | grep -E "state|last exit code"
+```
+
+To remove it: `launchctl bootout gui/$(id -u)/com.perch.watchdog`. Its
+output goes to `data/watchdog_launchd.log`; every restart it triggers is
+also logged to `data/watchdog.log` and recorded as a short, already-
+resolved entry in the incident log (`data/incidents.jsonl`) so it shows
+up in the history, not just the log file.
+
+**This is a stopgap, not production infrastructure.** It only helps if
+the Mac itself is awake and on AC power — see the `pmset`/LaunchAgent
+caveats above. The real fix (process supervision on a real server that
+doesn't depend on a laptop staying open) is planned separately; this
+watchdog exists to close the gap in the meantime.
+
+The manual, one-process-at-a-time commands below still work and are what
+the kit runs under the hood — use them when you need to restart a single
+process.
 
 ### Replay (backtest against cached sessions — no live market needed)
 
@@ -76,6 +167,17 @@ disown
 Default is log-only (`ConsoleAlerter`) unless `--live` is passed with
 `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` set, in which case alerts route
 through the outbox to the ops channel and to subscribers.
+
+Add `--broad-scan` (on by default in `scripts/start.sh`) to also run
+Stage 1 (`tradebot.broad_scan`) across the full active universe
+(`tradebot.universe`, discovered from Alpaca's asset catalog — live-
+verified 2026-08-08 at ~13,000 active US equities/ETFs excluding OTC)
+every 30 minutes, promoting up to 25 of the strongest cheap-screen
+candidates into live Stage 2 evaluation alongside the fixed `WATCHLIST`.
+This only widens *coverage* — every promoted symbol still goes through
+the exact same detectors, tiers, daily HIGH cap, and cooldowns as
+everything else; it does not raise the alert budget. Off by default if
+you invoke `tradebot.runner` directly without the flag.
 
 ### Command bot
 

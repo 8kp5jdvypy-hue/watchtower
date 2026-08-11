@@ -16,7 +16,7 @@ import io
 from datetime import datetime
 
 from tradebot.events import events_for_date
-from tradebot.rendering.fields import money, pct, qty, ts
+from tradebot.rendering.fields import money, pct, qty, rate, ts
 from tradebot.rendering.templates import render_pre_open_card
 from tradebot.telegram_bot import access, db, keyboards, performance
 from tradebot.telegram_bot.context import HandlerContext, Reply
@@ -33,7 +33,7 @@ def _fmt_bucket(bucket) -> str:
     if bucket is None:
         return "not enough samples yet"
     sign = "+" if bucket.avg_pnl_pct >= 0 else ""
-    return f"{pct(bucket.win_rate * 100)} win, {sign}{bucket.avg_pnl_pct:.2f}% avg (n={qty(bucket.n)})"
+    return f"{rate(bucket.win_rate * 100)} win, {sign}{bucket.avg_pnl_pct:.2f}% avg (n={qty(bucket.n)})"
 
 
 def _fmt_risk_pct(value: float | None) -> str:
@@ -49,19 +49,24 @@ def _fmt_risk_pct(value: float | None) -> str:
 # -------------------------------------------------------------------- #
 
 
-def _significance_verdict_line(tr) -> str:
+def _significance_verdict_line(tr, verbose: bool = True) -> str:
     """The one line that stops this text from ever implying a proven
     edge when the numbers don't back it up. Computed fresh from
     performance.significance_check every time this renders — never a
     fixed claim written into the copy by hand, so it can't quietly go
-    stale as more sessions accumulate."""
+    stale as more sessions accumulate. verbose=False (onboarding) keeps
+    the same real verdict but drops the "how much more data" elaboration
+    that /performance (verbose=True, the deep-dive command) still shows
+    in full — shorter is fine at the door, the substance isn't cut."""
     sig = tr.significance
     if sig.is_significant:
         direction = "better than" if tr.hit_rate > 0.5 else "worse than"
-        return (
-            f"That hit rate is currently statistically {direction} a coin flip (z={sig.z_score:.2f}) — "
-            "still provisional, and past performance doesn't guarantee anything going forward."
-        )
+        line = f"That hit rate is currently statistically {direction} a coin flip (z={sig.z_score:.2f})"
+        if not verbose:
+            return line + "."
+        return line + " — still provisional, and past performance doesn't guarantee anything going forward."
+    if not verbose:
+        return f"Not yet statistically different from a coin flip at this sample size (z={sig.z_score:.2f})."
     return (
         f"At this sample size, that hit rate is NOT yet statistically different from a coin flip "
         f"(z={sig.z_score:.2f}) — treat every number above as unproven, not a track record to trade on. "
@@ -75,31 +80,29 @@ def _track_record_and_risk_text(ctx: HandlerContext) -> str:
     lines = [
         f"<b>Welcome to {html.escape(ctx.app.bot_name)} — BETA.</b>",
         "",
-        "What this actually is: a discipline and journaling system built on a technical alert "
-        "feed — not a proven trading edge. It's free while the track record accumulates.",
+        "A discipline and journaling system on top of a technical alert feed — not a promise of "
+        "an edge. Free during beta.",
         "",
-        "Before anything else — the real track record, losing stretches included:",
+        "Your real track record, no cherry-picking:",
     ]
     if tr is None:
-        lines.append("Not enough history yet for real numbers. Until this fills in, every alert is unproven — treat it that way.")
+        lines.append("Not enough history yet for real numbers.")
     else:
         lines += [
             "",
             f"HIGH tier, last {qty(tr.sample_size)} alerts @ +{tr.offset_min}m:",
-            f"  Hit rate: {pct(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
+            f"  Hit rate: {rate(tr.hit_rate * 100)}   Avg move: {pct(tr.avg_return_pct)}",
             f"  Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
-            f"  Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)}",
+            f"  Worst drawdown: {pct(tr.max_drawdown_pct)}",
             "",
-            _significance_verdict_line(tr),
+            _significance_verdict_line(tr, verbose=False),
         ]
     lines += [
         "",
-        "This bot detects patterns and reports what actually happened after — it is not advice, and losses are a normal, likely part of using it, not a bug.",
+        "It reports patterns and what actually happened after — not advice, and losses happen. "
+        "Beta also means alerts might pause here and there for fixes.",
         "",
-        "Being in beta also means alerts may pause without much notice while something gets fixed — "
-        "that beats shipping around a real bug.",
-        "",
-        "Tap below only if you actually understand that.",
+        "Tap below to continue.",
     ]
     return "\n".join(lines)
 
@@ -121,9 +124,10 @@ def _settings_summary(ctx: HandlerContext) -> str:
 
 
 _RESUME_ONBOARDING_TEXT = {
+    "sensitivity": "How much signal do you want?",
     "timezone": "Pick your timezone:",
+    "speak_timing": "When should Perch speak?",
     "quiet_hours": "What are your quiet hours (no alerts)? Reply like 22:00-06:00, or 'none'.",
-    "limits": "Set your risk limits — reply as: &lt;max trades/day&gt; &lt;max daily loss $&gt; &lt;max position size&gt;. Example: 5 200 10",
 }
 
 # Shown once, right after the risk ack tap and before timezone setup — see
@@ -177,9 +181,35 @@ def handle_start(ctx: HandlerContext) -> Reply:
 
     if user.onboarding_step == "risk_ack":
         return Reply(text=_track_record_and_risk_text(ctx), keyboard=keyboards.risk_ack_keyboard())
+    if user.onboarding_step == "sensitivity":
+        return Reply(text=_RESUME_ONBOARDING_TEXT["sensitivity"], keyboard=keyboards.sensitivity_keyboard())
     if user.onboarding_step == "timezone":
         return Reply(text=_RESUME_ONBOARDING_TEXT["timezone"], keyboard=keyboards.timezone_keyboard())
+    if user.onboarding_step == "speak_timing":
+        return Reply(text=_RESUME_ONBOARDING_TEXT["speak_timing"], keyboard=keyboards.speak_timing_keyboard())
     return Reply(text=_RESUME_ONBOARDING_TEXT.get(user.onboarding_step, "Let's pick this back up — reply to continue."))
+
+
+def finish_onboarding(ctx: HandlerContext) -> Reply:
+    """The shared last step of onboarding, reached from either branch of
+    'when should Perch speak?' (always/market hours finish immediately;
+    custom finishes here once the typed quiet-hours reply is read — see
+    _handle_quiet_hours_text). Real numeric risk limits (max trades/day,
+    daily loss $, position size) are deliberately NOT asked here anymore
+    — see /limits, already a complete, always-available command; keeping
+    onboarding itself to what the spec calls "progressive personalization"
+    means not front-loading every setting before someone has seen a
+    single alert."""
+    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, None)
+    db.mark_onboarded(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
+    from tradebot.rendering.templates import render_sample_alert
+
+    return Reply(
+        text="You're set. Alerts will respect your quiet hours and sensitivity from now on.\n"
+        "/limits to set daily loss and trade caps, /watchlist to customize your symbols, /help any time.\n"
+        "\n"
+        f"{render_sample_alert()}"
+    )
 
 
 def _handle_quiet_hours_text(ctx: HandlerContext, text: str) -> Reply:
@@ -191,8 +221,7 @@ def _handle_quiet_hours_text(ctx: HandlerContext, text: str) -> Reply:
         if len(parts) != 2 or not all(_looks_like_time(p) for p in parts):
             return Reply(text="Couldn't read that. Reply like 22:00-06:00, or 'none'.")
         db.set_quiet_hours(ctx.users_conn, ctx.user.telegram_user_id, parts[0].strip(), parts[1].strip())
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, "limits")
-    return Reply(text=_RESUME_ONBOARDING_TEXT["limits"])
+    return finish_onboarding(ctx)
 
 
 def _looks_like_time(value: str) -> bool:
@@ -203,29 +232,8 @@ def _looks_like_time(value: str) -> bool:
     return hh.isdigit() and mm.isdigit() and 0 <= int(hh) <= 23 and 0 <= int(mm) <= 59
 
 
-def _handle_limits_text(ctx: HandlerContext, text: str) -> Reply:
-    parts = text.split()
-    if len(parts) != 3 or any(_parse_float(p) is None for p in parts):
-        return Reply(text="Reply with three numbers: &lt;max trades/day&gt; &lt;max daily loss $&gt; &lt;max position size&gt;. Example: 5 200 10")
-    trades, loss, size = (_parse_float(p) for p in parts)
-    market_open = ctx.app.market_is_open_fn(ctx.now)
-    for field, value in (("max_trades_per_day", trades), ("max_daily_loss", loss), ("max_position_size", size)):
-        db.apply_limit_change(ctx.users_conn, ctx.user.telegram_user_id, field, value, now=ctx.now, market_is_open=market_open)
-    db.set_onboarding_step(ctx.users_conn, ctx.user.telegram_user_id, None)
-    db.mark_onboarded(ctx.users_conn, ctx.user.telegram_user_id, ctx.now)
-    from tradebot.rendering.templates import render_sample_alert
-
-    return Reply(
-        text="You're set. Alerts will respect these limits and your quiet hours from now on.\n"
-        "/watchlist to customize your symbols, /limits to change these later, /help any time.\n"
-        "\n"
-        f"{render_sample_alert()}"
-    )
-
-
 ONBOARDING_TEXT_STEPS = {
     "quiet_hours": _handle_quiet_hours_text,
-    "limits": _handle_limits_text,
 }
 
 
@@ -247,7 +255,12 @@ def handle_status(ctx: HandlerContext) -> Reply:
         feed_line = "no heartbeat recorded yet — the live scanner may not be running"
     else:
         age = (now - datetime.fromisoformat(hb["ts_utc"])).total_seconds()
-        stale = age > ctx.app.bar_minutes * 60 * 2
+        # Staleness only means something while the market is actually
+        # open — an old heartbeat over a weekend/holiday (or overnight)
+        # is the scanner correctly idling, not a fault. See runner.py's
+        # OFF_SESSION_IDLE_SECONDS: run_live() itself doesn't write a
+        # heartbeat at all outside a trading session.
+        stale = market_open and age > ctx.app.bar_minutes * 60 * 2
         feed_line = f"last loop {int(age)}s ago" + (" — looks STALE" if stale else "")
 
     fired_today = ctx.journal_conn.execute(
@@ -290,15 +303,15 @@ def handle_performance(ctx: HandlerContext) -> Reply:
     lines = [
         f"<b>HIGH tier track record</b> · @ +{tr.offset_min}m, n={qty(tr.sample_size)}",
         "",
-        f"Hit rate: {pct(tr.hit_rate * 100)}",
+        f"Hit rate: {rate(tr.hit_rate * 100)}",
         f"Avg move: {pct(tr.avg_return_pct)}",
         f"Longest losing streak: {qty(tr.longest_losing_streak)} in a row",
         f"Worst hypothetical drawdown: {pct(tr.max_drawdown_pct)} (equal-weighted, back-to-back — not real compounded P/L)",
         "",
         _significance_verdict_line(tr),
         "",
-        f"News-driven: {tr.news_driven and pct(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
-        f"Clean technical: {tr.clean_technical and pct(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
+        f"News-driven: {tr.news_driven and rate(tr.news_driven.hit_rate * 100) + f' hit, {pct(tr.news_driven.avg_return_pct)} avg (n={qty(tr.news_driven.sample_size)})' or 'not enough samples yet'}",
+        f"Clean technical: {tr.clean_technical and rate(tr.clean_technical.hit_rate * 100) + f' hit, {pct(tr.clean_technical.avg_return_pct)} avg (n={qty(tr.clean_technical.sample_size)})' or 'not enough samples yet'}",
         "",
     ]
     if tr.no_trade_tracked_count:
@@ -309,6 +322,22 @@ def handle_performance(ctx: HandlerContext) -> Reply:
     else:
         lines.append(f"Alerts sent: {qty(tr.total_alerts)} · NO TRADE tracking not available for this history yet")
     return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
+# /example — a real win and a real day's hit rate, randomly picked from
+# the journal on every call. See performance.random_real_win /
+# random_real_day_hit_rate's module comment for why this is a random
+# SELECTION among real records, never a generated result.
+# -------------------------------------------------------------------- #
+
+
+def handle_example(ctx: HandlerContext) -> Reply:
+    from tradebot.rendering.templates import render_example
+
+    win = performance.random_real_win(ctx.journal_conn)
+    day = performance.random_real_day_hit_rate(ctx.journal_conn)
+    return Reply(text=render_example(win, day, ctx.now))
 
 
 # -------------------------------------------------------------------- #
@@ -690,7 +719,8 @@ def handle_events(ctx: HandlerContext) -> Reply:
 
 
 def handle_tiers(ctx: HandlerContext) -> Reply:
-    plan_line = f"Your plan: {html.escape(ctx.user.plan)}"
+    plan = access.resolve_plan(ctx.users_conn, ctx.user)
+    plan_line = f"Your plan: {html.escape(plan)}"
     if ctx.user.founding_member:
         plan_line += " (founding member)"
     lines = ["<b>Plans</b>", "", plan_line, "", BETA_PRICING_NOTICE]
@@ -770,6 +800,7 @@ def handle_help(ctx: HandlerContext) -> Reply:
         "<b>Account</b>",
         "/status — bot & your state",
         "/performance — real track record",
+        "/example — a real win and a real day's hit rate, picked fresh each time",
         "/me — your personal stats (or /me recap for this month's biggest leaks)",
         "",
         "<b>Journaling</b>",
@@ -838,6 +869,7 @@ HANDLERS = {
     "start": handle_start,
     "status": handle_status,
     "performance": handle_performance,
+    "example": handle_example,
     "me": handle_me,
     "took": handle_took,
     "closed": handle_closed,
