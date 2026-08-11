@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import statistics
 import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -455,6 +456,77 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
             continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
             avg_return_pct=sum(returns) / len(returns) * 100,
             offset_min=offset_min,
+        )
+    return result
+
+
+@dataclass(frozen=True)
+class KindPerformance:
+    kind: str
+    sample_size: int
+    continuation_rate: float
+    avg_return_pct: float
+    median_return_pct: float
+    offset_min: int
+    excluded_news_driven: int
+
+
+def kind_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str, KindPerformance]:
+    """Real continuation rate and average/median directional return per
+    primary detector kind, across the whole journal -- the same 'is this
+    actually predictive' check as tier_performance(), grouped by kind
+    instead of tier.
+
+    Deliberately diverges from tier_performance() in one way: news-driven
+    rows (news_driven=1) are excluded, the same filter
+    historical_performance() already applies to the per-signal "same
+    setup" stats shown in the modal -- this function and that one need to
+    report on the same population. The Performance tab claims to answer
+    "is this technical setup predictive," and an event-driven move
+    (earnings, an 8-K, a macro print) doesn't share that mechanism; mixing
+    it in would let event noise masquerade as a technical base rate, same
+    reasoning as historical_performance()'s own docstring.
+
+    Rows with primary_kind IS NULL (written before that column existed)
+    are excluded rather than grouped into a fake 'None' kind -- same
+    discipline historical_performance() already applies to kind matching.
+    Kinds with fewer than MIN_HISTORY_SAMPLE clean (non-news-driven) data
+    points are omitted, same as tier_performance() -- excluded_news_driven
+    only appears for kinds that clear that bar on their remaining clean
+    sample; a kind with no reportable clean sample doesn't appear at all,
+    same as today."""
+    rows = conn.execute(
+        """
+        SELECT d.primary_kind, d.close, d.trend, m.price, d.news_driven
+        FROM detections d
+        JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        WHERE d.primary_kind IS NOT NULL
+        """,
+        (offset_min,),
+    ).fetchall()
+
+    by_kind: dict[str, list[float]] = {}
+    excluded_news_driven: dict[str, int] = {}
+    for kind, close, trend, price, news_driven in rows:
+        if news_driven:
+            excluded_news_driven[kind] = excluded_news_driven.get(kind, 0) + 1
+            continue
+        r = (price - close) / close
+        signed = r if trend == "up" else -r
+        by_kind.setdefault(kind, []).append(signed)
+
+    result: dict[str, KindPerformance] = {}
+    for kind, returns in by_kind.items():
+        if len(returns) < MIN_HISTORY_SAMPLE:
+            continue
+        result[kind] = KindPerformance(
+            kind=kind,
+            sample_size=len(returns),
+            continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
+            avg_return_pct=sum(returns) / len(returns) * 100,
+            median_return_pct=statistics.median(returns) * 100,
+            offset_min=offset_min,
+            excluded_news_driven=excluded_news_driven.get(kind, 0),
         )
     return result
 

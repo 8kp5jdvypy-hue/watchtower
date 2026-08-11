@@ -375,6 +375,7 @@ def test_performance_endpoint_returns_json_with_no_data_yet(app, client):
     assert response.status_code == 200
     body = response.get_json()
     assert body["by_tier"] == {}
+    assert body["by_kind"] == {}
     assert body["track_record"] is None
 
 

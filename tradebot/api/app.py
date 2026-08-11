@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
-from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, tier_performance
+from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind_performance, tier_performance
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
@@ -454,8 +454,13 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         stale = cache["computed_at"] is None or (now - cache["computed_at"]).total_seconds() > PERFORMANCE_CACHE_TTL_SECONDS
         if stale:
             by_tier = tier_performance(app.journal_conn)
+            by_kind = kind_performance(app.journal_conn)
             record = track_record(app.journal_conn)
-            cache["data"] = {"by_tier": _to_jsonable(by_tier), "track_record": _to_jsonable(record)}
+            cache["data"] = {
+                "by_tier": _to_jsonable(by_tier),
+                "by_kind": _to_jsonable(by_kind),
+                "track_record": _to_jsonable(record),
+            }
             cache["computed_at"] = now
         return jsonify(cache["data"])
 
