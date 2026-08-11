@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { useMarketClock } from '../hooks/useMarketClock'
+import { bySeverity } from '../signalOrder'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
@@ -83,7 +84,7 @@ export default function Today({ account }) {
           <p>Nothing HIGH or MEDIUM tier has crossed the threshold yet today. That's not a bug — it's Perch deciding there's nothing worth interrupting you for.</p>
         </div>
       )}
-      {data && data.signals.map((signal) => (
+      {data && bySeverity(data.signals).map((signal) => (
         <SignalCard key={signal.id} signal={signal} onView={setOpenId} />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}

@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { tierWeight } from '../signalOrder'
 import PerchMark from './PerchMark'
 import './Watchlist.css'
 import './Views.css'
@@ -25,6 +26,18 @@ export default function Watchlist() {
     return map
   }, [today])
 
+  // Symbols with an active signal float to the top (HIGH before MEDIUM),
+  // quiet symbols stay in the watchlist's own order below them -- a stable
+  // sort, so "quiet" doesn't also mean "reshuffled every render."
+  const orderedSymbols = useMemo(() => {
+    if (!data) return []
+    return [...data.symbols].sort((a, b) => {
+      const wa = signaled.has(a) ? tierWeight(signaled.get(a).tier) : 2
+      const wb = signaled.has(b) ? tierWeight(signaled.get(b).tier) : 2
+      return wa - wb
+    })
+  }, [data, signaled])
+
   return (
     <div className="view">
       <span className="view-eyebrow"><span className="dot" /> WATCHLIST</span>
@@ -42,7 +55,7 @@ export default function Watchlist() {
 
       {data && (
         <div className="wl-rows">
-          {data.symbols.map((symbol) => {
+          {orderedSymbols.map((symbol) => {
             const sig = signaled.get(symbol)
             return (
               <div className={`wl-row${sig ? ' has-signal' : ''}`} key={symbol}>

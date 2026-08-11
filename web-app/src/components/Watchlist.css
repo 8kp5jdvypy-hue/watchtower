@@ -12,5 +12,7 @@
   font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase;
   padding: 0.25rem 0.6rem; border-radius: 999px;
 }
-.wl-badge-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan-dim); }
+/* var(--cyan), not var(--cyan-dim) -- see SignalCard.css's .sc-tier-medium
+   for the same WCAG AA contrast fix and the reasoning behind it. */
+.wl-badge-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
 .wl-badge-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }

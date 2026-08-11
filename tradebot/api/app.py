@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
-from tradebot.journal import historical_performance, tier_performance
+from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind_performance, tier_performance
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
@@ -87,6 +87,34 @@ def _to_jsonable(obj):
     if isinstance(obj, (list, tuple)):
         return [_to_jsonable(v) for v in obj]
     return obj
+
+
+# One or two fields each kind's card headline actually needs from its
+# context -- never the full blob (see /signals/<id> for that). Extend this
+# dict, not the endpoints' response shapes, if a future kind needs more.
+# level_break's raw context field is "level" (see detectors.py); renamed
+# to level_value here so it isn't ambiguous next to level_name.
+_HEADLINE_CONTEXT_FIELDS = {
+    "level_break": (("level_name", "level_name"), ("level_value", "level")),
+}
+
+
+def _context_summary(kinds_list: list[str], primary_kind: str | None, context_json: str | None) -> dict | None:
+    """Just the field(s) a card headline needs from the PRIMARY detector's
+    context, keyed by position in `kinds_list` (contexts are written in
+    the same order as kinds -- see journal.write_cluster). None for any
+    kind without an entry in _HEADLINE_CONTEXT_FIELDS, or when there's
+    nothing recorded to read from."""
+    fields = _HEADLINE_CONTEXT_FIELDS.get(primary_kind)
+    if not fields or not context_json or primary_kind not in kinds_list:
+        return None
+    contexts = json.loads(context_json)
+    idx = kinds_list.index(primary_kind)
+    if idx >= len(contexts):
+        return None
+    ctx = contexts[idx]
+    summary = {out_key: ctx[src_key] for out_key, src_key in fields if src_key in ctx}
+    return summary or None
 
 
 def _linked_telegram_user_id(conn, account: accounts.Account) -> int | None:
@@ -299,7 +327,8 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
 
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
-            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted "
+            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
+            "primary_kind, context_json "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -309,14 +338,18 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         query += " ORDER BY ts_utc DESC LIMIT ?"
         params.append(limit)
         rows = app.journal_conn.execute(query, params).fetchall()
-        return [
-            {
+        result = []
+        for row in rows:
+            kinds_list = row[4].split(",")
+            primary_kind = row[10]
+            result.append({
                 "id": row[0], "ts_utc": row[1], "session": row[2], "symbol": row[3],
-                "kinds": row[4].split(","), "headlines": row[5], "score": row[6],
+                "kinds": kinds_list, "headlines": row[5], "score": row[6],
                 "tier": row[7], "trend": row[8], "alerted": bool(row[9]),
-            }
-            for row in rows
-        ]
+                "primary_kind": primary_kind,
+                "context_summary": _context_summary(kinds_list, primary_kind, row[11]),
+            })
+        return result
 
     @app.route("/signals/feed")
     @login_required
@@ -369,6 +402,26 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             if primary_kind and trend
             else None
         )
+        # Real forward prices for THIS detection, once backfilled -- see
+        # journal.backfill_marks(), which only runs once, at the end of
+        # the session that produced this detection. Empty until then --
+        # never a live/current price, and never fabricated for an
+        # interval that hasn't been reached yet. at_close marks the
+        # CLOSE_MARK_OFFSET_MIN sentinel row so the frontend never needs
+        # to know that -1 means "session close." Render as "After
+        # detection" + offset_min, or "At session close" when at_close is
+        # true -- never as a live quote.
+        mark_rows = app.journal_conn.execute(
+            "SELECT offset_min, price FROM marks WHERE detection_id = ?", (id_,)
+        ).fetchall()
+        marks = [
+            {
+                "offset_min": None if offset == CLOSE_MARK_OFFSET_MIN else offset,
+                "at_close": offset == CLOSE_MARK_OFFSET_MIN,
+                "price": price,
+            }
+            for offset, price in sorted(mark_rows, key=lambda r: (r[0] == CLOSE_MARK_OFFSET_MIN, r[0]))
+        ]
         return jsonify(
             {
                 "id": id_,
@@ -389,6 +442,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "event_kind": event_kind,
                 "event_severity": event_severity,
                 "history": _to_jsonable(history),
+                "marks": marks,
             }
         )
 
@@ -400,8 +454,13 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         stale = cache["computed_at"] is None or (now - cache["computed_at"]).total_seconds() > PERFORMANCE_CACHE_TTL_SECONDS
         if stale:
             by_tier = tier_performance(app.journal_conn)
+            by_kind = kind_performance(app.journal_conn)
             record = track_record(app.journal_conn)
-            cache["data"] = {"by_tier": _to_jsonable(by_tier), "track_record": _to_jsonable(record)}
+            cache["data"] = {
+                "by_tier": _to_jsonable(by_tier),
+                "by_kind": _to_jsonable(by_kind),
+                "track_record": _to_jsonable(record),
+            }
             cache["computed_at"] = now
         return jsonify(cache["data"])
 

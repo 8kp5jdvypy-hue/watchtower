@@ -1,20 +1,7 @@
 import PerchMark from './PerchMark'
+import { cardHeadline } from '../signalHeadlines'
+import { kindLabel } from '../kindLabels'
 import './SignalCard.css'
-
-// Matches the `kind` values detectors.py actually produces -- anything
-// not in this map falls back to a de-slugged version of the raw value,
-// so a new detector kind never renders as a blank tag.
-const KIND_LABELS = {
-  level_break: 'Level break',
-  rvol_spike: 'Volume spike',
-  range_expansion: 'Range expansion',
-  vwap_break: 'VWAP break',
-  round_number_break: 'Round number',
-  gap: 'Gap',
-}
-function kindLabel(kind) {
-  return KIND_LABELS[kind] || kind.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
-}
 
 function relativeTime(tsUtc) {
   const diffMs = Date.now() - new Date(tsUtc).getTime()
@@ -39,6 +26,17 @@ function relativeTime(tsUtc) {
 export default function SignalCard({ signal, onView }) {
   const isHigh = signal.tier === 'high'
   const Root = onView ? 'button' : 'div'
+  // signal.primary_kind is the real column (frozen at write time in
+  // runner.py -- not always kinds[0]). Falls back to kinds[0] only for
+  // pre-migration rows where primary_kind is null.
+  const primaryKind = signal.primary_kind || signal.kinds?.[0]
+  const plainHeadline = cardHeadline(primaryKind, signal.trend, signal.context_summary)
+  // The eyebrow already names the primary kind below -- listing it again
+  // as its own tag would just repeat the same word twice in one card.
+  // Secondary kinds (a cluster with more than one detector firing) still
+  // get their tag. Filtered by value, not by slicing off index 0 -- the
+  // primary kind isn't guaranteed to be first in the kinds list.
+  const secondaryKinds = signal.kinds?.filter((k) => k !== primaryKind) ?? []
   return (
     <Root
       type={onView ? 'button' : undefined}
@@ -48,7 +46,7 @@ export default function SignalCard({ signal, onView }) {
       <div className="sc-head">
         <span className="sc-head-id">
           <PerchMark size={14} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
-          <span className="sc-eyebrow">PERCH DETECTED</span>
+          <span className="sc-eyebrow">{primaryKind ? kindLabel(primaryKind) : 'PERCH DETECTED'}</span>
         </span>
         <span className={`sc-tier sc-tier-${signal.tier}`}>{signal.tier}</span>
       </div>
@@ -58,10 +56,11 @@ export default function SignalCard({ signal, onView }) {
           {signal.symbol}
           <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
         </span>
-        <p className="sc-headline">{signal.headlines}</p>
-        {signal.kinds?.length > 0 && (
+        <p className="sc-headline">{plainHeadline || signal.headlines}</p>
+        {plainHeadline && <p className="sc-headline-raw">{signal.headlines}</p>}
+        {secondaryKinds.length > 0 && (
           <div className="sc-kinds">
-            {signal.kinds.map((k) => <span className="sc-kind-tag" key={k}>{kindLabel(k)}</span>)}
+            {secondaryKinds.map((k) => <span className="sc-kind-tag" key={k}>{kindLabel(k)}</span>)}
           </div>
         )}
       </div>
