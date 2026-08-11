@@ -1,7 +1,12 @@
 .nav-progress {
   position: fixed; top: 0; left: 0; height: 2px; width: 100%;
   transform: scaleX(0); transform-origin: 0 50%;
-  background: linear-gradient(90deg, var(--cyan), var(--violet));
+  /* Cyan-only -- was a cyan/violet gradient; violet had no equivalent in
+     the app's palette (see Tier 3.1), so it's dropped rather than
+     reconciled. Same cyan-dim -> cyan progression as the app's own
+     .ac-meter-fill / signal-strength treatment, for a little depth
+     without a second color. */
+  background: linear-gradient(90deg, var(--cyan-dim), var(--cyan));
   z-index: 101; pointer-events: none;
 }
 .site-nav {

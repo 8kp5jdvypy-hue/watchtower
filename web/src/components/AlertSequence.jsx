@@ -141,12 +141,14 @@ export default function AlertSequence() {
         .set(payoff, { opacity: 0 }, 0)
 
       // Beat 2 -- one name starts to separate from the noise. The status
-      // reads SCANNING (neutral) until it doesn't.
+      // reads SCANNING (neutral) until it doesn't. Cyan, not amber -- the
+      // app's own palette has one meaning-bearing color ("Perch noticed"),
+      // not a separate "this is the anomaly" accent (see Tier 3.1).
       tl.set(statusPill, { innerText: 'SCANNING' }, 0.05)
         .call(() => setMarkState('scanning'), null, 0.05)
-        .to(chosen, { color: 'var(--amber)', scale: 1.15, duration: 0.14 }, 0.14)
+        .to(chosen, { color: 'var(--cyan)', scale: 1.15, duration: 0.14 }, 0.14)
         .set(statusPill, { innerText: 'UNUSUAL ACTIVITY' }, 0.16)
-        .to(statusPill, { color: 'var(--amber)', duration: 0.1 }, 0.16)
+        .to(statusPill, { color: 'var(--cyan)', duration: 0.1 }, 0.16)
 
       // Beat 3 -- Perch scans. Two soft rings ignite from the name itself
       // and expand outward, fading -- not a literal radar, just a pulse of

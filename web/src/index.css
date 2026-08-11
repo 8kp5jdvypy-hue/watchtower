@@ -31,12 +31,12 @@
   /* signal is the exception, not the rule */
   --cyan: #34e2ff;
   --cyan-dim: #1a7d8f;
-  --violet: #b26bff;
   --red: #ff3b4e;
-  /* Reserved for "unusual / worth a second look" inside the alert
-     experience specifically -- cyan stays the one color that means
-     "Perch noticed", amber means "this is the anomaly", never used as
-     a general brand color. 11.44:1 against --bg. */
+  /* Matches the app's own --amber exactly (web-app/src/index.css) --
+     reserved for a caveat/"worth a second look" treatment (small-sample
+     tags, historically-mixed framing), never a general brand color or an
+     "anomaly detected" indicator -- cyan is the one color that means
+     "Perch noticed" here, same as the app. 11.44:1 against --bg. */
   --amber: #ffb454;
 
   --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
