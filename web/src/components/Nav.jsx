@@ -7,7 +7,7 @@ import './PerchMark.css'
 
 const LINKS = [
   { href: '#field', label: 'What it watches' },
-  { href: '#demo', label: 'Interface' },
+  { href: '#interface', label: 'Interface' },
   { href: '#coverage', label: 'Markets' },
   { href: '#value', label: 'Why Perch' },
 ]
@@ -71,7 +71,7 @@ export default function Nav() {
             <span className="nav-live-dot" aria-hidden="true" />
           </a>
           <div className="nav-links">
-            <a href="#demo" data-cursor="link">Interface</a>
+            <a href="#interface" data-cursor="link">Interface</a>
             <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'nav' })}>Log in</a>
             <a href={withRef(SIGNUP_URL)} className="nav-cta" data-cursor="cta" onClick={() => track('signup_cta_click', { source: 'nav' })}>Sign up</a>
           </div>

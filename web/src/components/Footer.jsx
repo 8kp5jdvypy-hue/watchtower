@@ -20,7 +20,7 @@ export default function Footer() {
         <nav className="ft-nav">
           <a href="#field" data-cursor="link">What it watches</a>
           <a href="#coverage" data-cursor="link">Coverage</a>
-          <a href="#demo" data-cursor="link">The interface</a>
+          <a href="#interface" data-cursor="link">The interface</a>
           <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'footer' })}>Log in</a>
           <a href={withRef(SIGNUP_URL)} data-cursor="link" onClick={() => track('signup_cta_click', { source: 'footer' })}>Sign up</a>
         </nav>

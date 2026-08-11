@@ -9,6 +9,7 @@ import MarketField from './components/MarketField'
 import AlertSequence from './components/AlertSequence'
 import Manifesto from './components/Manifesto'
 import AlertReveal from './components/AlertReveal'
+import ProductInterface from './components/ProductInterface'
 import MarketCoverage from './components/MarketCoverage'
 import SignalGlyph from './components/SignalGlyph'
 import ProductValue from './components/ProductValue'
@@ -69,6 +70,7 @@ export default function App() {
         <AlertSequence />
         <Manifesto />
         <AlertReveal />
+        <ProductInterface />
         <MarketCoverage />
         <div className="section-divider"><SignalGlyph /></div>
         <ProductValue />
