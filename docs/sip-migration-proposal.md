@@ -5,19 +5,47 @@ its branch.** Nothing here is implemented until each phase below is
 explicitly approved — recalibration in particular is called out as its
 **own, separate approval**, not something this proposal pre-authorizes.
 
+**Revision note:** this revision replaces the original "flip three
+hardcoded literals" cutover mechanism with a single config value (see
+"Feed-site audit" and Phase 3 below), adds a stats-treatment decision
+point, a session-boundary cutover runbook, and reports the result of an
+empirical entitlement check that's since been run.
+
 ## Summary
 
 Move the detector-facing market-data feed in `tradebot/vendors/alpaca.py`
-— `fetch_daily_bars`, `fetch_intraday_bars`, `fetch_daily_bars_bulk`,
-all currently hardcoded to `DataFeed.IEX` — to SIP (the full
-consolidated tape), so the scanner evaluates against the same
-real-volume, real-spread data any other market participant sees,
-instead of IEX's single-venue slice.
+— currently three separate hardcoded `feed=DataFeed.IEX` call sites —
+to SIP (the full consolidated tape) via **one config value**, so the
+scanner evaluates against the same real-volume, real-spread data any
+other market participant sees, instead of IEX's single-venue slice, and
+so both cutover and rollback are a config flip + restart, never a code
+edit.
 
 This is a proposal to **gather the evidence and build the tooling** to
 do that migration safely — not a request to flip the feed today. The
 actual cutover (Phase 3 below) is gated on Phase 1's backtest results
 and, if needed, a separate recalibration approval.
+
+## Entitlement check: settled empirically
+
+Before any Phase 1 tooling work, ran the minimal test this proposal
+originally left as an open question: can the current Alpaca account
+(Algo Trader Plus, per `vendors/alpaca.py`'s docstring) pull
+**historical** SIP bars, not just the real-time SIP quotes the
+dashboard's `/quotes` path already proves work?
+
+Two live, read-only calls against the real account, today:
+
+| Call | Result |
+|---|---|
+| `StockBarsRequest`, `SPY`, `TimeFrame.Day`, `feed=DataFeed.SIP`, 5-day lookback | **Success** — 3 daily bars returned (most recent: 2026-08-11, close 770.03, volume 22,743,110) |
+| `StockBarsRequest`, `SPY`, `TimeFrame.Minute`, `feed=DataFeed.SIP`, full session 2026-08-11 | **Success** — 611 one-minute bars returned, 08:00 UTC through 19:07 UTC |
+
+**Settled: yes, the current entitlement covers historical SIP bars, both
+daily and intraday/minute-level — not just real-time quotes.** Phase 1
+needs no separate entitlement or cost conversation with Alpaca before
+starting. (This removes what was previously the first open question in
+this document.)
 
 ## What this explicitly does NOT touch
 
@@ -30,8 +58,9 @@ and, if needed, a separate recalibration approval.
   questions (what a human sees right now vs. what the model evaluated),
   and unifying them would just be two unrelated feeds sharing one
   on/off switch for no reason. This proposal only concerns the three
-  detector-facing calls above; the display path's SIP usage doesn't
-  change and isn't "further evidence" that the detector feed is ready.
+  detector-facing calls audited below; the display path's SIP usage
+  doesn't change and isn't "further evidence" that the detector feed is
+  ready.
 - **No threshold or tier recalibration is included here.** `TIER_HIGH`
   (3.8) and `TIER_MEDIUM` (1.9) — and every other ATR/ratio-based
   threshold in `tradebot/detectors.py` — stay exactly as they are
@@ -44,7 +73,83 @@ and, if needed, a separate recalibration approval.
   into or rushed by this migration.
 - **No change to the options/contract-selection feed**
   (`OptionsFeed.INDICATIVE` in `fetch_option_chain`) — untouched,
-  unrelated to this proposal.
+  unrelated to this proposal (see the audit below for why this is a
+  different feed *type*, not just a different value of the same one).
+
+## Feed-site audit (reconciled)
+
+Exhaustive repo-wide search (`grep -rn "feed=" tradebot/ scripts/`) finds
+**six** `feed=` call sites total, **all six in one file**,
+`tradebot/vendors/alpaca.py` — nowhere else in the codebase constructs
+its own feed selection:
+
+| # | Function | Line | Feed | In scope for this migration? |
+|---|---|---|---|---|
+| 1 | `fetch_daily_bars` | 117 | `DataFeed.IEX` | **Yes** — detector-facing |
+| 2 | `fetch_intraday_bars` | 141 | `DataFeed.IEX` | **Yes** — detector-facing |
+| 3 | `fetch_daily_bars_bulk` | 288 | `DataFeed.IEX` | **Yes** — detector-facing |
+| 4 | `fetch_latest_quote` | 159 | `DataFeed.SIP` | No — dashboard display, already SIP, out of scope per the guardrail above |
+| 5 | `fetch_latest_quotes` | 183 | `DataFeed.SIP` | No — same as #4, the batched form |
+| 6 | `fetch_option_chain` | 225 | `OptionsFeed.INDICATIVE` | No — a different feed *enum entirely* (`OptionsFeed`, not `DataFeed`); options-chain data, unrelated to equity bars/quotes |
+
+**Reconciling the 3-vs-~4 count**: this migration's actual target is 3
+sites (#1-3, all `DataFeed.IEX`, all detector-facing). If an earlier
+pass counted ~4, the most likely explanation is counting site #6
+(`OptionsFeed.INDICATIVE`) as a fourth "feed-shaped" location worth
+tracking — it does say `feed=` — even though it's a different Alpaca
+feed enum for a different data type, not a `DataFeed.IEX`/`DataFeed.SIP`
+choice at all. This document treats it as explicitly out of scope
+(table row #6), not silently uncounted.
+
+**Direct answers to the two required questions:**
+
+- **Does `scripts/fetch_cache.py` use the vendor module's feed, or its
+  own?** The vendor module's. It has no `DataFeed` import and no feed
+  logic of its own — it imports and calls `fetch_daily_bars`/
+  `fetch_intraday_bars` directly from `tradebot.vendors.alpaca`
+  (confirmed: `from tradebot.vendors.alpaca import ... fetch_daily_bars,
+  fetch_intraday_bars`). Whatever those two functions do is exactly what
+  `fetch_cache.py` gets — no separate site to track or flip.
+- **Same question for `broad_scan.py`.** Also the vendor module's, one
+  layer further removed: `broad_scan.py` has no `DataFeed` import and no
+  Alpaca import at all. `build_snapshots_from_daily_bars()` takes
+  already-fetched `bars_by_symbol` as a plain argument — the actual
+  fetch is `vendors.alpaca.fetch_daily_bars_bulk` (site #3 above),
+  called by `tradebot/runner.py`'s orchestration and handed to
+  `broad_scan.py`. Same conclusion: no separate feed site, no separate
+  flip, and — see the last open question below — no separate backtest
+  scope decision either, since it's covered by whatever site #3's
+  config value is set to.
+
+## One config value, not three literals
+
+Original design (superseded by this revision): edit the three
+`DataFeed.IEX` literals directly, as a code change, redeploying to both
+cut over and roll back. Replaced with a single environment variable —
+matching how every other environment-dependent choice in this codebase
+already works (`SESSION_COOKIE_SECURE`, `DEV_CORS_ORIGIN`, etc.):
+
+```python
+# tradebot/vendors/alpaca.py, near the top, alongside the other module
+# constants (e.g. BULK_FETCH_CHUNK_SIZE) -- read once at import time.
+_DETECTOR_FEED_ENV = os.environ.get("DETECTOR_DATA_FEED", "iex").strip().lower()
+if _DETECTOR_FEED_ENV not in ("iex", "sip"):
+    raise ValueError(f"DETECTOR_DATA_FEED must be 'iex' or 'sip', got {_DETECTOR_FEED_ENV!r}")
+DETECTOR_FEED = DataFeed.SIP if _DETECTOR_FEED_ENV == "sip" else DataFeed.IEX
+```
+
+Sites #1-3 above change from `feed=DataFeed.IEX` to `feed=DETECTOR_FEED`.
+Sites #4-6 are untouched literals, exactly as today — this variable has
+no effect on them, by construction (they never reference it).
+
+**Why this matters for cutover and rollback specifically**: since
+`docker-compose.yml`'s services already read `env_file: .env`, changing
+`DETECTOR_DATA_FEED` in `.env` and running `docker compose up -d` (no
+`--build` needed — no image content changed, only the env file Compose
+already tracks) is sufficient to take effect on next container
+recreate. Cutover and rollback both become **the same one-line config
+edit + restart**, symmetric, no git revert, no rebuild, no redeploy
+pipeline — see the revised Phase 3 and Rollback sections below.
 
 ## Why the feed matters here specifically
 
@@ -85,16 +190,18 @@ regardless of what the live cache becomes later.
 ## Phase 1 — build SIP replay capability, gather backtest evidence
 
 **Nothing here touches the live scanner.** This is entirely a replay/
-backtest exercise, following the existing pattern:
+backtest exercise, following the existing pattern, now unblocked by the
+entitlement check above:
 
 1. Add a SIP-feed variant of the cache-fetch path — either a
-   `--feed sip` flag on `scripts/fetch_cache.py` or a parallel script —
-   that pulls the same daily + 5-minute bar shapes `ReplayMarketData`
-   already expects, into a **separate** directory (e.g.
-   `data/cache-sip/{symbol}/`), for the same historical session window
-   already cached under IEX. This is new tooling, not a change to the
-   three hardcoded `DataFeed.IEX` call sites in `vendors/alpaca.py` —
-   those stay IEX until Phase 3.
+   `--feed sip` flag on `scripts/fetch_cache.py` (reading the same
+   `DETECTOR_FEED`-style choice, independently of the live
+   `DETECTOR_DATA_FEED` env var so a developer can build the SIP cache
+   without touching the live scanner's config at all) or a parallel
+   script — that pulls the same daily + 5-minute bar shapes
+   `ReplayMarketData` already expects, into a **separate** directory
+   (e.g. `data/cache-sip/{symbol}/`), for the same historical session
+   window already cached under IEX.
 2. Run `scripts/replay.py` (or `python -m tradebot.runner --replay-date`)
    twice over the same session set — once against `data/cache/` (IEX,
    existing), once against `data/cache-sip/` (new) — into two separate
@@ -127,10 +234,11 @@ backtest exercise, following the existing pattern:
    write-ups in that doc. This proposal does not pre-approve any
    resulting values; it only commits to producing the evidence honestly.
 
-## Phase 2 — decide on recalibration (separate approval, may not be needed at all)
+## Phase 2 — two decision points (both separate approvals)
 
-Gated entirely on Phase 1's output. Three possible outcomes, all
-legitimate:
+Gated entirely on Phase 1's output.
+
+### Decision point A: recalibration
 
 - Evidence shows thresholds hold up fine under SIP (unlikely for
   `rvol_spike` given the volume mismatch, plausible for the ATR-priced
@@ -142,48 +250,139 @@ legitimate:
   (same "n=5 in some buckets" caution `SCANNER_PLAN.md` already applies
   elsewhere) — extend the backtest window rather than guess.
 
-No live cutover happens while this phase is open.
+### Decision point B: how the stats functions treat pre- vs post-cutover history
+
+**This is new in this revision — not addressed before.** None of
+`historical_performance()`, `tier_performance()`, or `kind_performance()`
+(`tradebot/journal.py`) currently have any notion of "which feed
+produced this row." All three query the full journal unconditionally
+and blend everything into one continuation-rate/avg-return number, with
+only `MIN_HISTORY_SAMPLE = 5` as a floor. Left alone, the very first
+SIP-fed session would start blending a handful of SIP rows into
+`/performance`, `/start`'s live significance check, and every per-kind
+card in the web dashboard's Performance tab — silently mixing two
+different measurement regimes (different prices, different volume
+baselines) into numbers that already carry real weight (`SCANNER_PLAN.md`'s
+own n=466 HIGH-tier coin-flip verdict is exactly this kind of stat).
+
+A complication specific to this revision's config-flip design: the
+existing `detections.code_version` column (a git short-hash, written by
+`journal.code_version()`) does **not** change at cutover under the
+config-value mechanism above, since cutover is an env var flip, not a
+code change — so `code_version` can't be used to tell IEX-era rows from
+SIP-era rows after the fact. **Implementing either option below
+requires adding an explicit `data_feed` column to `detections`**,
+written from `DETECTOR_FEED`'s value at journal-write time — a schema
+addition, not something either option can skip.
+
+**Option 1 — post-cutover-only (recommended).** Once `data_feed`
+exists, filter all three stats functions to the currently-live feed
+value (`WHERE data_feed = 'sip'` once SIP is live), discarding
+pre-cutover IEX rows from these three functions' queries entirely
+(the raw rows stay in the journal — nothing is deleted, only excluded
+from these specific aggregates). Combined with the existing
+`MIN_HISTORY_SAMPLE` floor, this is the same "never report a stat built
+on too few points" discipline the project already applies everywhere
+else, just triggered by a feed change instead of a brand-new detector.
+  - *Pro*: never blends two measurement regimes into one number — the
+    exact failure mode `SCANNER_PLAN.md`'s "never fabricate a stat"
+    ethos exists to prevent.
+  - *Con*: `/performance`, `/start`'s significance check, and the
+    per-kind Performance-tab cards go quiet (report `None`/"not enough
+    data yet") for a real stretch of time post-cutover — the existing
+    n=466 HIGH-tier verdict effectively resets to n=0 for "is this
+    real" purposes, and a lot of hard-won IEX sample size stops
+    counting toward these specific numbers, permanently.
+
+**Option 2 — segmented eras.** Keep both eras, report them as two
+explicitly labeled segments (e.g. "IEX era, n=X, through
+{cutover-date}" and "SIP era, n=Y, since {cutover-date}") side by side,
+rather than blending or discarding either.
+  - *Pro*: no history thrown away; honest about two regimes existing
+    instead of picking one silently.
+  - *Con*: meaningfully more implementation surface — not just the
+    three `journal.py` functions, but every consumer that renders their
+    output (`render_morning_briefing`, `/start`'s onboarding text,
+    `/performance`'s Telegram reply, the web dashboard's Performance.jsx
+    per-kind cards) needs a two-segment layout, plus a copy decision on
+    how to explain "two eras" in one Telegram message without it
+    reading as hedging. Doesn't resolve cleanly if the feed is ever
+    flipped a second time (three-way segmentation, and so on).
+
+**This is explicitly the operator's decision, not resolved by this
+proposal.** Recommendation is Option 1, matching the project's existing
+small-sample discipline, but Option 2 is a legitimate choice if
+preserving IEX-era sample size matters more than the quiet period.
+Whichever is chosen becomes part of Phase 3's implementation scope
+(the `data_feed` column is needed either way).
+
+No live cutover happens while Phase 2 (either decision point) is open.
 
 ## Phase 3 — live cutover
 
-Only once Phase 1 (and Phase 2, if triggered) are resolved:
+Only once Phase 1 and both of Phase 2's decision points are resolved:
 
-1. Flip the three `feed=DataFeed.IEX` literals in `vendors/alpaca.py`
-   (`fetch_daily_bars`, `fetch_intraday_bars`, `fetch_daily_bars_bulk`)
-   to `DataFeed.SIP`, together, in one change — not one call site at a
-   time, per the existing docstrings' own instruction on this ("flip
-   together... only after a real recalibration pass").
-2. **Record the cutover timestamp** — both as a code-level marker (e.g.
-   a dated entry in `docs/PROGRAM-STATE.md`, matching this doc's own
-   "point-in-time facts" convention) and, if useful for later analysis,
-   a sentinel written to `data/journal.db` or a `data/cache/` marker
-   file — so any future query into detector behavior can cleanly split
-   "before" from "after" without relying on git-log archaeology.
-3. Deploy through the existing path (`docs/DEPLOYMENT.md`'s
-   `git pull && docker compose up -d --build`, recreating `runner` and
-   `worker`), during a low-stakes window (e.g. a weekend, before the
-   next session open) so the first live SIP-fed session is being
-   watched, not discovered after the fact.
+1. Ship the `DETECTOR_FEED` config-value change (see "One config value,
+   not three literals" above) and, per Decision point B, the
+   `data_feed` column plus whichever stats treatment was chosen — as a
+   normal code change/deploy, same as any other. This step does **not**
+   itself flip the feed; `DETECTOR_DATA_FEED` still defaults to `"iex"`,
+   so this deploy is a no-op for live behavior until the env var is
+   actually set.
+2. **Flip at a session boundary, not mid-session.** `tradebot.runner`
+   already "runs once per trading day and exits at the close"
+   (`README.md`) — set `DETECTOR_DATA_FEED=sip` in `.env` and
+   `docker compose up -d` (no rebuild needed) during the window between
+   one session's close and the next session's open, so no single
+   session's bars are ever a mix of IEX and SIP mid-stream. Never flip
+   while `runner` is actively scanning.
+3. **Record the cutover timestamp** — a dated entry in
+   `docs/PROGRAM-STATE.md` (matching this doc's own "point-in-time
+   facts" convention), which combined with the `data_feed` column is
+   enough for any future query to cleanly split "before" from "after"
+   without git-log archaeology.
+
+### First-session observation checklist (observe and report only)
+
+For the first live session after cutover — **no threshold changes
+happen based on this checklist, regardless of what it shows**. One
+session is not the train/test evidence Phase 1/2's discipline requires;
+this is a sanity check for "did anything actually break," not a second
+round of calibration:
+
+- **Signal rate** — HIGH/MEDIUM/log-tier counts for the session,
+  compared against the range Phase 1's backtest predicted for a session
+  like this one. Wildly outside that range (not just "different") is a
+  signal something's actually broken, not just noisier.
+- **Volume-multiple distribution, live vs. backtest** — spot-check a
+  handful of watchlist symbols' actual live SIP cumulative volume
+  against what the IEX-baseline `avg_cum_volume_by_bar` anchors
+  expected, to see in practice, on the first real day, how far live
+  reality tracked Phase 1's backtest numbers.
+- **Error logs** — `docker compose logs runner` / `data/runner_live.log`
+  for exceptions, especially anywhere touching the three vendor call
+  sites or `rvol_spike` specifically.
+- If something looks genuinely broken rather than merely different,
+  that's what the kill switches and the rollback below are for — not an
+  ad-hoc threshold tweak in the moment.
 
 ## Rollback plan
 
-Because this is a three-line feed-literal change with no schema or
-journal-format impact (`Bar`/`Detection`/`DailyAnchors` shapes are
-identical regardless of which feed populated them), rollback is
-**revert the commit, redeploy** — the same `docker compose up -d --build`
-path as any other deploy, same-day. Two things make this safe:
+Because cutover is now a config value, not a code edit, rollback is the
+same operation in reverse: set `DETECTOR_DATA_FEED=iex` (or delete the
+line — `"iex"` is the default) in `.env`, `docker compose up -d` (no
+rebuild), same-day, no git revert needed. Two things make this safe:
 
 - `data/journal.db` is append-only and never needs correcting — a
   session scanned under SIP is journaled as real data either way; it
   doesn't need to be "undone," only future sessions need to go back to
   IEX. `write_cluster`'s upsert-by-identity behavior means a rolled-back
-  redeploy re-scanning the same session would only affect that one
-  session's rows, not history.
+  session's rows aren't touched by anything after it.
 - The existing kill switches (`data/HALT`, per-user `/halt`,
-  `WATCHTOWER_KILL_SWITCH`) already stop alerting immediately if the
-  post-cutover session looks wrong in a way that can't wait for a
-  redeploy — no new stop mechanism needed for this migration
-  specifically.
+  `WATCHTOWER_KILL_SWITCH`) already stop alerting immediately if a
+  post-cutover session looks wrong in a way that can't wait even for a
+  same-day config rollback — no new stop mechanism needed for this
+  migration specifically.
 
 **Rollback trigger criteria** (to define concretely before Phase 3, not
 left to judgment in the moment): a maximum acceptable deviation in
@@ -194,13 +393,8 @@ once real backtest numbers exist to anchor them against.
 
 ## Open questions
 
-- Does the current Alpaca account entitlement (Algo Trader Plus, per
-  `vendors/alpaca.py`'s docstring — the same entitlement the SIP
-  display path already runs under per `docs/PROGRAM-STATE.md`) cover
-  SIP historical-bar requests at the volume Phase 1's backtest would
-  need, or only real-time SIP quotes? Worth confirming with Alpaca
-  directly before Phase 1 tooling work starts, since it changes whether
-  Phase 1 needs its own entitlement/cost conversation first.
+- ~~Does the current Alpaca account entitlement cover SIP historical-bar
+  requests?~~ **Settled above — yes**, both daily and intraday.
 - How large a backtest window does Phase 1 need to trust the volume-
   multiple distribution and signal-count comparison? `SCANNER_PLAN.md`'s
   own "Best hours" section flags n=5-per-bucket as too thin to trust —
@@ -208,18 +402,22 @@ once real backtest numbers exist to anchor them against.
   cached by default (20 sessions per `fetch_cache.py`'s current
   `--sessions-n` default).
 - `broad_scan.py`'s own RVOL_THRESHOLD check (Stage 1 screening across
-  the full active universe, not just the fixed watchlist) has the
-  identical IEX-baseline dependency per its own docstring — same
-  question, likely same answer, but worth an explicit line item in
-  Phase 1's scope rather than assuming it's covered by the watchlist
-  backtest.
+  the full active universe, not just the fixed watchlist) shares the
+  identical IEX-baseline dependency, per its own docstring — the
+  feed-site audit above confirms it has no separate feed site to flip
+  (it consumes `fetch_daily_bars_bulk`'s output directly), so it
+  automatically follows whatever `DETECTOR_DATA_FEED` is set to. Still
+  worth an explicit line item in Phase 1's backtest scope (the broader
+  universe, not just the 17-symbol watchlist) rather than assuming
+  watchlist-only backtest evidence covers it.
 
 ## What approval unlocks at each stage
 
 - Approving this document: unlocks Phase 0 (archive) and Phase 1
   (SIP replay tooling + backtest evidence-gathering) only. No live
-  feed change.
-- Phase 1's output, once delivered: a decision point on Phase 2 —
-  recalibrate or don't, as its own approval.
-- Phase 2 resolved (either "no recalibration needed" or a separately
-  approved set of new values): unlocks Phase 3, the actual live cutover.
+  feed change, no schema change.
+- Phase 1's output, once delivered: two decision points on Phase 2 —
+  recalibration (A) and stats treatment (B) — each its own approval.
+- Both resolved: unlocks Phase 3 — ship the config value + `data_feed`
+  column (still IEX by default), then a separate, deliberate
+  session-boundary flip of `DETECTOR_DATA_FEED` itself.
