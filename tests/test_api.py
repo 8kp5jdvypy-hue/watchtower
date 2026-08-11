@@ -15,7 +15,7 @@ from tradebot import accounts
 from tradebot.api.app import create_app
 from tradebot.detectors import Detection
 from tradebot.email_sender import DevEmailSender
-from tradebot.journal import write_cluster
+from tradebot.journal import CLOSE_MARK_OFFSET_MIN, write_cluster
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 
@@ -287,6 +287,50 @@ def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, clie
     # (there are none), so historical_performance() correctly reports
     # nothing rather than a stat built on too little data.
     assert body["history"] is None
+    # No marks backfilled yet (backfill_marks() hasn't run for this
+    # session) -- an honest empty list, not a fabricated "pending" entry.
+    assert body["marks"] == []
+
+
+def test_signal_detail_includes_backfilled_marks_in_after_detection_order(app, client):
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    detection_id = write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="SPY",
+        ts_utc=now.isoformat(),
+        kinds="gap",
+        headlines="SPY gapped up",
+        score=5.0,
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("SPY", "gap", now, 5.0, "SPY gapped up", {})],
+        code_version_str="test",
+    )
+    # Inserted out of order and including the CLOSE_MARK_OFFSET_MIN
+    # sentinel (-1) -- the endpoint must still return them ordered
+    # 15/30/60 then close last, not sorted numerically (which would put
+    # -1 first).
+    for offset, price in [(60, 455.0), (15, 451.0), (CLOSE_MARK_OFFSET_MIN, 458.0), (30, 453.0)]:
+        app.journal_conn.execute(
+            "INSERT INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
+            (detection_id, offset, price),
+        )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "marks@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get(f"/signals/{detection_id}")
+    body = response.get_json()
+    assert body["marks"] == [
+        {"offset_min": 15, "at_close": False, "price": 451.0},
+        {"offset_min": 30, "at_close": False, "price": 453.0},
+        {"offset_min": 60, "at_close": False, "price": 455.0},
+        {"offset_min": None, "at_close": True, "price": 458.0},
+    ]
 
 
 def test_signal_detail_404s_for_an_unknown_id(app, client):

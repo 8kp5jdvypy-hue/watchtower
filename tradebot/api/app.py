@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
-from tradebot.journal import historical_performance, tier_performance
+from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, tier_performance
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import track_record
@@ -402,6 +402,26 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             if primary_kind and trend
             else None
         )
+        # Real forward prices for THIS detection, once backfilled -- see
+        # journal.backfill_marks(), which only runs once, at the end of
+        # the session that produced this detection. Empty until then --
+        # never a live/current price, and never fabricated for an
+        # interval that hasn't been reached yet. at_close marks the
+        # CLOSE_MARK_OFFSET_MIN sentinel row so the frontend never needs
+        # to know that -1 means "session close." Render as "After
+        # detection" + offset_min, or "At session close" when at_close is
+        # true -- never as a live quote.
+        mark_rows = app.journal_conn.execute(
+            "SELECT offset_min, price FROM marks WHERE detection_id = ?", (id_,)
+        ).fetchall()
+        marks = [
+            {
+                "offset_min": None if offset == CLOSE_MARK_OFFSET_MIN else offset,
+                "at_close": offset == CLOSE_MARK_OFFSET_MIN,
+                "price": price,
+            }
+            for offset, price in sorted(mark_rows, key=lambda r: (r[0] == CLOSE_MARK_OFFSET_MIN, r[0]))
+        ]
         return jsonify(
             {
                 "id": id_,
@@ -422,6 +442,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "event_kind": event_kind,
                 "event_severity": event_severity,
                 "history": _to_jsonable(history),
+                "marks": marks,
             }
         )
 
