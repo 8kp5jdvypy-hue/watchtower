@@ -179,6 +179,71 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     assert len(feed_body["signals"]) == 1
     assert feed_body["signals"][0]["symbol"] == "SPY"
     assert feed_body["signals"][0]["kinds"] == ["gap"]
+    # No primary_kind was passed to write_cluster above -- a legacy-shaped
+    # row, same as anything written before that column existed. Never
+    # fabricated into a guess.
+    assert feed_body["signals"][0]["primary_kind"] is None
+    assert feed_body["signals"][0]["context_summary"] is None
+
+
+def test_signals_feed_includes_a_context_summary_for_level_break(app, client):
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    context = {"level_name": "prior_high", "level": 505.10, "close": 507.30, "atr14": 2.0, "direction": "up"}
+    write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="TSLA",
+        ts_utc=now.isoformat(),
+        kinds="level_break",
+        headlines="TSLA broke prior_high (505.10) up, 2.20 ATR",
+        score=5.0,
+        close=507.30,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("TSLA", "level_break", now, 5.0, "TSLA broke prior_high (505.10) up, 2.20 ATR", context)],
+        code_version_str="test",
+        primary_kind="level_break",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "level-break@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    body = client.get("/signals/feed").get_json()
+    signal = body["signals"][0]
+    assert signal["primary_kind"] == "level_break"
+    assert signal["context_summary"] == {"level_name": "prior_high", "level_value": 505.10}
+
+
+def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, client):
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    context = {"cum_volume": 1000, "baseline": 300, "bar_index": 5}
+    write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="QQQ",
+        ts_utc=now.isoformat(),
+        kinds="rvol_spike",
+        headlines="QQQ volume spike",
+        score=5.0,
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("QQQ", "rvol_spike", now, 5.0, "QQQ volume spike", context)],
+        code_version_str="test",
+        primary_kind="rvol_spike",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "rvol@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    body = client.get("/signals/feed").get_json()
+    signal = body["signals"][0]
+    assert signal["primary_kind"] == "rvol_spike"
+    assert signal["context_summary"] is None
 
 
 def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, client):

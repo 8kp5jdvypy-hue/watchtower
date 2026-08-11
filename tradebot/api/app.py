@@ -89,6 +89,34 @@ def _to_jsonable(obj):
     return obj
 
 
+# One or two fields each kind's card headline actually needs from its
+# context -- never the full blob (see /signals/<id> for that). Extend this
+# dict, not the endpoints' response shapes, if a future kind needs more.
+# level_break's raw context field is "level" (see detectors.py); renamed
+# to level_value here so it isn't ambiguous next to level_name.
+_HEADLINE_CONTEXT_FIELDS = {
+    "level_break": (("level_name", "level_name"), ("level_value", "level")),
+}
+
+
+def _context_summary(kinds_list: list[str], primary_kind: str | None, context_json: str | None) -> dict | None:
+    """Just the field(s) a card headline needs from the PRIMARY detector's
+    context, keyed by position in `kinds_list` (contexts are written in
+    the same order as kinds -- see journal.write_cluster). None for any
+    kind without an entry in _HEADLINE_CONTEXT_FIELDS, or when there's
+    nothing recorded to read from."""
+    fields = _HEADLINE_CONTEXT_FIELDS.get(primary_kind)
+    if not fields or not context_json or primary_kind not in kinds_list:
+        return None
+    contexts = json.loads(context_json)
+    idx = kinds_list.index(primary_kind)
+    if idx >= len(contexts):
+        return None
+    ctx = contexts[idx]
+    summary = {out_key: ctx[src_key] for out_key, src_key in fields if src_key in ctx}
+    return summary or None
+
+
 def _linked_telegram_user_id(conn, account: accounts.Account) -> int | None:
     row = conn.execute(
         "SELECT provider_user_id FROM linked_identities WHERE account_id = ? AND provider = ?",
@@ -299,7 +327,8 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
 
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
-            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted "
+            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
+            "primary_kind, context_json "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -309,14 +338,18 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         query += " ORDER BY ts_utc DESC LIMIT ?"
         params.append(limit)
         rows = app.journal_conn.execute(query, params).fetchall()
-        return [
-            {
+        result = []
+        for row in rows:
+            kinds_list = row[4].split(",")
+            primary_kind = row[10]
+            result.append({
                 "id": row[0], "ts_utc": row[1], "session": row[2], "symbol": row[3],
-                "kinds": row[4].split(","), "headlines": row[5], "score": row[6],
+                "kinds": kinds_list, "headlines": row[5], "score": row[6],
                 "tier": row[7], "trend": row[8], "alerted": bool(row[9]),
-            }
-            for row in rows
-        ]
+                "primary_kind": primary_kind,
+                "context_summary": _context_summary(kinds_list, primary_kind, row[11]),
+            })
+        return result
 
     @app.route("/signals/feed")
     @login_required
