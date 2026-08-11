@@ -30,6 +30,29 @@ function pct(value) {
   return value == null ? '—' : `${(value * 100).toFixed(0)}%`
 }
 
+// The fixed checkpoints journal.backfill_marks() ever writes (see
+// tradebot/journal.py's OUTCOME_OFFSETS_MIN) -- a stable UI constant, not
+// detection logic. "At session close" is handled separately below since
+// it isn't a fixed offset.
+const AFTER_DETECTION_OFFSETS = [15, 30, 60]
+
+// One row per possible checkpoint, whether or not it's backfilled yet --
+// a signal detected late in the session may never get all of them, and
+// that's normal, not an error (see /signals/<id>'s marks field: empty
+// until journal.backfill_marks() runs, once, at session end). Missing
+// rows render a quiet "Pending" state rather than being hidden outright,
+// so the section reads as "still developing," not "broken."
+function afterDetectionRows(marks) {
+  return [
+    ...AFTER_DETECTION_OFFSETS.map((offsetMin) => ({
+      key: `offset-${offsetMin}`,
+      label: `+${offsetMin} min after detection`,
+      mark: marks?.find((m) => m.offset_min === offsetMin && !m.at_close),
+    })),
+    { key: 'close', label: 'At session close', mark: marks?.find((m) => m.at_close) },
+  ]
+}
+
 // Matches .signal-detail's CSS transition duration -- see sd-panel-in/
 // sd-sheet-in. Kept in one place so the JS unmount delay and the CSS
 // animation length can't silently drift apart.
@@ -205,6 +228,29 @@ export default function SignalDetail({ id, onClose }) {
                 </p>
               )}
             </section>
+
+            {/* % is derived strictly against `close` (price at detection,
+                the same field Market context shows below) -- never a live
+                quote. Real backfilled outcomes only, see afterDetectionRows(). */}
+            {data.close != null && (
+              <section className="sd-section">
+                <h2 className="sd-section-title">After detection</h2>
+                <ul className="sd-marks-list">
+                  {afterDetectionRows(data.marks).map(({ key, label, mark }) => (
+                    <li className="sd-mark-row" key={key}>
+                      <span className="sd-mark-label">{label}</span>
+                      {mark ? (
+                        <span className={`sd-mark-value ${mark.price >= data.close ? 'trend-up' : 'trend-down'}`}>
+                          ${mark.price.toFixed(2)} ({(((mark.price - data.close) / data.close) * 100).toFixed(2)}%)
+                        </span>
+                      ) : (
+                        <span className="sd-mark-pending">Pending</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
 
             <section className="sd-section">
               <h2 className="sd-section-title">Market context</h2>

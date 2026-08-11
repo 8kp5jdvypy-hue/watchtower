@@ -146,6 +146,20 @@
 }
 .sd-context-value { font-family: var(--display); font-size: 1.05rem; font-weight: 600; color: var(--ink); }
 
+.sd-marks-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.45rem; }
+.sd-mark-row {
+  /* wrap, not nowrap: label + value together can exceed a 375px panel's
+     content width at this font size -- wraps to two lines instead of
+     overflowing horizontally. */
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.3rem 1rem;
+  font-family: var(--mono); font-size: 0.8rem;
+}
+.sd-mark-label { color: var(--ink-faint); }
+.sd-mark-value { color: var(--ink); font-weight: 600; }
+.sd-mark-value.trend-up { color: var(--up); }
+.sd-mark-value.trend-down { color: var(--down); }
+.sd-mark-pending { color: var(--ink-faint); }
+
 .sd-history { margin: 0; color: var(--ink-dim); font-size: 0.86rem; line-height: 1.6; }
 .sd-history b { color: var(--ink); }
 .sd-history-empty { color: var(--ink-faint); }
