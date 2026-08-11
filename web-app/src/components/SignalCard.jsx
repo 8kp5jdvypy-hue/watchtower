@@ -23,9 +23,14 @@ function relativeTime(tsUtc) {
 // footer, per the brief's "card should feel like it's transitioning
 // into the intelligence detail view" note. Falls back to a plain,
 // non-interactive div when no onView is passed.
-export default function SignalCard({ signal, onView }) {
+export default function SignalCard({ signal, quote, onView }) {
   const isHigh = signal.tier === 'high'
   const Root = onView ? 'button' : 'div'
+  // Real live quote (SIP, via /quotes) against price at detection --
+  // both real fields, never estimated. Absent whenever either side is
+  // missing: no quote fetched yet, the vendor had none for this symbol,
+  // or (rare, legacy rows) close was never recorded.
+  const changePct = quote && signal.close != null ? ((quote.last - signal.close) / signal.close) * 100 : null
   // signal.primary_kind is the real column (frozen at write time in
   // runner.py -- not always kinds[0]). Falls back to kinds[0] only for
   // pre-migration rows where primary_kind is null.
@@ -52,10 +57,20 @@ export default function SignalCard({ signal, onView }) {
       </div>
 
       <div className="sc-body">
-        <span className={`sc-symbol ${signal.trend === 'up' ? 'trend-up' : 'trend-down'}`}>
-          {signal.symbol}
-          <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
-        </span>
+        <div className="sc-symbol-row">
+          <span className={`sc-symbol ${signal.trend === 'up' ? 'trend-up' : 'trend-down'}`}>
+            {signal.symbol}
+            <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
+          </span>
+          {/* Colored by raw price direction since detection, same
+              convention as the modal's "After detection" marks -- not
+              flipped for the signal's own directional call. */}
+          {changePct != null && (
+            <span className={`sc-change ${changePct >= 0 ? 'trend-up' : 'trend-down'}`}>
+              {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
+            </span>
+          )}
+        </div>
         <p className="sc-headline">{plainHeadline || signal.headlines}</p>
         {plainHeadline && <p className="sc-headline-raw">{signal.headlines}</p>}
         {secondaryKinds.length > 0 && (

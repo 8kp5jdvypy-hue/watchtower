@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef } from 'react'
 import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
 import { useReducedMotion, useFinePointer, useIsMobile } from '../hooks/usePrefs'
 import { PerchMarkGlyph } from './PerchMark'
 import './MarketField.css'
@@ -133,20 +132,27 @@ export default function MarketField() {
     <section className="market-field" ref={rootRef} id="field">
       <div className="mf-inner" ref={fieldRef}>
         <div className="mf-radar-ring" aria-hidden="true" />
-        {items.map((it, i) => (
-          <span
-            key={i}
-            className={`mf-sym${it.isChosen ? ' is-chosen' : ''}`}
-            style={{
-              left: `${it.left}%`,
-              top: `${it.top}%`,
-              fontSize: `${it.size}rem`,
-              animationDelay: `${it.delay}s`,
-            }}
-          >
-            {it.sym}
-          </span>
-        ))}
+        {/* Ticker symbols carry no semantic meaning individually (unlike
+            AlertSequence's equivalent .as-field, which already wraps its
+            own scattered symbols in an aria-hidden container) -- without
+            this, a screen reader has 110 meaningless single-word text
+            nodes to step through here. */}
+        <div aria-hidden="true">
+          {items.map((it, i) => (
+            <span
+              key={i}
+              className={`mf-sym${it.isChosen ? ' is-chosen' : ''}`}
+              style={{
+                left: `${it.left}%`,
+                top: `${it.top}%`,
+                fontSize: `${it.size}rem`,
+                animationDelay: `${it.delay}s`,
+              }}
+            >
+              {it.sym}
+            </span>
+          ))}
+        </div>
         {/* The Perch falcon mark, diving -- same glyph as PerchMark
             (nav/footer/favicon) and kestrelTexture.js (the hero), rotated
             into a dive angle. Wings-spread by construction, so the same
@@ -158,9 +164,14 @@ export default function MarketField() {
             <PerchMarkGlyph fill={null} accent={false} />
           </g>
         </svg>
+        {/* Normally these digits are mutated by GSAP's innerText tween
+            (0 -> 12481 -> 47 -> 3); reduced-motion users never run that
+            timeline, so render the resting/final frame directly instead
+            of leaving it stuck at its opening "0" -- the section's whole
+            payoff, otherwise invisible to them. */}
         <div className="mf-funnel" aria-hidden="true">
-          <span className="mf-funnel-num">0</span>
-          <span className="mf-funnel-lbl">MARKET EVENTS</span>
+          <span className="mf-funnel-num">{reduced ? 3 : 0}</span>
+          <span className="mf-funnel-lbl">{reduced ? 'WORTH YOUR ATTENTION' : 'MARKET EVENTS'}</span>
           <span className="demo-tag">Demo</span>
         </div>
         <div className="mf-caption">

@@ -143,6 +143,85 @@ def test_watchlist_reflects_a_linked_telegram_users_custom_list(app, client):
     assert body["symbols"] == ["AAPL", "TSLA"]
 
 
+def _fake_quote(symbol, last):
+    from tradebot.marketdata import Quote
+
+    return Quote(symbol=symbol, ts=datetime.now(timezone.utc), bid=last - 0.01, ask=last + 0.01, last=last)
+
+
+def test_quotes_returns_real_quotes_for_watchlist_symbols(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    def fake_fetch_quotes(symbols):
+        return {s: _fake_quote(s, 100.0) for s in symbols}
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", fake_fetch_quotes)
+
+    token = _request_and_extract_token(app, client, "quotes1@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get("/quotes?symbols=SPY,QQQ")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert set(body["quotes"].keys()) == {"SPY", "QQQ"}
+    assert body["quotes"]["SPY"]["last"] == 100.0
+
+
+def test_quotes_silently_drops_symbols_outside_the_watchlist(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", lambda symbols: {s: _fake_quote(s, 50.0) for s in symbols})
+
+    token = _request_and_extract_token(app, client, "quotes2@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    # DOGE isn't on the default watchlist -- same "no oracle for what's
+    # allowed" discipline as /events: silently excluded, not a 400.
+    response = client.get("/quotes?symbols=SPY,DOGE")
+    body = response.get_json()
+    assert set(body["quotes"].keys()) == {"SPY"}
+
+
+def test_quotes_omits_a_symbol_the_vendor_has_no_quote_for(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    # Real discipline mirrored from fetch_daily_bars_bulk/fetch_latest_quotes:
+    # a symbol with no quote is simply absent, never padded with a fabricated one.
+    monkeypatch.setattr(api_app_module, "fetch_quotes", lambda symbols: {"SPY": _fake_quote("SPY", 100.0)})
+
+    token = _request_and_extract_token(app, client, "quotes3@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get("/quotes?symbols=SPY,QQQ")
+    body = response.get_json()
+    assert set(body["quotes"].keys()) == {"SPY"}
+
+
+def test_quotes_caches_within_the_ttl(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    call_count = {"n": 0}
+
+    def counting_fetch_quotes(symbols):
+        call_count["n"] += 1
+        return {s: _fake_quote(s, 100.0) for s in symbols}
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", counting_fetch_quotes)
+
+    token = _request_and_extract_token(app, client, "quotes4@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    client.get("/quotes?symbols=SPY")
+    client.get("/quotes?symbols=SPY")
+    client.get("/quotes?symbols=SPY")
+    assert call_count["n"] == 1  # only the first request actually fetched it
+
+    # Force staleness and confirm it re-fetches rather than caching forever.
+    app._quote_cache["SPY"] = (app._quote_cache["SPY"][0], datetime.now(timezone.utc) - timedelta(seconds=api_app_module.QUOTE_CACHE_TTL_SECONDS + 1))
+    client.get("/quotes?symbols=SPY")
+    assert call_count["n"] == 2
+
+
 def test_activity_is_empty_with_no_linked_telegram_identity(app, client):
     token = _request_and_extract_token(app, client, "frank@example.com")
     client.get(f"/auth/magic-link/verify?token={token}")
@@ -184,6 +263,7 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     # fabricated into a guess.
     assert feed_body["signals"][0]["primary_kind"] is None
     assert feed_body["signals"][0]["context_summary"] is None
+    assert feed_body["signals"][0]["close"] == 450.0
 
 
 def test_signals_feed_includes_a_context_summary_for_level_break(app, client):

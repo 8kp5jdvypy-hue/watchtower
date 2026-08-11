@@ -31,12 +31,12 @@
   /* signal is the exception, not the rule */
   --cyan: #34e2ff;
   --cyan-dim: #1a7d8f;
-  --violet: #b26bff;
   --red: #ff3b4e;
-  /* Reserved for "unusual / worth a second look" inside the alert
-     experience specifically -- cyan stays the one color that means
-     "Perch noticed", amber means "this is the anomaly", never used as
-     a general brand color. 11.44:1 against --bg. */
+  /* Matches the app's own --amber exactly (web-app/src/index.css) --
+     reserved for a caveat/"worth a second look" treatment (small-sample
+     tags, historically-mixed framing), never a general brand color or an
+     "anomaly detected" indicator -- cyan is the one color that means
+     "Perch noticed" here, same as the app. 11.44:1 against --bg. */
   --amber: #ffb454;
 
   --display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
@@ -95,6 +95,15 @@ button { font: inherit; color: inherit; }
   animation: pulse 2.4s ease-in-out infinite;
 }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+.skip-link {
+  position: absolute; top: -100%; left: 1rem; z-index: 1000;
+  background: var(--cyan); color: var(--bg);
+  font-family: var(--mono); font-size: 0.85rem; font-weight: 600;
+  padding: 0.75em 1.2em; border-radius: 4px; text-decoration: none;
+  transition: top 0.2s ease;
+}
+.skip-link:focus { top: 1rem; }
 
 .demo-tag {
   font-family: var(--mono);

@@ -9,6 +9,7 @@ import MarketField from './components/MarketField'
 import AlertSequence from './components/AlertSequence'
 import Manifesto from './components/Manifesto'
 import AlertReveal from './components/AlertReveal'
+import ProductInterface from './components/ProductInterface'
 import MarketCoverage from './components/MarketCoverage'
 import SignalGlyph from './components/SignalGlyph'
 import ProductValue from './components/ProductValue'
@@ -59,16 +60,18 @@ export default function App() {
 
   return (
     <>
+      <a href="#main-content" className="skip-link">Skip to content</a>
       <BootSequence />
       <Grain />
       <CustomCursor />
       <Nav />
-      <main>
+      <main id="main-content">
         <Hero />
         <MarketField />
         <AlertSequence />
         <Manifesto />
         <AlertReveal />
+        <ProductInterface />
         <MarketCoverage />
         <div className="section-divider"><SignalGlyph /></div>
         <ProductValue />

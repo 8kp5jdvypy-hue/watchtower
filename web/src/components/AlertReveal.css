@@ -71,3 +71,9 @@
 @media (max-width: 480px) {
   .ar-phone-frame { width: 208px; height: 424px; }
 }
+
+@media (hover: none) {
+  /* 0.6em padding at 0.82rem font lands under a 44px touch target on
+     the touch devices this actually matters for. */
+  .ar-tab { min-height: 44px; padding: 0 1.3em; display: inline-flex; align-items: center; }
+}

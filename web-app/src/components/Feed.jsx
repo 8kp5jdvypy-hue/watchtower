@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { useQuotes } from '../hooks/useQuotes'
 import { bySeverity } from '../signalOrder'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
@@ -11,6 +12,8 @@ export default function Feed() {
   const fetchFeed = useCallback(() => api.signalsFeed(20), [])
   const { data, error, loading } = useApiData(fetchFeed)
   const [openId, setOpenId] = useState(null)
+  const symbols = useMemo(() => [...new Set((data?.signals ?? []).map((s) => s.symbol))], [data])
+  const quotes = useQuotes(symbols)
 
   return (
     <div className="view">
@@ -28,7 +31,7 @@ export default function Feed() {
         </div>
       )}
       {data && bySeverity(data.signals).map((signal) => (
-        <SignalCard key={signal.id} signal={signal} onView={setOpenId} />
+        <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>

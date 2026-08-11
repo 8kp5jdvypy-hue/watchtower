@@ -10,18 +10,27 @@ import './AlertReveal.css'
 // Three compact, illustrative examples -- the point isn't more sections,
 // it's showing Perch watches broadly with one good interaction. All figures
 // are demo data, clearly labeled; none of this is a real-time claim.
+//
+// Card anatomy mirrors the shipped app exactly (web-app/src/components/
+// SignalCard.jsx + SignalDetail.jsx): kind-label eyebrow, HIGH/MEDIUM tier
+// badge, a plain-English headline with the more technical sentence
+// demoted to secondary text, and a historical-stats block with the same
+// small-sample tag + interpretive line the app shows for a thin sample.
+// `history` numbers are hand-picked illustrative figures, not derived from
+// anything real -- see AlertCard.jsx's interpretHistory() for the same
+// decent/mixed/weak thresholds the app itself uses.
 const EXAMPLES = {
   NVDA: {
     tab: 'NVDA', price: '+6.4%', priceTime: '12:14 PM ET',
     data: {
-      symbol: 'NVDA', kind: 'Unusual volume', time: '12:14 PM ET',
-      detail: 'Volume is significantly above its recent average, with price expanding outside the normal intraday range.',
-      meterPct: '82%', meterVal: '5.0 / 6',
+      symbol: 'NVDA', kind: 'Unusual volume', tier: 'high', time: '12:14 PM ET',
+      headline: 'Volume is significantly above its recent average, with price expanding outside the normal intraday range.',
+      technical: 'NVDA cumulative volume is 3.1x the 20-day average for this time of day.',
       figs: [{ label: 'Volume', val: '3.1× avg' }, { label: 'Rel. strength', val: '+3.9% vs SOXX' }],
       contexts: [
         { label: 'Market context', text: 'Outperforming its sector and the broader market today, not just moving with everything else.' },
-        { label: 'Historical context', text: 'Volume expansions of this size in this name have preceded continued directional moves, demo data.' },
       ],
+      history: { sampleSize: 8, continuationRate: 0.75, offsetMin: 30, avgReturnPct: 1.2 },
       why: [
         'Volume is 3.1× the 20-day average for this time of day',
         'Price range expanded to 2.3 ATR, well outside its normal band',
@@ -32,14 +41,14 @@ const EXAMPLES = {
   AMD: {
     tab: 'AMD', price: '+1.1%', priceTime: '1:32 PM ET',
     data: {
-      symbol: 'AMD', kind: 'Volume anomaly', time: '1:32 PM ET',
-      detail: 'Trading volume spiked well above normal levels with no corresponding move in the sector yet.',
-      meterPct: '68%', meterVal: '4.1 / 6',
+      symbol: 'AMD', kind: 'Volume anomaly', tier: 'medium', time: '1:32 PM ET',
+      headline: 'Trading volume spiked well above normal levels with no corresponding move in the sector yet.',
+      technical: 'AMD cumulative volume is 2.6x the 20-day average, with price roughly unchanged.',
       figs: [{ label: 'Volume', val: '2.6× avg' }, { label: 'Rel. strength', val: '+1.1% vs SOXX' }],
       contexts: [
         { label: 'Market context', text: "Volume is unusual, but price hasn't followed yet — a divergence worth watching, not acting on." },
-        { label: 'Historical context', text: 'Volume-only anomalies like this are a lower-confidence signal than a combined volume+price move, demo data.' },
       ],
+      history: { sampleSize: 6, continuationRate: 0.5, offsetMin: 30, avgReturnPct: 0.1 },
       why: [
         'Volume is 2.6× the 20-day average with price roughly flat',
         'No corresponding move yet in the sector or broader market',
@@ -50,14 +59,14 @@ const EXAMPLES = {
   SPY: {
     tab: 'SPY', price: '+0.9%', priceTime: '3:47 PM ET',
     data: {
-      symbol: 'SPY', kind: 'Market-wide move', time: '3:47 PM ET',
-      detail: 'Broad-based volatility expansion across the index, not concentrated in any single sector.',
-      meterPct: '74%', meterVal: '4.5 / 6',
+      symbol: 'SPY', kind: 'Market-wide move', tier: 'medium', time: '3:47 PM ET',
+      headline: 'Broad-based volatility expansion across the index, not concentrated in any single sector.',
+      technical: "SPY's intraday range is running well outside its typical band, broad-based across the index.",
       figs: [{ label: 'Breadth', val: '91% advancing' }, { label: 'Volatility', val: '+14% vs avg' }],
       contexts: [
         { label: 'Market context', text: "This isn't one stock — it's the whole market moving together, which changes what the move means." },
-        { label: 'Historical context', text: 'Broad-based moves like this tend to line up with macro catalysts, demo data.' },
       ],
+      history: { sampleSize: 14, continuationRate: 0.83, offsetMin: 30, avgReturnPct: 0.6 },
       why: [
         'Advancing issues significantly outweigh declining ones',
         'Volatility expanded across the index, not one sector',

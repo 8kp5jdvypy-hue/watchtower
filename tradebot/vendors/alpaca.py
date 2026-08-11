@@ -93,7 +93,19 @@ def _to_bars(symbol: str, raw_bars) -> list[Bar]:
 
 
 def fetch_daily_bars(symbol: str, n: int) -> list[Bar]:
-    """The n most recent daily bars, oldest first."""
+    """The n most recent daily bars, oldest first.
+
+    Still IEX, deliberately, even though the account is now SIP-entitled
+    (Algo Trader Plus, 2026-08). This feeds anchors/history for the
+    detectors, and rvol_spike's avg_cum_volume_by_bar baseline is built
+    from IEX-cached replay history (see scripts/fetch_cache.py) — live-
+    measured, SIP volume runs ~20-40x IEX's on this watchlist (real
+    numbers, not an estimate: SPY 26x, NVDA 20x, TSLA 42x, same session,
+    same RTH window). Flipping this to SIP before that baseline is
+    rebuilt against SIP-scale history would make rvol_spike fire on
+    almost everything. Flip together with fetch_intraday_bars below,
+    only after a real recalibration pass — not one call at a time.
+    """
     client = _client()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=int(n * 1.6) + 10)  # padding for weekends/holidays
@@ -112,7 +124,12 @@ def fetch_daily_bars(symbol: str, n: int) -> list[Bar]:
 def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
     """5-minute bars spanning the full calendar day (UTC) for one session —
     covers premarket, RTH, and anything else the feed reports in that
-    window. Callers slice into premarket vs. RTH by clock time."""
+    window. Callers slice into premarket vs. RTH by clock time.
+
+    Still IEX -- this is what rvol_spike and every other detector
+    actually evaluates. See fetch_daily_bars' docstring for why this
+    can't move to SIP on its own.
+    """
     client = _client()
     start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
     end = start + timedelta(days=1)
@@ -129,9 +146,17 @@ def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
 
 
 def fetch_latest_quote(symbol: str) -> MDQuote:
-    """The current NBBO quote. Live mode only — not used by replay."""
+    """The current NBBO quote. Live mode only — not used by replay.
+
+    SIP, not IEX: this feeds the dashboard's /quotes endpoint (price
+    display only, no detector/baseline dependency), so it carries none
+    of fetch_daily_bars/fetch_intraday_bars' recalibration blocker —
+    pure upside from the tighter, more complete consolidated-tape quote.
+    Live-verified 2026-08-11: same moment, same symbol, IEX bid/ask spread
+    was $46 wide (749.35/795.77) against SIP's $0.11 (772.35/772.46).
+    """
     client = _client()
-    request = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.IEX)
+    request = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.SIP)
     response = _with_backoff(lambda: client.get_stock_latest_quote(request))
     q = response[symbol]
     return MDQuote(
@@ -141,6 +166,31 @@ def fetch_latest_quote(symbol: str) -> MDQuote:
         ask=float(q.ask_price),
         last=float((q.bid_price + q.ask_price) / 2),
     )
+
+
+def fetch_latest_quotes(symbols: list[str]) -> dict[str, MDQuote]:
+    """Current NBBO quotes for many symbols in one request instead of N --
+    SIP, same reasoning as fetch_latest_quote above. Chunked the same way
+    fetch_daily_bars_bulk is (see BULK_FETCH_CHUNK_SIZE), though a
+    dashboard watchlist is never remotely close to that size in practice.
+    A symbol Alpaca has no quote for is simply absent from the result,
+    never padded with a fabricated entry -- same discipline as
+    fetch_daily_bars_bulk."""
+    client = _client()
+    out: dict[str, MDQuote] = {}
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockLatestQuoteRequest(symbol_or_symbols=chunk, feed=DataFeed.SIP)
+        response = _with_backoff(lambda r=request: client.get_stock_latest_quote(r))
+        for symbol, q in response.items():
+            out[symbol] = MDQuote(
+                symbol=symbol,
+                ts=q.timestamp.astimezone(timezone.utc),
+                bid=float(q.bid_price),
+                ask=float(q.ask_price),
+                last=float((q.bid_price + q.ask_price) / 2),
+            )
+    return out
 
 
 def fetch_option_chain(symbol: str, expiry: date) -> MDOptionChain:
@@ -218,7 +268,16 @@ def fetch_daily_bars_bulk(symbols: list[str], lookback_days: int = 30) -> dict[s
     (tradebot.universe) instead of the fixed watchlist. Chunked
     automatically (see BULK_FETCH_CHUNK_SIZE); a symbol Alpaca has no
     bars for (new listing, halted, etc.) is simply absent from the
-    result, never padded with an empty/fabricated entry."""
+    result, never padded with an empty/fabricated entry.
+
+    Still IEX -- broad_scan.py computes its own rvol = snapshot.volume /
+    snapshot.avg_volume against these same cached bars (see
+    screen_snapshot()'s RVOL_THRESHOLD check), the identical
+    live-vs-historical-baseline mismatch fetch_daily_bars' docstring
+    describes. Same blocker, same fix: flip together with the other
+    three bar/volume call sites in this file, only after a real
+    recalibration pass.
+    """
     client = _client()
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_days)

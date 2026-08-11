@@ -35,6 +35,9 @@ export const api = {
   signalDetail: (id) => request(`/signals/${encodeURIComponent(id)}`),
   performance: () => request('/performance'),
   activity: () => request('/activity'),
+  // Restricted server-side to the account's own watchlist -- an empty
+  // or all-outside-watchlist symbols list just returns {quotes: {}}.
+  quotes: (symbols) => request(`/quotes?symbols=${symbols.map(encodeURIComponent).join(',')}`),
 }
 
 export { ApiError }
