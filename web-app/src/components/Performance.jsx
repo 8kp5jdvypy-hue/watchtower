@@ -25,7 +25,10 @@ export default function Performance() {
   const tiers = data ? Object.values(data.by_tier) : []
   // Most-observed kind first -- the most statistically grounded entries
   // lead on a page whose whole point is honesty about what's proven.
-  const kinds = data ? Object.values(data.by_kind).sort((a, b) => b.sample_size - a.sample_size) : []
+  // `data.by_kind || {}`: guards a backend that hasn't deployed this
+  // field yet (frontend/backend deploys aren't atomic -- see the API's
+  // own /performance route), not just a defensive habit.
+  const kinds = data ? Object.values(data.by_kind || {}).sort((a, b) => b.sample_size - a.sample_size) : []
   const record = data?.track_record
 
   return (
