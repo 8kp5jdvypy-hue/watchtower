@@ -1315,6 +1315,7 @@ def run_live(
     heartbeat = templates.render_heartbeat(
         session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,
+        cache_fetch_failed=fetch_failed,
     )
     alerter.send(heartbeat, priority=outbox.PRIORITY_LOG)
     _mark_session_close_sent(SESSION_CLOSE_STATE_FILE, session_date)

@@ -348,6 +348,34 @@ def test_render_heartbeat_truncates_data_gaps_past_five():
     assert "SYM6" not in text  # only the first 5 are printed individually
 
 
+def test_render_heartbeat_surfaces_a_partial_cache_fetch_failure():
+    """2026-08-12 review: _alert_if_cache_fetch_failed only pages on
+    TOTAL failure (0 of N) -- a partial miss (say 15 of 33 symbols) is
+    not guaranteed to also trip _alert_if_backfill_implausible's
+    marks-vs-detections comparison (successful symbols' surplus marks
+    can mask a real partial failure in the aggregate count). The
+    heartbeat fires every session unconditionally, so this is the one
+    surface a partial failure can't be invisible on."""
+    when = datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc)
+    text = templates.render_heartbeat(
+        date(2026, 7, 23), timedelta(hours=6), {"high": 2}, {}, [], [], None, when,
+        cache_fetch_failed=["TSLA", "AAPL"],
+    )
+    assert "Cache fetch failed  2" in text
+    assert "TSLA" in text and "AAPL" in text
+
+
+def test_render_heartbeat_omits_the_cache_fetch_row_when_nothing_failed():
+    """Same discipline as data_gaps/errors -- default None (replay's
+    call site, which never runs the close-time fetch) must render
+    identically to an explicit empty list, and neither adds a row."""
+    when = datetime(2026, 7, 23, 20, 0, tzinfo=timezone.utc)
+    without_param = templates.render_heartbeat(date(2026, 7, 23), timedelta(hours=6), {}, {}, [], [], None, when)
+    with_empty_list = templates.render_heartbeat(date(2026, 7, 23), timedelta(hours=6), {}, {}, [], [], None, when, cache_fetch_failed=[])
+    assert without_param == with_empty_list
+    assert "Cache fetch failed" not in without_param
+
+
 def test_render_system_notice_golden():
     when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
     text = templates.render_system_notice(

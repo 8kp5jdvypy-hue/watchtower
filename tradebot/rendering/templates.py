@@ -311,9 +311,20 @@ def render_pre_open_card(events: list, session_date, when: datetime) -> str:
 def render_heartbeat(
     session_date, uptime, tier_counts: dict, suppression_counts: dict,
     data_gaps: list, errors: list, tier_perf: dict | None, when: datetime,
+    cache_fetch_failed: list | None = None,
 ) -> str:
     """End-of-session status. tier_perf, if given, is a dict of tier ->
-    HistoricalPerformance-shaped object (from journal.tier_performance())."""
+    HistoricalPerformance-shaped object (from journal.tier_performance()).
+
+    cache_fetch_failed: symbols whose close-time intraday cache fetch
+    failed (see runner._cache_todays_intraday_bars) -- 2026-08-12
+    incident review: _alert_if_cache_fetch_failed only pages on TOTAL
+    failure (0 of N), by design, so a partial miss (some symbols, not
+    all) needs its own always-visible surface that doesn't depend on
+    whether it happened to also drag marks_written below
+    total_detections -- the heartbeat fires every session unconditionally,
+    unlike either alert. None (replay's call site, which never runs the
+    close-time fetch at all) renders identically to an empty list."""
     rows = [
         ("Uptime", str(uptime)),
         ("High", qty(tier_counts.get("high", 0))),
@@ -323,6 +334,8 @@ def render_heartbeat(
         ("Data gaps", qty(len(data_gaps))),
         ("Errors", qty(len(errors))),
     ]
+    if cache_fetch_failed:
+        rows.append(("Cache fetch failed", qty(len(cache_fetch_failed))))
     lines = [f"<b>Heartbeat</b> · {html.escape(str(session_date))}", "", _stats_block(rows)]
     if tier_perf:
         lines.append("")
@@ -335,6 +348,9 @@ def render_heartbeat(
             lines.append(html.escape(f"- {gap_note}"))
         if len(data_gaps) > 5:
             lines.append(f"...and {qty(len(data_gaps) - 5)} more")
+    if cache_fetch_failed:
+        lines.append("")
+        lines.append(html.escape(f"- Cache fetch failed: {', '.join(sorted(cache_fetch_failed))}"))
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)
