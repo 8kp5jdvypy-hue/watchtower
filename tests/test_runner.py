@@ -321,16 +321,33 @@ def test_cache_todays_intraday_bars_empty_result_is_always_a_failure_no_holiday_
     assert len(caplog.records) == 1
 
 
-def test_alert_if_cache_fetch_failed_fires_with_both_symbol_lists_in_the_text():
+def test_alert_if_cache_fetch_failed_pages_on_total_failure():
+    """0 of N succeeded -- the systemic vendor/auth outage shape this
+    alert exists for."""
     alerter = _SpyAlerter()
 
-    _alert_if_cache_fetch_failed(alerter, ["AAPL"], ["TSLA", "QQQ"], date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+    _alert_if_cache_fetch_failed(alerter, [], ["TSLA", "QQQ"], date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
 
     assert len(alerter.sent) == 1
     text, priority = alerter.sent[0]
-    assert "2/3" in text
+    assert "ALL 2" in text
     assert "TSLA" in text and "QQQ" in text
     assert priority == outbox.PRIORITY_HIGH
+
+
+def test_alert_if_cache_fetch_failed_logs_but_does_not_page_on_a_partial_failure(caplog):
+    """A single ticker's vendor hiccup (or any partial miss) must never
+    page -- confirmed explicitly, not assumed: this was the actual bug
+    caught in PR #24 review, where the pre-fix code paged on ANY failed
+    symbol. Still logged at ERROR, just not escalated to Telegram."""
+    alerter = _SpyAlerter()
+
+    with caplog.at_level("ERROR"):
+        _alert_if_cache_fetch_failed(alerter, ["AAPL"], ["TSLA"], date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert alerter.sent == []  # no page
+    assert len(caplog.records) == 1 and caplog.records[0].levelname == "ERROR"  # still logged
+    assert "TSLA" in caplog.records[0].message
 
 
 def test_alert_if_cache_fetch_failed_stays_quiet_when_nothing_failed():

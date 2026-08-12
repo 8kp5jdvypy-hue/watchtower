@@ -661,7 +661,17 @@ def _alert_if_cache_fetch_failed(
     which stage broke. This fires from the FETCH stage specifically
     (vendor/auth trouble), independent of and before backfill_marks()
     ever runs, so the two alerts together say WHERE it broke, not just
-    THAT it broke."""
+    THAT it broke.
+
+    Two severities, not one: ANY failed symbol gets an ERROR log line
+    (still worth knowing, still visible in docker compose logs), but the
+    loud Telegram page is reserved for TOTAL failure -- succeeded is
+    empty, i.e. 0 of N -- the "systemic vendor/auth outage" shape this
+    was actually designed for. A single symbol's transient vendor hiccup
+    must never page: backfill_marks()'s own missing-cache-file log for
+    that one symbol, plus _alert_if_backfill_implausible if it turns out
+    to matter for the day's overall count, remain the safety net for a
+    partial miss without escalating every isolated failure to a page."""
     if not failed:
         return
     total = len(succeeded) + len(failed)
@@ -669,13 +679,15 @@ def _alert_if_cache_fetch_failed(
         "close-time intraday cache fetch failed for %d/%d symbol(s) on %s: %s",
         len(failed), total, session_date.isoformat(), ", ".join(failed),
     )
+    if succeeded:
+        return  # partial failure -- logged above, not paged
     try:
         alerter.send(
             templates.render_failure_notice(
-                f"Close-time cache fetch failed for {len(failed)}/{total} symbol(s) on "
+                f"Close-time cache fetch failed for ALL {total} symbol(s) on "
                 f"{session_date.isoformat()} ({', '.join(failed)}) -- likely a vendor/auth problem, "
-                f"not a backfill problem. AFTER DETECTION outcomes for these symbols cannot be "
-                f"computed until this is fixed. See runner logs.",
+                f"not a backfill problem. AFTER DETECTION outcomes cannot be computed until this "
+                f"is fixed. See runner logs.",
                 when,
             ),
             priority=outbox.PRIORITY_HIGH,
