@@ -552,6 +552,41 @@ def send_log_summary(budget: AlertBudget, alerter, conn, when: datetime) -> None
     alerter.send(templates.render_log_summary(summary, tier_perf, when), priority=outbox.PRIORITY_LOG)
 
 
+def _alert_if_backfill_implausible(
+    alerter, stats: "HeartbeatStats", marks_written: int, session_date: date, when: datetime,
+) -> None:
+    """2026-08-12 incident: backfill_marks() wrote 0 marks for ~160 real
+    detections at a session close, with no error, no log line, no alert
+    -- nothing surfaced it until a subscriber noticed the dashboard stuck
+    on placeholder text hours later. Every detection that has any bars at
+    all gets at least a CLOSE_MARK_OFFSET_MIN row (see backfill_marks()'s
+    own docstring), so a healthy day writes at least one mark per
+    detection -- marks_written < total_detections is the loud, mechanism-
+    agnostic tripwire: it doesn't matter WHY the cache/vendor/fetch chain
+    failed upstream, only that the one thing backfill_marks() promises
+    (an outcome per detection) didn't happen. Silence at close is now
+    itself the alarm."""
+    total_detections = sum(stats.tier_counts.values())
+    if total_detections == 0 or marks_written >= total_detections:
+        return
+    logger.error(
+        "backfill_marks wrote implausibly few marks: %d marks for %d detections (session=%s)",
+        marks_written, total_detections, session_date.isoformat(),
+    )
+    try:
+        alerter.send(
+            templates.render_system_notice(
+                f"backfill_marks wrote only {marks_written} mark(s) for {total_detections} "
+                f"detection(s) on {session_date.isoformat()} -- today's AFTER DETECTION outcomes "
+                f"are likely missing or incomplete. See runner logs.",
+                when,
+            ),
+            priority=outbox.PRIORITY_HIGH,
+        )
+    except Exception:
+        logger.error("also failed to send the backfill-marks alert itself", exc_info=True)
+
+
 def _last_recap_week_end(path: Path) -> datetime | None:
     if not path.exists():
         return None
@@ -1161,7 +1196,8 @@ def run_live(
 
     end_time = datetime.now(timezone.utc)
     send_log_summary(budget, alerter, conn, end_time)
-    backfill_marks(conn, session_date)
+    marks_written = backfill_marks(conn, session_date)
+    _alert_if_backfill_implausible(alerter, stats, marks_written, session_date, end_time)
     backfill_pending_contract_close_mids(conn, md, session_date)
     backfill_contract_day_ranges(conn, md, session_date)
     heartbeat = templates.render_heartbeat(

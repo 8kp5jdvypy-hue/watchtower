@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import sys
 from datetime import date, timedelta
 from pathlib import Path
+
+import exchange_calendars as ecals
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -33,6 +36,9 @@ from tradebot.vendors.alpaca import AlpacaCredentialsError, fetch_daily_bars, fe
 
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 MAX_LOOKBACK_DAYS = 60  # safety cap so a long holiday streak can't loop forever
+
+logger = logging.getLogger("watchtower.fetch_cache")
+_CALENDAR = ecals.get_calendar("XNYS")  # same instance pattern as runner.py's CALENDAR
 
 
 def _write_bars_csv(path: Path, bars: list[Bar]) -> None:
@@ -50,6 +56,9 @@ def ensure_daily(symbol: str, cache_dir: Path, n: int) -> str:
         return "skipped (exists)"
     bars = fetch_daily_bars(symbol, n)
     if not bars:
+        # Unlike an intraday session, an active symbol legitimately
+        # returning zero daily bars is never expected -- always loud.
+        logger.error("fetch_daily_bars returned no data for %s (requested n=%d)", symbol, n)
         return "no data returned"
     _write_bars_csv(path, bars)
     return f"fetched {len(bars)} bars"
@@ -77,8 +86,17 @@ def ensure_sessions(symbol: str, cache_dir: Path, n: int) -> list[tuple[date, st
                 _write_bars_csv(path, bars)
                 satisfied += 1
                 results.append((candidate, f"fetched {len(bars)} bars"))
+            elif _CALENDAR.is_session(candidate):
+                # A real NYSE trading day with zero bars back is never
+                # expected -- the pre-fix code labeled this identically to
+                # an actual holiday ("no data (holiday?)"), which is
+                # exactly the kind of silence the 2026-08-12 incident
+                # review flagged: a real failure reads the same as
+                # nothing-to-do.
+                logger.error("fetch_intraday_bars returned no data for %s on a real trading day %s", symbol, candidate)
+                results.append((candidate, "ERROR: no data on a real trading day"))
             else:
-                results.append((candidate, "no data (holiday?)"))
+                results.append((candidate, "no data (holiday)"))
 
         candidate -= timedelta(days=1)
 
@@ -110,6 +128,7 @@ def main() -> None:
         fetched = sum(1 for _, s in session_results if s.startswith("fetched"))
         skipped = sum(1 for _, s in session_results if s.startswith("skipped"))
         no_data = sum(1 for _, s in session_results if s.startswith("no data"))
+        errors = sum(1 for _, s in session_results if s.startswith("ERROR"))
         for d, status in session_results:
             print(f"  {d}: {status}")
 
@@ -120,17 +139,19 @@ def main() -> None:
                 "sessions_fetched": fetched,
                 "sessions_skipped": skipped,
                 "sessions_no_data": no_data,
+                "sessions_errors": errors,
             }
         )
 
     print("\n=== summary ===")
-    header = f"{'symbol':<8} {'daily':<20} {'fetched':>8} {'skipped':>8} {'no_data':>8}"
+    header = f"{'symbol':<8} {'daily':<20} {'fetched':>8} {'skipped':>8} {'no_data':>8} {'errors':>8}"
     print(header)
     print("-" * len(header))
     for row in summary_rows:
         print(
             f"{row['symbol']:<8} {row['daily']:<20} "
-            f"{row['sessions_fetched']:>8} {row['sessions_skipped']:>8} {row['sessions_no_data']:>8}"
+            f"{row['sessions_fetched']:>8} {row['sessions_skipped']:>8} {row['sessions_no_data']:>8} "
+            f"{row['sessions_errors']:>8}"
         )
 
 

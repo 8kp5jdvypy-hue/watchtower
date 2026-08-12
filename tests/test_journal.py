@@ -222,6 +222,62 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
     assert marks[CLOSE_MARK_OFFSET_MIN] == 107  # the session's real last bar close (100 + 7)
 
 
+def test_backfill_marks_logs_an_error_when_the_intraday_cache_file_is_absent(tmp_path, caplog):
+    """2026-08-12 incident shape: the session's own intraday cache file
+    never existed at backfill time (daily.csv is present -- only the
+    session file is missing). Pre-fix, this produced 0 marks with zero
+    signal anywhere that anything was wrong. Written 0 is still correct
+    behavior here (never fabricate a price) -- what must change is that
+    it's no longer silent."""
+    cache_dir = tmp_path / "cache"
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(rth_open - timedelta(days=1), 99)])
+    # No intraday_{SESSION}.csv written at all.
+
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+
+    with caplog.at_level("ERROR", logger="watchtower.journal"):
+        written = backfill_marks(conn, SESSION, cache_dir=cache_dir)
+
+    assert written == 0  # correct -- there is genuinely nothing to write
+    assert len(caplog.records) == 1  # but it must not be silent
+    assert caplog.records[0].levelname == "ERROR"
+    assert SYMBOL in caplog.records[0].message
+    assert SESSION.isoformat() in caplog.records[0].message
+
+
+def test_backfill_marks_does_not_log_when_the_cache_file_exists_but_has_nothing_new(tmp_path, caplog):
+    """The ordinary, non-incident quiet case -- a real cache file that
+    genuinely has no bars past a detection's own timestamp -- must stay
+    quiet. Only a missing FILE is the incident shape; an empty result
+    from a real file is normal, expected behavior."""
+    cache_dir = tmp_path / "cache"
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    # Real file, but its one bar is AT the detection's own timestamp --
+    # nothing forward of it, so every offset legitimately finds nothing.
+    _write_bar_csv(cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv", [_bar_row(rth_open, 100)])
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(rth_open - timedelta(days=1), 99)])
+
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+
+    with caplog.at_level("ERROR", logger="watchtower.journal"):
+        backfill_marks(conn, SESSION, cache_dir=cache_dir)
+
+    assert caplog.records == []
+
+
 def test_backfill_marks_default_offsets_are_15_30_60_and_close(tmp_path):
     """15m/30m/60m/close is the fixed, non-curated outcome checkpoint set
     — every published alert gets exactly these, automatically."""
