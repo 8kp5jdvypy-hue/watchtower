@@ -79,6 +79,16 @@
 .sc-tier-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
 .sc-tier-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
 
+.sc-head-badges { display: flex; align-items: center; gap: 0.4rem; }
+/* Deliberately neutral, not cyan -- this isn't a severity signal like
+   .sc-tier, so it shouldn't compete with the tier badge for attention. */
+.sc-radar {
+  font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 0.18rem 0.55rem; border-radius: 999px; font-weight: 600;
+  background: rgba(255, 255, 255, 0.06); color: var(--ink-faint);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .sc-body { display: flex; flex-direction: column; }
 .sc-symbol-row { display: flex; align-items: baseline; gap: 0.6em; flex-wrap: wrap; }
 .sc-symbol {

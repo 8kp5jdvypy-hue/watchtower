@@ -404,7 +404,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
-            "primary_kind, context_json, close "
+            "primary_kind, context_json, close, origin "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -425,6 +425,12 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "primary_kind": primary_kind,
                 "context_summary": _context_summary(kinds_list, primary_kind, row[11]),
                 "close": row[12],
+                # NULL on every row written before this shipped (see
+                # journal.write_cluster's docstring) -- reported as
+                # "watchlist" rather than null/None, since that's the true
+                # origin for every pre-broad_scan row and the frontend
+                # badge only needs to know "screening" vs. everything else.
+                "origin": row[13] or "watchlist",
             })
         return result
 
@@ -453,7 +459,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         row = app.journal_conn.execute(
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, "
             "alerted, close, atr14, context_json, primary_kind, no_trade, news_driven, "
-            "event_kind, event_severity "
+            "event_kind, event_severity, origin "
             "FROM detections WHERE id = ? AND tier IN ('high', 'medium')",
             (detection_id,),
         ).fetchone()
@@ -462,7 +468,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         (
             id_, ts_utc, session, symbol, kinds, headlines, score, tier, trend,
             alerted, close, atr14, context_json, primary_kind, no_trade, news_driven,
-            event_kind, event_severity,
+            event_kind, event_severity, origin,
         ) = row
         # One context dict per detector kind that fired in this cluster,
         # same order as kinds.split(",") -- see journal.write_cluster,
@@ -520,6 +526,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "event_severity": event_severity,
                 "history": _to_jsonable(history),
                 "marks": marks,
+                "origin": origin or "watchlist",
             }
         )
 

@@ -170,6 +170,23 @@ def test_render_high_alert_shows_real_similar_setups_when_not_news_driven():
     assert "continuation stats do not apply" not in text
 
 
+def test_render_high_alert_tags_a_screening_origin_cluster_in_plain_text():
+    """docs/broad-scan-honesty-proposal.md finding (a) -- a symbol
+    broad_scan promoted in gets a plain-text tag, not an emoji: the one-
+    emoji-per-message rule (see test_render_high_alert_has_exactly_one_
+    emoji_the_tier_marker) still applies to a RADAR-tagged alert."""
+    text = templates.render_high_alert(_cluster(origin="screening"), _anchors(), _quote(), None, _history())
+    assert "<b>🔴 HIGH · GOOGL · BEARISH · RADAR</b>" in text
+    assert "not on your watchlist" in text.lower()
+    tier_emojis = {"🔴", "🟡", "⚪"}
+    assert [ch for ch in text if ch in tier_emojis] == ["🔴"]
+
+
+def test_render_high_alert_omits_the_radar_tag_for_a_watchlist_cluster():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
+    assert "RADAR" not in text
+
+
 def test_render_digest_golden():
     tier_perf = TierPerformance(tier="medium", sample_size=45, continuation_rate=0.51, avg_return_pct=0.08, offset_min=30)
     clusters = [
@@ -187,6 +204,17 @@ def test_render_digest_golden():
         "\n"
         "<i>11:00 ET · Not advice.</i>"
     )
+
+
+def test_render_digest_tags_screening_origin_clusters_per_line():
+    clusters = [
+        _cluster(id="b2", symbol="TSLA", kinds="vwap_break", tier="medium", score=2.1, origin="watchlist"),
+        _cluster(id="b3", symbol="AMD", kinds="rvol_spike", tier="medium", score=2.5, origin="screening"),
+    ]
+    when = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+    text = templates.render_digest("Medium Digest", "medium", clusters, None, when)
+    assert "TSLA · VWAP break · 2.10 ATR\n" in text
+    assert "AMD · volume spike · 2.50 ATR · RADAR\n" in text
 
 
 def test_render_digest_omits_track_record_line_when_no_history():

@@ -42,6 +42,11 @@ class Cluster:
     atr14: float | None
     trend: str
     code_version: str
+    # 'watchlist' (default) or 'screening' -- whether `symbol` was in the
+    # fixed watchlist or promoted in by broad_scan for this session. See
+    # tradebot.journal.write_cluster()'s docstring and
+    # docs/broad-scan-honesty-proposal.md.
+    origin: str = "watchlist"
 
 
 class ConsoleAlerter:

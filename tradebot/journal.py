@@ -26,6 +26,31 @@ ET = ZoneInfo("America/New_York")
 
 MIN_HISTORY_SAMPLE = 5
 
+# Decision B (docs/sip-migration-proposal.md, Option 1 -- post-cutover-only):
+# historical_performance()/tier_performance()/kind_performance() never blend
+# rows written under different data feeds into one continuation-rate number
+# -- a feed change means different prices and volume baselines, the same
+# "don't fabricate a stat from an incompatible population" reasoning as the
+# existing news_driven exclusion. "Current feed" is read from the journal's
+# own most recent row rather than importing vendors.alpaca's
+# DETECTOR_DATA_FEED here (this module has no vendor-SDK dependency and
+# shouldn't gain one just for this) -- ground truth of what was actually
+# written, not what a config value currently claims. Every row written
+# before this column existed has data_feed IS NULL, which matches neither
+# 'iex' nor 'sip', so all pre-migration history is excluded from these
+# three functions by construction -- the "resets to n=0 for a while"
+# tradeoff the proposal already named as Option 1's known cost.
+#
+# The same clause also excludes broad_scan-promoted ("screening") symbols
+# -- see docs/broad-scan-honesty-proposal.md's finding (b). Bundled here
+# since both filters touch the same three queries and both are about "don't
+# let a different measurement population masquerade as the historical
+# technical base rate."
+CURRENT_FEED_FILTER_SQL = """
+    d.data_feed = (SELECT data_feed FROM detections WHERE data_feed IS NOT NULL ORDER BY ts_utc DESC LIMIT 1)
+    AND d.origin = 'watchlist'
+"""
+
 # Sentinel offset_min for "the session close" — not a fixed number of
 # minutes after the detection (that varies with when in the day it
 # fired), so it can't share a positive-minutes value with the 15/30/60
@@ -63,7 +88,9 @@ CREATE TABLE IF NOT EXISTS detections (
     event_severity TEXT,
     suppress_category TEXT,
     lifecycle_state TEXT,
-    related_detection_id TEXT
+    related_detection_id TEXT,
+    data_feed TEXT,
+    origin TEXT
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -161,6 +188,13 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     # Loose reference, no SQLite FK constraint, same style as
     # marks.detection_id / contract_selections.detection_id below.
     _add_column_if_missing(conn, "detections", "related_detection_id", "TEXT")
+    # Both NULL on every row written before this shipped (docs/sip-migration-
+    # proposal.md's Decision B, docs/broad-scan-honesty-proposal.md's finding
+    # (b)) -- never back-filled, same as symbol_class/primary_kind above.
+    # See CURRENT_FEED_FILTER_SQL for how that NULL is handled by the
+    # performance-stats functions.
+    _add_column_if_missing(conn, "detections", "data_feed", "TEXT")
+    _add_column_if_missing(conn, "detections", "origin", "TEXT")
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
@@ -206,13 +240,26 @@ def write_cluster(
     alerted: bool = False,
     suppress_reason: str | None = None,
     primary_kind: str | None = None,
+    data_feed: str | None = None,
+    origin: str = "watchlist",
 ) -> str:
     """symbol_class (deep/thin liquidity, see tradebot.config) is derived
     and frozen here at write time, not looked up later — the watchlist's
     classification could change in the future, and a historical row
     should keep reporting what was true when the alert actually fired,
     the same discipline historical_performance() already applies to each
-    row's own atr14 rather than borrowing a current value."""
+    row's own atr14 rather than borrowing a current value.
+
+    data_feed: the caller's DETECTOR_DATA_FEED value at write time ('iex'/
+    'sip'), same frozen-at-write-time discipline as symbol_class — None
+    (the default) matches every pre-Decision-B caller/test, same as the
+    other columns added after this function's first release.
+
+    origin: 'watchlist' (default) or 'screening' — whether `symbol` was in
+    the fixed watchlist or promoted in by broad_scan for this session. The
+    only place this fact is knowable is the caller's own merge point
+    (tradebot.runner's `scan_symbols` construction), so it must be passed
+    in, not derived here. See docs/broad-scan-honesty-proposal.md."""
     tier = tier_for_score(score).value
     detection_id = cluster_id(symbol, session, ts_utc, kinds)
     context_json = json.dumps([d.context for d in detections])
@@ -222,20 +269,21 @@ def write_cluster(
         INSERT INTO detections
             (id, ts_utc, session, symbol, kinds, headlines, score, tier,
              close, atr14, trend, context_json, code_version, alerted, suppress_reason,
-             primary_kind, symbol_class)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             primary_kind, symbol_class, data_feed, origin)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ts_utc=excluded.ts_utc, kinds=excluded.kinds, headlines=excluded.headlines,
             score=excluded.score, tier=excluded.tier, close=excluded.close,
             atr14=excluded.atr14, trend=excluded.trend, context_json=excluded.context_json,
             code_version=excluded.code_version, alerted=excluded.alerted,
             suppress_reason=excluded.suppress_reason, primary_kind=excluded.primary_kind,
-            symbol_class=excluded.symbol_class
+            symbol_class=excluded.symbol_class, data_feed=excluded.data_feed,
+            origin=excluded.origin
         """,
         (
             detection_id, ts_utc, session, symbol, kinds, headlines, score, tier,
             close, atr14, trend, context_json, code_version_str, int(alerted), suppress_reason,
-            primary_kind, symbol_class,
+            primary_kind, symbol_class, data_feed, origin,
         ),
     )
     return detection_id
@@ -381,14 +429,18 @@ def historical_performance(
     stats are continuation rates for TECHNICAL setups, and an event-driven
     move (earnings, an 8-K, a macro print) doesn't share that mechanism —
     mixing it into the sample would let event noise masquerade as a
-    technical base rate. See tradebot.events module docstring."""
+    technical base rate. See tradebot.events module docstring.
+
+    Also excludes pre-cutover-feed history and broad_scan-promoted
+    ("screening") symbols — see CURRENT_FEED_FILTER_SQL's docstring."""
     rows = conn.execute(
-        """
+        f"""
         SELECT d.close, m.price, d.atr14
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
         WHERE d.primary_kind = ? AND d.trend = ? AND d.id != ?
               AND (d.news_driven IS NULL OR d.news_driven = 0)
+              AND {CURRENT_FEED_FILTER_SQL}
         ORDER BY d.ts_utc DESC
         LIMIT ?
         """,
@@ -430,12 +482,16 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
     'is this tier actually predictive' check as historical_performance(),
     aggregated by tier instead of by kind. Tiers with fewer than
     MIN_HISTORY_SAMPLE data points are omitted rather than reported on
-    too little data."""
+    too little data.
+
+    Also excludes pre-cutover-feed history and broad_scan-promoted
+    ("screening") symbols — see CURRENT_FEED_FILTER_SQL's docstring."""
     rows = conn.execute(
-        """
+        f"""
         SELECT d.tier, d.close, d.trend, m.price
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
+        WHERE {CURRENT_FEED_FILTER_SQL}
         """,
         (offset_min,),
     ).fetchall()
@@ -494,13 +550,17 @@ def kind_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
     points are omitted, same as tier_performance() -- excluded_news_driven
     only appears for kinds that clear that bar on their remaining clean
     sample; a kind with no reportable clean sample doesn't appear at all,
-    same as today."""
+    same as today.
+
+    Also excludes pre-cutover-feed history and broad_scan-promoted
+    ("screening") symbols — see CURRENT_FEED_FILTER_SQL's docstring."""
     rows = conn.execute(
-        """
+        f"""
         SELECT d.primary_kind, d.close, d.trend, m.price, d.news_driven
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
         WHERE d.primary_kind IS NOT NULL
+              AND {CURRENT_FEED_FILTER_SQL}
         """,
         (offset_min,),
     ).fetchall()

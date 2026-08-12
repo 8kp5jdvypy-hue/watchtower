@@ -168,21 +168,23 @@ export default function SignalDetail({ id, onClose }) {
             </div>
             <p className="sd-headline">{data.headlines}</p>
 
-            {(data.news_driven === true || data.news_driven === false) && (
+            {(data.news_driven === true || data.news_driven === false || data.alerted || data.origin === 'screening') && (
               <div className="sd-flags">
-                {data.news_driven ? (
+                {data.news_driven === true && (
                   <span className="sd-flag sd-flag-news">
                     News/event-driven{data.event_kind ? ` — ${data.event_kind}` : ''}
                   </span>
-                ) : (
+                )}
+                {data.news_driven === false && (
                   <span className="sd-flag">Clean technical setup — no known news event overlaps this</span>
                 )}
                 {data.alerted && <span className="sd-flag sd-flag-alerted">Sent as a live alert</span>}
-              </div>
-            )}
-            {data.news_driven == null && data.alerted && (
-              <div className="sd-flags">
-                <span className="sd-flag sd-flag-alerted">Sent as a live alert</span>
+                {/* Not on the subscriber's watchlist -- broad_scan promoted it
+                    in for today's session. See
+                    docs/broad-scan-honesty-proposal.md finding (a). */}
+                {data.origin === 'screening' && (
+                  <span className="sd-flag sd-flag-radar">Radar — not on your watchlist, flagged by today's daily screen</span>
+                )}
               </div>
             )}
 

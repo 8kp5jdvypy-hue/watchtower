@@ -94,6 +94,9 @@
 }
 .sd-flag-news { color: var(--amber); border-color: rgba(255, 180, 84, 0.3); }
 .sd-flag-alerted { color: var(--cyan); border-color: rgba(52, 226, 255, 0.25); }
+/* Deliberately the same neutral treatment as the base .sd-flag -- not a
+   severity signal like the news/alerted flags, just provenance. */
+.sd-flag-radar { color: var(--ink-faint); border-color: var(--line); }
 
 .sd-section { padding: 1.1rem 1.25rem 0; }
 .sd-section:last-of-type { padding-bottom: 1.1rem; }

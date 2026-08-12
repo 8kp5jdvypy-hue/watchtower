@@ -51,6 +51,30 @@ def test_write_cluster_round_trips(tmp_path):
     assert row == (SYMBOL, "high", 4.0, "abc123")
 
 
+def test_write_cluster_data_feed_and_origin_round_trip_and_default(tmp_path):
+    """data_feed defaults to None (pre-Decision-B callers/tests never pass
+    it -- see write_cluster's docstring); origin defaults to 'watchlist'
+    (every caller before broad_scan promotion existed). Both round-trip
+    when a caller does pass them."""
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="level_break", headlines="h", score=4.0, close=101.0, atr14=1.5,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    write_cluster(
+        conn, session="2026-06-15", symbol="AAPL", ts_utc="2026-06-15T14:05:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=101.0, atr14=1.5,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc123",
+        data_feed="sip", origin="screening",
+    )
+    conn.commit()
+    default_row = conn.execute("SELECT data_feed, origin FROM detections WHERE symbol = ?", (SYMBOL,)).fetchone()
+    assert default_row == (None, "watchlist")
+    explicit_row = conn.execute("SELECT data_feed, origin FROM detections WHERE symbol = 'AAPL'").fetchone()
+    assert explicit_row == ("sip", "screening")
+
+
 def test_write_cluster_stores_primary_kind_and_freezes_symbol_class_at_write_time(tmp_path):
     """symbol_class (deep/thin, see tradebot.config.liquidity_class) is
     derived and frozen here, not looked up later — a historical row keeps
@@ -222,12 +246,12 @@ def test_backfill_marks_default_offsets_are_15_30_60_and_close(tmp_path):
     assert marks[15] == 102  # first bar closing at/after rth_open + 15m
 
 
-def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0):
+def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0, data_feed="iex", origin="watchlist"):
     detection_id = write_cluster(
         conn, session="2026-06-15", symbol=SYMBOL, ts_utc=ts_utc,
         kinds=kind, headlines="h", score=score, close=close, atr14=1.0,
         trend=trend, detections=[_detection(kind=kind)], code_version_str="abc",
-        primary_kind=kind,
+        primary_kind=kind, data_feed=data_feed, origin=origin,
     )
     conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, price_at_30))
     conn.commit()
@@ -298,6 +322,7 @@ def test_historical_performance_matches_primary_kind_exactly_not_as_a_kinds_subs
             kinds="gap,level_break", headlines="h", score=4.0, close=100.0, atr14=1.0,
             trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
             primary_kind="level_break",  # gap fired too, but wasn't primary
+            data_feed="iex",
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 105))
     conn.commit()
@@ -331,6 +356,32 @@ def test_historical_performance_excludes_news_driven_rows_from_the_sample(tmp_pa
     result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent", lookback=20)
     assert result.sample_size == 5  # the news-driven row is excluded, not just down-weighted
     assert result.continuation_rate == pytest.approx(1.0)  # all 5 clean rows continued
+
+
+def test_historical_performance_excludes_a_different_feed_and_screening_origin(tmp_path):
+    """Same CURRENT_FEED_FILTER_SQL discipline as tier_performance() --
+    the modal's Similar Setups sample must draw from the same population
+    those stats do, not a separately-filtered one."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 102, 101, 103, 104]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(hours=1, minutes=5 * i)).isoformat(), data_feed="sip", origin="watchlist",
+        )
+    # old-feed row: must not count even though kind/trend match
+    _write_cluster_with_mark(
+        conn, kind="gap", trend="up", close=100.0, price_at_30=999,
+        ts_utc=base.isoformat(), data_feed="iex", origin="watchlist",
+    )
+    # screening-origin row on the current feed: must not count either
+    _write_cluster_with_mark(
+        conn, kind="gap", trend="up", close=100.0, price_at_30=999,
+        ts_utc=(base + timedelta(hours=1, minutes=100)).isoformat(), data_feed="sip", origin="screening",
+    )
+
+    result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent", lookback=20)
+    assert result.sample_size == 5
 
 
 def test_tier_performance_groups_by_tier_and_computes_real_stats(tmp_path):
@@ -368,6 +419,73 @@ def test_tier_performance_omits_tiers_below_min_sample(tmp_path):
         )
     result = tier_performance(conn)
     assert "high" not in result
+
+
+def test_tier_performance_excludes_rows_from_a_different_data_feed(tmp_path):
+    """Decision B, Option 1 (docs/sip-migration-proposal.md): only the
+    CURRENTLY-live feed's rows count -- 'current' meaning the most recent
+    row's own data_feed, not a hardcoded value, so this stays correct
+    whichever feed happens to be live."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # 5 old IEX-era rows -- would clear MIN_HISTORY_SAMPLE on their own
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0, data_feed="iex",
+        )
+    # 5 newer SIP-era rows, mixed outcomes, written later (later ts_utc) --
+    # this is what "current feed" resolves to.
+    for i, mark in enumerate([101, 99, 102, 98, 97]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(hours=1, minutes=5 * i)).isoformat(), score=5.0, data_feed="sip",
+        )
+
+    result = tier_performance(conn)
+    assert result["high"].sample_size == 5  # only the SIP rows
+    assert result["high"].continuation_rate == pytest.approx(0.4)  # 101,102 > 100; 99,98,97 < 100
+
+
+def test_tier_performance_excludes_pre_migration_rows_with_null_data_feed(tmp_path):
+    """Every row written before this column existed has data_feed IS NULL,
+    which must never match the current feed value -- see
+    CURRENT_FEED_FILTER_SQL's docstring ('resets to n=0' is intentional,
+    not a bug)."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        detection_id = write_cluster(
+            conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            kinds="gap", headlines="h", score=5.0, close=100.0, atr14=1.0,
+            trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+            # data_feed intentionally omitted -- simulates a pre-migration row.
+        )
+        conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, mark))
+    conn.commit()
+    assert tier_performance(conn) == {}
+
+
+def test_tier_performance_excludes_broad_scan_promoted_screening_symbols(tmp_path):
+    """docs/broad-scan-honesty-proposal.md finding (b): a symbol promoted
+    in by broad_scan for one session isn't part of the watchlist's
+    historical track record."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 106, 104, 103, 107]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0, origin="watchlist",
+        )
+    for i, mark in enumerate([50, 40, 60, 45, 55]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(hours=1, minutes=5 * i)).isoformat(), score=5.0, origin="screening",
+        )
+
+    result = tier_performance(conn)
+    assert result["high"].sample_size == 5  # only the watchlist rows
+    assert result["high"].continuation_rate == pytest.approx(1.0)  # all 5 watchlist rows continued
 
 
 def test_kind_performance_groups_by_kind_and_computes_real_stats(tmp_path):
@@ -507,6 +625,7 @@ def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp
             conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
             kinds="gap", headlines="h", score=4.0, close=close, atr14=atr14,
             trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+            data_feed="iex",
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, mark))
     conn.commit()
@@ -524,6 +643,7 @@ def test_historical_performance_avg_return_atr_is_none_when_no_row_has_atr14(tmp
             conn, session="2026-06-15", symbol=SYMBOL, ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
             kinds="gap", headlines="h", score=4.0, close=100.0, atr14=None,
             trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+            data_feed="iex",
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 105))
     conn.commit()

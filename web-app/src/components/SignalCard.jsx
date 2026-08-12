@@ -53,7 +53,14 @@ export default function SignalCard({ signal, quote, onView }) {
           <PerchMark size={14} state={isHigh ? 'alert' : 'confirmed'} accent={false} />
           <span className="sc-eyebrow">{primaryKind ? kindLabel(primaryKind) : 'PERCH DETECTED'}</span>
         </span>
-        <span className={`sc-tier sc-tier-${signal.tier}`}>{signal.tier}</span>
+        <span className="sc-head-badges">
+          {/* Not on the subscriber's watchlist -- broad_scan promoted it in
+              for today's session. See docs/broad-scan-honesty-proposal.md
+              finding (a): this symbol getting a card at all used to be
+              silently indistinguishable from a real watchlist hit. */}
+          {signal.origin === 'screening' && <span className="sc-radar" title="Not on your watchlist — Perch's daily screen flagged it as active today">RADAR</span>}
+          <span className={`sc-tier sc-tier-${signal.tier}`}>{signal.tier}</span>
+        </span>
       </div>
 
       <div className="sc-body">

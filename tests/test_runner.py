@@ -234,6 +234,55 @@ def test_process_new_bar_without_a_subscriber_hook_behaves_exactly_as_before(mon
     assert stats.tier_counts["high"] == 1
 
 
+def test_process_new_bar_defaults_data_feed_none_and_origin_watchlist(monkeypatch):
+    """Every existing caller/test that doesn't pass data_feed/origin (this
+    one included) must keep journaling exactly as before -- None/
+    'watchlist' are the same defaults journal.write_cluster() itself
+    uses."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
+    row = conn.execute("SELECT data_feed, origin FROM detections WHERE symbol = 'TSLA'").fetchone()
+    assert row == (None, "watchlist")
+
+
+def test_process_new_bar_journals_the_data_feed_and_origin_it_was_given(monkeypatch):
+    """Both callers (run_replay/run_live) resolve data_feed/origin once
+    per invocation/tick and pass them straight through -- this confirms
+    process_new_bar actually threads them to the journal row, the one
+    thing neither caller can verify about itself in isolation."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+        data_feed="sip", origin="screening",
+    )
+    row = conn.execute("SELECT data_feed, origin FROM detections WHERE symbol = 'TSLA'").fetchone()
+    assert row == ("sip", "screening")
+
+
 def test_process_new_bar_calls_subscriber_hook_with_the_cluster_and_rendered_text_on_a_high_send(monkeypatch):
     anchors, bar, result = _high_tier_fixture()
     monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
