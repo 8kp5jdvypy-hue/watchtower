@@ -18,6 +18,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tradebot/ tradebot/
 
+# The image has no .git (only tradebot/ is copied above), so
+# journal.code_version() -- which stamps every detection row with the
+# code that produced it -- always fell through to "unknown" in
+# production (found 2026-08-12). Baked in at build time instead; see
+# docker-compose.yml's build.args and docs/DEPLOYMENT.md's deploy
+# routine for where GIT_SHA actually comes from.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 # data/ is a volume mount at runtime (see docker-compose.yml), never
 # baked into the image — it's the one thing that must survive a
 # container rebuild.

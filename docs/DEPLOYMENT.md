@@ -160,8 +160,18 @@ systemctl start perch.service
 ```bash
 cd /opt/perch
 git pull
-docker compose up -d --build
+GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build
 ```
+`GIT_SHA` is a plain shell variable for this one command, read by
+Compose's `${GIT_SHA:-unknown}` build-arg substitution (see
+`docker-compose.yml`) — it never touches the app's own `.env` file.
+Baked into the image so `journal.code_version()` (every detection row's
+"what code produced this" stamp) has a real value in-container instead
+of falling back to `"unknown"` every time, which is what actually
+happened in production before 2026-08-12 — the image never had `.git`
+to shell out to. Skipping the `GIT_SHA=...` prefix still works, it just
+silently reverts to that same `"unknown"`.
+
 `restart: unless-stopped` plus `depends_on` means `bot`/`runner` don't
 need to be stopped by hand — Compose recreates whichever service's
 image actually changed.
