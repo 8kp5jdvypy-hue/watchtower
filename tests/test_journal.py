@@ -333,6 +333,39 @@ def test_historical_performance_computes_continuation_rate_and_avg_return(tmp_pa
     assert result.offset_min == 30
 
 
+def test_historical_performance_avg_return_pct_is_trend_signed_not_raw(tmp_path):
+    """Regression for the 2026-08-12 sign-convention bug: avg_return_pct
+    must be flipped to the detection's own trend, same convention
+    tier_performance()/kind_performance() already use -- a down-trend
+    continuation (price fell further) must report POSITIVE here, not the
+    raw negative price change. Mirrors the up-trend test above with the
+    same numbers so the fix's effect is directly comparable: same 5
+    marks, opposite trend, and continuation_rate/avg_return_pct both
+    invert relative to it."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # down-trend gap clusters at close=100: 2 continue down, 3 reverse up
+    # (the same raw marks as the up-trend test, opposite trend call)
+    closes_marks = [105, 102, 98, 101, 97]
+    for i, mark in enumerate(closes_marks):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="down", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+
+    result = historical_performance(conn, kind="gap", trend="down", exclude_id="nonexistent")
+    assert result is not None
+    assert result.continuation_rate == pytest.approx(0.4)  # 98,97 < 100 continue the down call; 105,102,101 reverse
+    # Only 2 of 5 continued the down call (matches continuation_rate=0.4
+    # above) -- signed to "down", the per-row returns are
+    # [-5,-2,+2,-1,+3]% (each raw % negated), mean -0.6%. Same magnitude
+    # as the up-trend test's +0.6% (same 5 raw marks), opposite sign --
+    # this trend's net effect really was negative, and now says so
+    # consistently with tier_performance()'s own convention for the
+    # identical rows, instead of disagreeing with it.
+    assert result.avg_return_pct == pytest.approx(-0.6)
+
+
 def test_historical_performance_returns_none_below_min_sample(tmp_path):
     conn = connect(tmp_path / "journal.db")
     base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)

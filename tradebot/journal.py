@@ -472,11 +472,21 @@ def historical_performance(
     if len(rows) < MIN_HISTORY_SAMPLE:
         return None
 
-    returns = [(price - close) / close for close, price, _atr14 in rows]
-    if trend == "up":
-        continued = sum(1 for r in returns if r > 0)
-    else:
-        continued = sum(1 for r in returns if r < 0)
+    # Signed to the DETECTION's own trend, same convention tier_performance()/
+    # kind_performance() already use -- a continuation always reports positive
+    # here, regardless of whether the detection itself called "up" or "down".
+    # Previously left un-flipped: continuation_rate correctly interpreted
+    # direction via the if/else below, but avg_return_pct summed the raw,
+    # un-flipped returns, so a down-trend detection that continued down
+    # reported a NEGATIVE avg_return_pct here while the same row would
+    # report POSITIVE in tier_performance()/kind_performance() -- the same
+    # 5 historical rows disagreeing on their own sign depending which
+    # endpoint asked.
+    returns = [
+        ((price - close) / close) if trend == "up" else -((price - close) / close)
+        for close, price, _atr14 in rows
+    ]
+    continued = sum(1 for r in returns if r > 0)
 
     atr_normalized = [abs(price - close) / atr14 for close, price, atr14 in rows if atr14]
     avg_return_atr = sum(atr_normalized) / len(atr_normalized) if atr_normalized else None
