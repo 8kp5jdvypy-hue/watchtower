@@ -162,8 +162,8 @@ def cached_session_dates(cache_dir: Path, symbols: list[str]) -> list[date]:
     return sorted(common or set())
 
 
-def full_session_rth_bars(symbol: str, session_date: date) -> list[Bar]:
-    md = ReplayMarketData(CACHE_DIR, symbol, session_date)
+def full_session_rth_bars(symbol: str, session_date: date, cache_dir: Path = CACHE_DIR) -> list[Bar]:
+    md = ReplayMarketData(cache_dir, symbol, session_date)
     while md.advance():
         pass
     return list(md.session_bars(symbol, session_date))
@@ -266,7 +266,7 @@ class TelegramHaltChecker:
 
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
-    subscriber_hook=None, now=None, market_bars=None,
+    subscriber_hook=None, now=None, market_bars=None, data_feed=None, origin="watchlist",
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
     called right after a HIGH alert is sent to the ops channel/console —
@@ -288,7 +288,12 @@ def process_new_bar(
     market_bars: {proxy_symbol: bars}, for detectors.relative_strength_break
     via evaluate_bar's CONTEXT_DETECTORS pass. None (the default) means
     that detector simply never fires — same fail-conservative behavior
-    as any other missing-data case, not an error."""
+    as any other missing-data case, not an error.
+
+    data_feed/origin: passed straight through to journal.write_cluster()
+    and the Cluster this builds — see that function's docstring. Both
+    callers (run_replay/run_live) resolve these once per invocation/tick
+    and pass them in; this function has no way to know either on its own."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
@@ -317,6 +322,8 @@ def process_new_bar(
         detections=result["detections"],
         code_version_str=version,
         primary_kind=result["primary_kind"],
+        data_feed=data_feed,
+        origin=origin,
     )
     tier = tier_for_score(result["score"]).value
     raw_tier_is_high = tier == "high"
@@ -379,6 +386,7 @@ def process_new_bar(
         atr14=result["atr14"],
         trend=result["trend"],
         code_version=version,
+        origin=origin,
     )
 
     if raw_tier_is_high and news_driven and event_window.severity == "suppress":
@@ -743,13 +751,23 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
 # --------------------------------------------------------------------------
 
 
-def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
+def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None) -> HeartbeatStats:
     """db_path: override the journal DB path (default DEFAULT_DB_PATH).
     Used by scripts/compare_replay.py to run two versions of the
     detection logic against the same historical session into two
     separate DB files, without touching the real journal — see that
     script's module docstring for why this is a separate-file design
-    rather than an in-place A/B split."""
+    rather than an in-place A/B split.
+
+    cache_dir: override which cache tree (see scripts/fetch_cache.py) is
+    replayed against (default CACHE_DIR, i.e. data/cache/). Used the
+    same way as db_path, but for comparing two DATA sources (e.g. IEX
+    vs. SIP -- see docs/sip-migration-proposal.md's Phase 1) instead of
+    two code versions. Only affects this replay call -- run_live never
+    passes this, so live mode is untouched."""
+    from tradebot.vendors.alpaca import DETECTOR_DATA_FEED  # deferred: avoid importing the vendor SDK for every runner.py import
+
+    cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
     open_ts, _close_ts = session_bounds(session_date)
 
     conn = connect(db_path) if db_path is not None else connect()
@@ -767,12 +785,12 @@ def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
     except Exception:
         stats.errors.append(traceback.format_exc())
 
-    historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
+    historical_sessions = [s for s in cached_session_dates(cache_dir, WATCHLIST) if s < session_date]
     history_by_symbol = {
-        symbol: [full_session_rth_bars(symbol, s) for s in historical_sessions] for symbol in WATCHLIST
+        symbol: [full_session_rth_bars(symbol, s, cache_dir) for s in historical_sessions] for symbol in WATCHLIST
     }
 
-    md = {symbol: ReplayMarketData(CACHE_DIR, symbol, session_date) for symbol in WATCHLIST}
+    md = {symbol: ReplayMarketData(cache_dir, symbol, session_date) for symbol in WATCHLIST}
     anchors: dict[str, DailyAnchors] = {}
     rth_bar_count = {symbol: 0 for symbol in WATCHLIST}
 
@@ -819,6 +837,7 @@ def run_replay(session_date: date, alerter, db_path=None) -> HeartbeatStats:
                 process_new_bar(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], quote_fn, chain_fn, stats, market_bars=market_bars,
+                    data_feed=DETECTOR_DATA_FEED,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, clock["t"])
             except Exception:
@@ -957,6 +976,8 @@ def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime,
 def run_live(
     alerter, subscriber_hook=None, medium_fanout_fn=None, enable_broad_scan: bool = False, db_path=None,
 ) -> HeartbeatStats:
+    from tradebot.vendors.alpaca import DETECTOR_DATA_FEED  # deferred: avoid importing the vendor SDK for every runner.py import
+
     now = datetime.now(timezone.utc)
     session_date = now.astimezone(ET).date()
     if not CALENDAR.is_session(session_date):
@@ -1067,6 +1088,7 @@ def run_live(
 
         scan_symbols = WATCHLIST + [s for s in dynamic_symbols if s not in WATCHLIST]
         for symbol in scan_symbols:
+            origin = "watchlist" if symbol in WATCHLIST else "screening"
             try:
                 rth_bars = list(md[symbol].session_bars(symbol, session_date))
                 if not rth_bars:
@@ -1116,6 +1138,7 @@ def run_live(
                     anchors[symbol], md[symbol].quote,
                     lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
                     stats, subscriber_hook, now=loop_start, market_bars=market_bars,
+                    data_feed=DETECTOR_DATA_FEED, origin=origin,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
             except Exception:
@@ -1173,12 +1196,18 @@ def main() -> None:
         help="override the journal DB path (default data/journal.db) — for running two versions of the "
         "detection logic against the same --replay-date into separate files, see scripts/compare_replay.py",
     )
+    parser.add_argument(
+        "--cache-dir", type=str, default=None,
+        help="override which cache tree (default data/cache/) --replay-date replays against — for comparing "
+        "two DATA sources (e.g. IEX vs. SIP) into separate --db-path files, see docs/sip-migration-proposal.md",
+    )
     args = parser.parse_args()
 
     alerter = TelegramAlerter() if args.live else ConsoleAlerter()
 
     if args.replay_date:
-        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path)
+        cache_dir = Path(args.cache_dir) if args.cache_dir else None
+        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path, cache_dir=cache_dir)
     else:
         subscriber_hook = None
         medium_fanout_fn = None

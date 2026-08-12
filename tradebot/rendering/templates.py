@@ -163,13 +163,22 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
     an EDGAR filing, a macro print) — see tradebot.events. Replaces the
     Similar Setups / follow-through rows rather than showing a technical
     base rate that doesn't apply.
+
+    `cluster.origin == "screening"` (broad_scan promoted this symbol in
+    for the session, it isn't on the subscriber's watchlist) gets a plain
+    text "· RADAR" tag on the headline, not an emoji — SCANNER_PLAN.md's
+    Alert format section is explicit that the tier marker is the only
+    emoji this message ever carries. See
+    docs/broad-scan-honesty-proposal.md's finding (a).
     """
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
     bias = BIAS_LABEL.get(cluster.trend, "NEUTRAL")
     symbol = html.escape(cluster.symbol)
     rationale = html.escape(cluster.primary_headline)
+    is_screening = getattr(cluster, "origin", "watchlist") == "screening"
 
-    headline = f"<b>{tier_emoji} {cluster.tier.upper()} · {symbol} · {bias}</b>"
+    radar_suffix = " · RADAR" if is_screening else ""
+    headline = f"<b>{tier_emoji} {cluster.tier.upper()} · {symbol} · {bias}{radar_suffix}</b>"
 
     rows = [
         ("Signal strength", _signal_strength(cluster.score)),
@@ -181,17 +190,22 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
         ("Contract", _render_contract(selection)),
     ]
 
+    body = [headline, "", rationale]
+    if is_screening:
+        body += ["", "<i>RADAR: not on your watchlist — Perch's daily screen flagged it as active today.</i>"]
+    body += ["", _stats_block(rows), "", _kind_tag(cluster.kinds)]
+
     when = datetime.fromisoformat(cluster.ts_utc)
-    return "\n".join([
-        headline, "", rationale, "", _stats_block(rows), "",
-        _kind_tag(cluster.kinds), _footer(when, cluster.id),
-    ])
+    return "\n".join([*body, _footer(when, cluster.id)])
 
 
 def render_digest(title: str, tier: str, clusters: list, tier_perf, when: datetime) -> str:
     """MEDIUM digest: one line per cluster. Batched into one message per
     hourly window by the caller (AlertBudget); the track record is
-    stated once here, not repeated per ticker."""
+    stated once here, not repeated per ticker.
+
+    Same plain-text "· RADAR" tag as render_high_alert for
+    origin == "screening" clusters — see that function's docstring."""
     tier_emoji = TIER_EMOJI.get(tier, "⚪")
     header = f"<b>{tier_emoji} {html.escape(title)}</b> · {qty(len(clusters))} tickers"
     lines = [header]
@@ -199,7 +213,8 @@ def render_digest(title: str, tier: str, clusters: list, tier_perf, when: dateti
         lines.append(f"<i>Track record: {_render_similar(tier_perf)}</i>")
     lines.append("")
     for c in clusters:
-        lines.append(f"{html.escape(c.symbol)} · {_kind_tag(c.kinds)} · {atr(c.score)}")
+        radar_suffix = " · RADAR" if getattr(c, "origin", "watchlist") == "screening" else ""
+        lines.append(f"{html.escape(c.symbol)} · {_kind_tag(c.kinds)} · {atr(c.score)}{radar_suffix}")
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)

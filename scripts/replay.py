@@ -26,6 +26,7 @@ revisit if it needs to mean something more specific.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import sys
 from collections import Counter, defaultdict
@@ -56,19 +57,19 @@ def cached_session_dates(cache_dir: Path, symbols: list[str]) -> list[date]:
     return sorted(common or set())
 
 
-def full_session_rth_bars(symbol: str, session_date: date) -> list[Bar]:
+def full_session_rth_bars(symbol: str, session_date: date, cache_dir: Path = CACHE_DIR) -> list[Bar]:
     """A session's RTH bars, fully revealed. Used only to build history
     for later sessions' avg_cum_volume_by_bar — never for evaluation."""
-    md = ReplayMarketData(CACHE_DIR, symbol, session_date)
+    md = ReplayMarketData(cache_dir, symbol, session_date)
     while md.advance():
         pass
     return list(md.session_bars(symbol, session_date))
 
 
 def replay_symbol_session(
-    symbol: str, session_date: date, historical_session_bars: list[list[Bar]]
+    symbol: str, session_date: date, historical_session_bars: list[list[Bar]], cache_dir: Path = CACHE_DIR
 ) -> list[dict]:
-    md = ReplayMarketData(CACHE_DIR, symbol, session_date)
+    md = ReplayMarketData(cache_dir, symbol, session_date)
 
     # Advance until the first RTH bar has closed (09:35 ET).
     rth_bars: list[Bar] = []
@@ -145,31 +146,50 @@ def print_histogram(scores: list[float], bucket_width: float = 0.25) -> None:
 
 
 def main() -> None:
-    sessions = cached_session_dates(CACHE_DIR, WATCHLIST)
-    if not sessions:
-        raise SystemExit("no cached sessions found for the full watchlist — run fetch_cache.py first")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--cache-dir", type=Path, default=CACHE_DIR,
+        help="cache tree to replay against (default data/cache/) -- for comparing two DATA sources "
+        "(e.g. IEX vs. SIP) into separate --db-path/--out files, see docs/sip-migration-proposal.md",
+    )
+    parser.add_argument(
+        "--db-path", type=Path, default=None,
+        help="override the journal DB path (default data/journal.db) -- pair with --cache-dir to run "
+        "the same session set against two data sources into two separate journals",
+    )
+    parser.add_argument(
+        "--out", type=Path, default=OUT_PATH,
+        help="CSV output path (default out/replay_detections.csv)",
+    )
+    args = parser.parse_args()
+    cache_dir: Path = args.cache_dir
+    out_path: Path = args.out
 
-    print(f"replaying {len(sessions)} sessions x {len(WATCHLIST)} symbols: {sessions[0]} .. {sessions[-1]}")
+    sessions = cached_session_dates(cache_dir, WATCHLIST)
+    if not sessions:
+        raise SystemExit(f"no cached sessions found for the full watchlist in {cache_dir} — run fetch_cache.py first")
+
+    print(f"replaying {len(sessions)} sessions x {len(WATCHLIST)} symbols: {sessions[0]} .. {sessions[-1]} (cache: {cache_dir})")
 
     all_rows: list[dict] = []
     history_by_symbol: dict[str, list[list[Bar]]] = {s: [] for s in WATCHLIST}
 
     for session_date in sessions:
         for symbol in WATCHLIST:
-            rows = replay_symbol_session(symbol, session_date, history_by_symbol[symbol])
+            rows = replay_symbol_session(symbol, session_date, history_by_symbol[symbol], cache_dir)
             all_rows.extend(rows)
             # this session's RTH bars become available history for later sessions
-            history_by_symbol[symbol].append(full_session_rth_bars(symbol, session_date))
+            history_by_symbol[symbol].append(full_session_rth_bars(symbol, session_date, cache_dir))
 
-    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     csv_fields = ["session", "ts_et", "symbol", "kinds", "headlines", "score", "close", "atr14", "trend"]
-    with OUT_PATH.open("w", newline="", encoding="utf-8") as f:
+    with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(all_rows)
-    print(f"\nwrote {len(all_rows)} cluster rows to {OUT_PATH}")
+    print(f"\nwrote {len(all_rows)} cluster rows to {out_path}")
 
-    conn = connect()
+    conn = connect(args.db_path) if args.db_path else connect()
     version = code_version()
     for r in all_rows:
         write_cluster(

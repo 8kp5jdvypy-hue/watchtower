@@ -31,6 +31,24 @@ from tradebot.marketdata import OptionChain as MDOptionChain
 from tradebot.marketdata import OptionContract as MDOptionContract
 from tradebot.marketdata import Quote as MDQuote
 
+# The feed every detector-facing call (fetch_daily_bars,
+# fetch_intraday_bars, fetch_daily_bars_bulk) uses -- read once at
+# import time, defaulting to "iex" so this is a no-op for current live
+# behavior until DETECTOR_DATA_FEED is actually set. See
+# docs/sip-migration-proposal.md for why this exists and what it does
+# and doesn't cover: the quote-display calls (fetch_latest_quote,
+# fetch_latest_quotes) stay on DataFeed.SIP unconditionally, and
+# fetch_option_chain's OptionsFeed.INDICATIVE is a different feed enum
+# entirely -- neither references this constant.
+def _resolve_detector_data_feed() -> DataFeed:
+    raw = os.environ.get("DETECTOR_DATA_FEED", "iex").strip().lower()
+    if raw not in ("iex", "sip"):
+        raise ValueError(f"DETECTOR_DATA_FEED must be 'iex' or 'sip', got {raw!r}")
+    return DataFeed.SIP if raw == "sip" else DataFeed.IEX
+
+
+DETECTOR_DATA_FEED = _resolve_detector_data_feed()
+
 
 class AlpacaCredentialsError(RuntimeError):
     pass
@@ -95,16 +113,18 @@ def _to_bars(symbol: str, raw_bars) -> list[Bar]:
 def fetch_daily_bars(symbol: str, n: int) -> list[Bar]:
     """The n most recent daily bars, oldest first.
 
-    Still IEX, deliberately, even though the account is now SIP-entitled
-    (Algo Trader Plus, 2026-08). This feeds anchors/history for the
-    detectors, and rvol_spike's avg_cum_volume_by_bar baseline is built
-    from IEX-cached replay history (see scripts/fetch_cache.py) — live-
-    measured, SIP volume runs ~20-40x IEX's on this watchlist (real
+    Feed controlled by DETECTOR_DATA_FEED (see the module-level constant
+    above), defaulting to IEX -- even though the account is now
+    SIP-entitled (Algo Trader Plus, 2026-08). This feeds anchors/history
+    for the detectors, and rvol_spike's avg_cum_volume_by_bar baseline
+    is built from cached replay history (see scripts/fetch_cache.py) —
+    live-measured, SIP volume runs ~20-40x IEX's on this watchlist (real
     numbers, not an estimate: SPY 26x, NVDA 20x, TSLA 42x, same session,
-    same RTH window). Flipping this to SIP before that baseline is
-    rebuilt against SIP-scale history would make rvol_spike fire on
-    almost everything. Flip together with fetch_intraday_bars below,
-    only after a real recalibration pass — not one call at a time.
+    same RTH window). Setting DETECTOR_DATA_FEED=sip before that cached
+    baseline is rebuilt against SIP-scale history would make rvol_spike
+    fire on almost everything -- see docs/sip-migration-proposal.md's
+    Phase 1/3 for the required cache-rebuild sequencing. Flip together
+    with fetch_intraday_bars below, never one call at a time.
     """
     client = _client()
     end = datetime.now(timezone.utc)
@@ -114,7 +134,7 @@ def fetch_daily_bars(symbol: str, n: int) -> list[Bar]:
         timeframe=TimeFrame.Day,
         start=start,
         end=end,
-        feed=DataFeed.IEX,
+        feed=DETECTOR_DATA_FEED,
     )
     response = _with_backoff(lambda: client.get_stock_bars(request))
     raw = response.data.get(symbol, [])
@@ -126,9 +146,10 @@ def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
     covers premarket, RTH, and anything else the feed reports in that
     window. Callers slice into premarket vs. RTH by clock time.
 
-    Still IEX -- this is what rvol_spike and every other detector
-    actually evaluates. See fetch_daily_bars' docstring for why this
-    can't move to SIP on its own.
+    Feed controlled by DETECTOR_DATA_FEED, defaulting to IEX -- this is
+    what rvol_spike and every other detector actually evaluates. See
+    fetch_daily_bars' docstring for why this can't move to SIP on its
+    own without a cache rebuild first.
     """
     client = _client()
     start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
@@ -138,7 +159,7 @@ def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
         timeframe=TimeFrame(5, TimeFrameUnit.Minute),
         start=start,
         end=end,
-        feed=DataFeed.IEX,
+        feed=DETECTOR_DATA_FEED,
     )
     response = _with_backoff(lambda: client.get_stock_bars(request))
     raw = response.data.get(symbol, [])
@@ -270,13 +291,14 @@ def fetch_daily_bars_bulk(symbols: list[str], lookback_days: int = 30) -> dict[s
     bars for (new listing, halted, etc.) is simply absent from the
     result, never padded with an empty/fabricated entry.
 
-    Still IEX -- broad_scan.py computes its own rvol = snapshot.volume /
+    Feed controlled by DETECTOR_DATA_FEED, defaulting to IEX --
+    broad_scan.py computes its own rvol = snapshot.volume /
     snapshot.avg_volume against these same cached bars (see
     screen_snapshot()'s RVOL_THRESHOLD check), the identical
     live-vs-historical-baseline mismatch fetch_daily_bars' docstring
     describes. Same blocker, same fix: flip together with the other
-    three bar/volume call sites in this file, only after a real
-    recalibration pass.
+    two detector-facing call sites in this file, only after a real
+    recalibration pass and cache rebuild.
     """
     client = _client()
     end = datetime.now(timezone.utc)
@@ -285,7 +307,7 @@ def fetch_daily_bars_bulk(symbols: list[str], lookback_days: int = 30) -> dict[s
     for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
         chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
         request = StockBarsRequest(
-            symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start, end=end, feed=DataFeed.IEX,
+            symbol_or_symbols=chunk, timeframe=TimeFrame.Day, start=start, end=end, feed=DETECTOR_DATA_FEED,
         )
         response = _with_backoff(lambda r=request: client.get_stock_bars(r))
         for symbol, raw_bars in response.data.items():

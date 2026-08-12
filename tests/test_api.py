@@ -362,6 +362,37 @@ def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, 
     assert signal["context_summary"] is None
 
 
+def test_signals_feed_reports_origin_defaulting_to_watchlist(app, client):
+    """docs/broad-scan-honesty-proposal.md finding (a) -- the dashboard
+    needs origin to badge broad_scan-promoted symbols. NULL (every row
+    written before this shipped, or any watchlist row) reports as the
+    real 'watchlist' string, not null, since that's the true origin for
+    those rows and the frontend badge only checks for 'screening'."""
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    write_cluster(
+        app.journal_conn, session=today, symbol="TSLA", ts_utc=now.isoformat(),
+        kinds="level_break", headlines="h", score=5.0, close=507.30, atr14=2.0,
+        trend="up", detections=[Detection("TSLA", "level_break", now, 5.0, "h", {})],
+        code_version_str="test", primary_kind="level_break",
+        # origin intentionally omitted -- simulates a pre-migration row.
+    )
+    write_cluster(
+        app.journal_conn, session=today, symbol="PLTR", ts_utc=(now + timedelta(seconds=1)).isoformat(),
+        kinds="level_break", headlines="h", score=5.0, close=30.0, atr14=1.0,
+        trend="up", detections=[Detection("PLTR", "level_break", now, 5.0, "h", {})],
+        code_version_str="test", primary_kind="level_break", origin="screening",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "origin@example.com")
+    _verify_token(client, token)
+
+    body = client.get("/signals/feed").get_json()
+    by_symbol = {s["symbol"]: s["origin"] for s in body["signals"]}
+    assert by_symbol == {"TSLA": "watchlist", "PLTR": "screening"}
+
+
 def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, client):
     now = datetime.now(timezone.utc)
     today = datetime.now(ET).date().isoformat()
