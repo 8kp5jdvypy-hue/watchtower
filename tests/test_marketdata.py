@@ -11,7 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from tradebot.marketdata import ReplayMarketData
+from tradebot.detectors import Bar
+from tradebot.marketdata import ReplayMarketData, write_bars_csv
 
 SYMBOL = "TEST"
 SESSION = date(2026, 6, 15)
@@ -173,3 +174,38 @@ def test_wrong_symbol_or_session_raises(cache_dir):
         md.session_bars("OTHER", SESSION)
     with pytest.raises(ValueError):
         md.session_bars(SYMBOL, date(2020, 1, 1))
+
+
+def test_write_bars_csv_round_trips_through_replay_market_data(tmp_path):
+    """2026-08-12: write_bars_csv is the write-side counterpart to
+    _read_bars, moved here from scripts/fetch_cache.py so
+    tradebot.runner's close-time cache fetch can call it directly (no
+    scripts/ import needed inside the container). A file it writes must
+    be exactly what ReplayMarketData/backfill_marks() can read back --
+    that's the whole point of the fix this exists for."""
+    session_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    bars = [
+        Bar(symbol=SYMBOL, ts=session_open + timedelta(minutes=BAR_MINUTES * i), open=100 + i, high=100.5 + i, low=99.5 + i, close=100.1 + i, volume=1000 + i)
+        for i in range(5)
+    ]
+    path = tmp_path / SYMBOL / f"intraday_{SESSION.isoformat()}.csv"
+    write_bars_csv(path, bars)
+
+    assert path.exists()
+    md = ReplayMarketData(tmp_path, SYMBOL, SESSION)
+    while md.advance():
+        pass
+    read_back = list(md.session_bars(SYMBOL, SESSION))
+
+    assert len(read_back) == 5
+    assert [b.close for b in read_back] == [b.close for b in bars]
+    assert [b.ts for b in read_back] == [b.ts for b in bars]
+
+
+def test_write_bars_csv_creates_parent_directories(tmp_path):
+    path = tmp_path / "NEWSYMBOL" / f"intraday_{SESSION.isoformat()}.csv"
+    assert not path.parent.exists()
+
+    write_bars_csv(path, [Bar(symbol="NEWSYMBOL", ts=datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1)])
+
+    assert path.exists()

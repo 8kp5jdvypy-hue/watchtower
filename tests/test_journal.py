@@ -13,7 +13,9 @@ from tradebot.journal import (
     MIN_HISTORY_SAMPLE,
     backfill_marks,
     cluster_id,
+    code_version,
     connect,
+    detected_symbols_for_session,
     historical_performance,
     hour_performance,
     iv_rank,
@@ -182,6 +184,55 @@ def test_cluster_id_is_deterministic():
     c = cluster_id("SPY", "2026-06-15", "2026-06-15T14:05:00+00:00", "gap")
     assert a == b
     assert a != c
+
+
+def test_code_version_prefers_git_sha_env_var(monkeypatch):
+    """2026-08-12: the deployed container has no .git, so the subprocess
+    fallback always returned 'unknown' in production -- GIT_SHA is now
+    baked in at build time (Dockerfile ARG/ENV, docker-compose.yml's
+    build.args) and must be checked first."""
+    monkeypatch.setenv("GIT_SHA", "abc1234")
+    assert code_version() == "abc1234"
+
+
+def test_code_version_falls_back_to_git_subprocess_when_env_var_unset_or_unknown(monkeypatch):
+    """Local dev: GIT_SHA is normally unset, but a real .git directory
+    is -- must still resolve a real hash, not silently prefer a literal
+    'unknown' over a real subprocess result."""
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    version = code_version()
+    assert version != ""  # this repo has a real .git; some real value comes back
+
+    monkeypatch.setenv("GIT_SHA", "unknown")  # the Dockerfile's own default value
+    assert code_version() == version  # must fall through to the same real subprocess result, not "unknown"
+
+
+def test_detected_symbols_for_session_covers_watchlist_and_screening_alike(tmp_path):
+    """2026-08-12: the manual emergency backfill only covered WATCHLIST,
+    leaving screening-origin detections with 0 marks. This is the single
+    source of truth the permanent fix (runner.py's close-time cache
+    fetch) and backfill_marks() itself both use, so their symbol scope
+    can never drift apart."""
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol="AAPL", ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", origin="watchlist",
+    )
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol="FDRX", ts_utc="2026-06-15T14:05:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=10.0, atr14=0.5,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", origin="screening",
+    )
+    # A different session -- must not appear.
+    write_cluster(
+        conn, session="2026-06-16", symbol="TSLA", ts_utc="2026-06-16T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=200.0, atr14=2.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+
+    assert detected_symbols_for_session(conn, SESSION) == ["AAPL", "FDRX"]
 
 
 def _write_bar_csv(path: Path, rows: list[dict]) -> None:

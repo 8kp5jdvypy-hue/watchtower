@@ -14,7 +14,10 @@
 #   docker compose restart bot
 services:
   worker:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     command: python -m tradebot.telegram_bot.worker
     env_file: .env
     volumes:
@@ -27,7 +30,10 @@ services:
         max-file: "5"
 
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     command: python -m tradebot.telegram_bot.main
     env_file: .env
     volumes:
@@ -42,7 +48,10 @@ services:
         max-file: "5"
 
   runner:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     command: python -m tradebot.runner --live --broad-scan
     env_file: .env
     volumes:
@@ -71,7 +80,10 @@ services:
         max-file: "5"
 
   api:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
     command: gunicorn tradebot.api.wsgi:app -b 0.0.0.0:8000 --workers 2
     env_file: .env
     volumes:

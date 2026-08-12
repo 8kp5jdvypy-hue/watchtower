@@ -69,6 +69,7 @@ from tradebot.journal import (
     backfill_marks,
     code_version,
     connect,
+    detected_symbols_for_session,
     historical_performance,
     iv_rank,
     pending_contract_backfills,
@@ -83,7 +84,7 @@ from tradebot.journal import (
     tier_performance,
 )
 from tradebot.journal import write_cluster as journal_write_cluster
-from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData
+from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData, write_bars_csv
 
 SIMILAR_SETUPS_LOOKBACK = 200  # deep enough to realistically reach costs.MIN_SIMILAR_SETUPS_SAMPLE (50)
 
@@ -575,7 +576,7 @@ def _alert_if_backfill_implausible(
     )
     try:
         alerter.send(
-            templates.render_system_notice(
+            templates.render_failure_notice(
                 f"backfill_marks wrote only {marks_written} mark(s) for {total_detections} "
                 f"detection(s) on {session_date.isoformat()} -- today's AFTER DETECTION outcomes "
                 f"are likely missing or incomplete. See runner logs.",
@@ -585,6 +586,114 @@ def _alert_if_backfill_implausible(
         )
     except Exception:
         logger.error("also failed to send the backfill-marks alert itself", exc_info=True)
+
+
+def _cache_todays_intraday_bars(
+    cache_dir: Path, symbols: list[str], session_date: date, fetch_fn=None,
+) -> tuple[list[str], list[str]]:
+    """The actual structural fix behind the 2026-08-12 incident: nothing
+    in the live pipeline has ever written today's own intraday bars to
+    the cache directory (LiveMarketData fetches straight into memory,
+    never to disk; scripts/fetch_cache.py's walk-back starts at
+    date.today() - 1, so it can never target today either) -- meaning
+    backfill_marks() reading from cache has been structurally unable to
+    succeed on a live close, on any day, since the live path was built.
+    Called once, at close, right before backfill_marks(): fetches every
+    symbol that had a detection this session (watchlist AND screening,
+    via journal.detected_symbols_for_session -- the old manual patch only
+    covered watchlist) directly from the vendor and writes it to disk in
+    the same shape backfill_marks() already reads.
+
+    fetch_fn defaults to vendors.alpaca.fetch_intraday_bars (deferred
+    import, same "tests inject a fake, no vendor SDK required" pattern
+    as run_broad_scan's fetch_bars_fn above).
+
+    Feed consistency: the default fetch_fn uses DETECTOR_DATA_FEED, the
+    same module-level constant resolved once at process start that every
+    other bar this session came from used -- called once per symbol in
+    one loop within one process invocation, never re-resolved per
+    symbol, so one date's file can never mix feeds within a single call.
+    That guarantee holds for the normal same-day/same-process case; a
+    deliberate, delayed, cross-process re-run for a past session (a
+    manual repair) must set DETECTOR_DATA_FEED to match whatever feed
+    that past session actually ran under -- same discipline
+    scripts/fetch_cache.py already requires for any historical-date
+    operation, not a new gap this introduces.
+
+    Returns (succeeded, failed) symbol lists -- never raises; a single
+    symbol's vendor error must not block caching the rest."""
+    feed_label = "injected fetch_fn"
+    if fetch_fn is None:
+        from tradebot.vendors.alpaca import DETECTOR_DATA_FEED, fetch_intraday_bars  # deferred: avoid importing the vendor SDK for every runner.py import
+
+        fetch_fn = fetch_intraday_bars
+        feed_label = DETECTOR_DATA_FEED
+
+    logger.info("close-time intraday cache fetch: %d symbol(s), feed=%s, session=%s", len(symbols), feed_label, session_date.isoformat())
+    succeeded: list[str] = []
+    failed: list[str] = []
+    for symbol in symbols:
+        try:
+            bars = fetch_fn(symbol, session_date)
+        except Exception:
+            logger.error("close-time cache fetch failed for %s (session=%s)", symbol, session_date.isoformat(), exc_info=True)
+            failed.append(symbol)
+            continue
+        if not bars:
+            # Unlike scripts/fetch_cache.py's historical walk-back (which
+            # must tell a real holiday from a real failure), every symbol
+            # here is known to have fired a detection today -- there is
+            # no legitimate "holiday" explanation for empty bars, so this
+            # is always loud.
+            logger.error("fetch_intraday_bars returned no bars for %s on %s despite a detection firing today", symbol, session_date.isoformat())
+            failed.append(symbol)
+            continue
+        write_bars_csv(cache_dir / symbol / f"intraday_{session_date.isoformat()}.csv", bars)
+        succeeded.append(symbol)
+    return succeeded, failed
+
+
+def _alert_if_cache_fetch_failed(
+    alerter, succeeded: list[str], failed: list[str], session_date: date, when: datetime,
+) -> None:
+    """Separate from _alert_if_backfill_implausible on purpose -- an
+    operator seeing only "backfill wrote too few marks" doesn't know
+    which stage broke. This fires from the FETCH stage specifically
+    (vendor/auth trouble), independent of and before backfill_marks()
+    ever runs, so the two alerts together say WHERE it broke, not just
+    THAT it broke.
+
+    Two severities, not one: ANY failed symbol gets an ERROR log line
+    (still worth knowing, still visible in docker compose logs), but the
+    loud Telegram page is reserved for TOTAL failure -- succeeded is
+    empty, i.e. 0 of N -- the "systemic vendor/auth outage" shape this
+    was actually designed for. A single symbol's transient vendor hiccup
+    must never page: backfill_marks()'s own missing-cache-file log for
+    that one symbol, plus _alert_if_backfill_implausible if it turns out
+    to matter for the day's overall count, remain the safety net for a
+    partial miss without escalating every isolated failure to a page."""
+    if not failed:
+        return
+    total = len(succeeded) + len(failed)
+    logger.error(
+        "close-time intraday cache fetch failed for %d/%d symbol(s) on %s: %s",
+        len(failed), total, session_date.isoformat(), ", ".join(failed),
+    )
+    if succeeded:
+        return  # partial failure -- logged above, not paged
+    try:
+        alerter.send(
+            templates.render_failure_notice(
+                f"Close-time cache fetch failed for ALL {total} symbol(s) on "
+                f"{session_date.isoformat()} ({', '.join(failed)}) -- likely a vendor/auth problem, "
+                f"not a backfill problem. AFTER DETECTION outcomes cannot be computed until this "
+                f"is fixed. See runner logs.",
+                when,
+            ),
+            priority=outbox.PRIORITY_HIGH,
+        )
+    except Exception:
+        logger.error("also failed to send the cache-fetch-failure alert itself", exc_info=True)
 
 
 def _last_recap_week_end(path: Path) -> datetime | None:
@@ -1196,6 +1305,9 @@ def run_live(
 
     end_time = datetime.now(timezone.utc)
     send_log_summary(budget, alerter, conn, end_time)
+    todays_symbols = detected_symbols_for_session(conn, session_date)
+    fetched_ok, fetch_failed = _cache_todays_intraday_bars(CACHE_DIR, todays_symbols, session_date)
+    _alert_if_cache_fetch_failed(alerter, fetched_ok, fetch_failed, session_date, end_time)
     marks_written = backfill_marks(conn, session_date)
     _alert_if_backfill_implausible(alerter, stats, marks_written, session_date, end_time)
     backfill_pending_contract_close_mids(conn, md, session_date)
@@ -1203,6 +1315,7 @@ def run_live(
     heartbeat = templates.render_heartbeat(
         session_date, end_time - now, stats.tier_counts, stats.suppression_counts,
         stats.data_gaps, stats.errors, tier_performance(conn), end_time,
+        cache_fetch_failed=fetch_failed,
     )
     alerter.send(heartbeat, priority=outbox.PRIORITY_LOG)
     _mark_session_close_sent(SESSION_CLOSE_STATE_FILE, session_date)

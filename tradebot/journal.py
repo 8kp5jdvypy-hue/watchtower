@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import statistics
 import subprocess
@@ -204,7 +205,20 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
 
 
 def code_version() -> str:
-    """Short git hash at write time, or 'unknown' outside a git repo."""
+    """Short git hash at write time.
+
+    2026-08-12: the deployed container has no .git directory (the
+    Dockerfile only COPYs tradebot/), so the git subprocess below always
+    failed in production and every row silently got 'unknown' -- not
+    just a missing value, a load-bearing one: this is the only per-row
+    record of which code produced a detection. GIT_SHA is now baked into
+    the image at build time (see Dockerfile's ARG/ENV and
+    docker-compose.yml's build.args) and checked first; the git
+    subprocess is the fallback for local dev, where GIT_SHA is normally
+    unset but a real .git directory is."""
+    env_sha = os.environ.get("GIT_SHA")
+    if env_sha and env_sha != "unknown":
+        return env_sha
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -340,6 +354,17 @@ def _price_at_or_after(bars, target_ts: datetime) -> float | None:
         if bar_close_ts(b) >= target_ts:
             return b.close
     return None
+
+
+def detected_symbols_for_session(conn: sqlite3.Connection, session: date) -> list[str]:
+    """Every distinct symbol with at least one journaled detection this
+    session -- watchlist AND screening alike, unlike the old ad-hoc
+    manual backfill which only ever covered WATCHLIST. The single source
+    of truth for "which symbols does backfill_marks() need bars for," so
+    runner.py's close-time cache fetch and backfill_marks() itself never
+    drift apart on scope."""
+    rows = conn.execute("SELECT DISTINCT symbol FROM detections WHERE session = ?", (session.isoformat(),))
+    return sorted(row[0] for row in rows)
 
 
 def backfill_marks(
