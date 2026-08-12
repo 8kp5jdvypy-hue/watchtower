@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import statistics
 import subprocess
@@ -22,6 +23,7 @@ from tradebot.config import liquidity_class
 from tradebot.detectors import Detection, bar_close_ts, tier_for_score
 from tradebot.marketdata import ReplayMarketData
 
+logger = logging.getLogger("watchtower.journal")
 ET = ZoneInfo("America/New_York")
 
 MIN_HISTORY_SAMPLE = 5
@@ -355,16 +357,31 @@ def backfill_marks(
     skips the close mark if there are no bars at all — never fabricates a
     price. Automatic and unconditional: called once at the end of every
     replay/live session (see runner.py), never gated on how the alert
-    performed — a loss is exactly as recordable as a win."""
+    performed — a loss is exactly as recordable as a win.
+
+    2026-08-12 incident: an absent cache file and "cached, but nothing
+    new to add" both silently produce zero bars here (see
+    marketdata._read_bars's `if not path.exists(): return []`), so a
+    genuinely missing intraday file for the session being backfilled was
+    indistinguishable from an ordinary quiet outcome. Logs an ERROR line
+    per symbol whose expected intraday cache file doesn't exist, so that
+    specific failure shape is loud in the logs even though the return
+    value (a bare int) has no room to carry it — see runner.py's caller,
+    which alerts on the aggregate mark count regardless of which symbols
+    caused it."""
     cache_dir = Path(cache_dir)
     rows = conn.execute(
         "SELECT id, symbol, ts_utc FROM detections WHERE session = ?", (session.isoformat(),)
     ).fetchall()
 
     bars_by_symbol: dict[str, list] = {}
+    missing_cache_symbols: set[str] = set()
     written = 0
     for detection_id, symbol, ts_utc in rows:
         if symbol not in bars_by_symbol:
+            intraday_path = cache_dir / symbol / f"intraday_{session.isoformat()}.csv"
+            if not intraday_path.exists():
+                missing_cache_symbols.add(symbol)
             bars_by_symbol[symbol] = _all_bars_for_session(cache_dir, symbol, session)
         bars = bars_by_symbol[symbol]
         detection_ts = datetime.fromisoformat(ts_utc)
@@ -384,6 +401,12 @@ def backfill_marks(
                 (detection_id, CLOSE_MARK_OFFSET_MIN, bars[-1].close),
             )
             written += 1
+    if missing_cache_symbols:
+        logger.error(
+            "backfill_marks(session=%s): no cached intraday file for %s -- outcomes for "
+            "these symbols' detections cannot be computed until it exists",
+            session.isoformat(), ", ".join(sorted(missing_cache_symbols)),
+        )
     conn.commit()
     return written
 
@@ -449,11 +472,21 @@ def historical_performance(
     if len(rows) < MIN_HISTORY_SAMPLE:
         return None
 
-    returns = [(price - close) / close for close, price, _atr14 in rows]
-    if trend == "up":
-        continued = sum(1 for r in returns if r > 0)
-    else:
-        continued = sum(1 for r in returns if r < 0)
+    # Signed to the DETECTION's own trend, same convention tier_performance()/
+    # kind_performance() already use -- a continuation always reports positive
+    # here, regardless of whether the detection itself called "up" or "down".
+    # Previously left un-flipped: continuation_rate correctly interpreted
+    # direction via the if/else below, but avg_return_pct summed the raw,
+    # un-flipped returns, so a down-trend detection that continued down
+    # reported a NEGATIVE avg_return_pct here while the same row would
+    # report POSITIVE in tier_performance()/kind_performance() -- the same
+    # 5 historical rows disagreeing on their own sign depending which
+    # endpoint asked.
+    returns = [
+        ((price - close) / close) if trend == "up" else -((price - close) / close)
+        for close, price, _atr14 in rows
+    ]
+    continued = sum(1 for r in returns if r > 0)
 
     atr_normalized = [abs(price - close) / atr14 for close, price, atr14 in rows if atr14]
     avg_return_atr = sum(atr_normalized) / len(atr_normalized) if atr_normalized else None

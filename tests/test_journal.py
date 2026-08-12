@@ -222,6 +222,62 @@ def test_backfill_marks_fills_forward_prices_and_skips_missing_offsets(tmp_path)
     assert marks[CLOSE_MARK_OFFSET_MIN] == 107  # the session's real last bar close (100 + 7)
 
 
+def test_backfill_marks_logs_an_error_when_the_intraday_cache_file_is_absent(tmp_path, caplog):
+    """2026-08-12 incident shape: the session's own intraday cache file
+    never existed at backfill time (daily.csv is present -- only the
+    session file is missing). Pre-fix, this produced 0 marks with zero
+    signal anywhere that anything was wrong. Written 0 is still correct
+    behavior here (never fabricate a price) -- what must change is that
+    it's no longer silent."""
+    cache_dir = tmp_path / "cache"
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(rth_open - timedelta(days=1), 99)])
+    # No intraday_{SESSION}.csv written at all.
+
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+
+    with caplog.at_level("ERROR", logger="watchtower.journal"):
+        written = backfill_marks(conn, SESSION, cache_dir=cache_dir)
+
+    assert written == 0  # correct -- there is genuinely nothing to write
+    assert len(caplog.records) == 1  # but it must not be silent
+    assert caplog.records[0].levelname == "ERROR"
+    assert SYMBOL in caplog.records[0].message
+    assert SESSION.isoformat() in caplog.records[0].message
+
+
+def test_backfill_marks_does_not_log_when_the_cache_file_exists_but_has_nothing_new(tmp_path, caplog):
+    """The ordinary, non-incident quiet case -- a real cache file that
+    genuinely has no bars past a detection's own timestamp -- must stay
+    quiet. Only a missing FILE is the incident shape; an empty result
+    from a real file is normal, expected behavior."""
+    cache_dir = tmp_path / "cache"
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    # Real file, but its one bar is AT the detection's own timestamp --
+    # nothing forward of it, so every offset legitimately finds nothing.
+    _write_bar_csv(cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv", [_bar_row(rth_open, 100)])
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(rth_open - timedelta(days=1), 99)])
+
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection()], code_version_str="abc123",
+    )
+    conn.commit()
+
+    with caplog.at_level("ERROR", logger="watchtower.journal"):
+        backfill_marks(conn, SESSION, cache_dir=cache_dir)
+
+    assert caplog.records == []
+
+
 def test_backfill_marks_default_offsets_are_15_30_60_and_close(tmp_path):
     """15m/30m/60m/close is the fixed, non-curated outcome checkpoint set
     — every published alert gets exactly these, automatically."""
@@ -275,6 +331,39 @@ def test_historical_performance_computes_continuation_rate_and_avg_return(tmp_pa
     assert result.continuation_rate == pytest.approx(0.6)  # 105,102,101 > 100; 98,97 < 100
     assert result.avg_return_pct == pytest.approx(0.6)  # mean of [+5,+2,-2,+1,-3] % = +0.6%
     assert result.offset_min == 30
+
+
+def test_historical_performance_avg_return_pct_is_trend_signed_not_raw(tmp_path):
+    """Regression for the 2026-08-12 sign-convention bug: avg_return_pct
+    must be flipped to the detection's own trend, same convention
+    tier_performance()/kind_performance() already use -- a down-trend
+    continuation (price fell further) must report POSITIVE here, not the
+    raw negative price change. Mirrors the up-trend test above with the
+    same numbers so the fix's effect is directly comparable: same 5
+    marks, opposite trend, and continuation_rate/avg_return_pct both
+    invert relative to it."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    # down-trend gap clusters at close=100: 2 continue down, 3 reverse up
+    # (the same raw marks as the up-trend test, opposite trend call)
+    closes_marks = [105, 102, 98, 101, 97]
+    for i, mark in enumerate(closes_marks):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="down", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+
+    result = historical_performance(conn, kind="gap", trend="down", exclude_id="nonexistent")
+    assert result is not None
+    assert result.continuation_rate == pytest.approx(0.4)  # 98,97 < 100 continue the down call; 105,102,101 reverse
+    # Only 2 of 5 continued the down call (matches continuation_rate=0.4
+    # above) -- signed to "down", the per-row returns are
+    # [-5,-2,+2,-1,+3]% (each raw % negated), mean -0.6%. Same magnitude
+    # as the up-trend test's +0.6% (same 5 raw marks), opposite sign --
+    # this trend's net effect really was negative, and now says so
+    # consistently with tier_performance()'s own convention for the
+    # identical rows, instead of disagreeing with it.
+    assert result.avg_return_pct == pytest.approx(-0.6)
 
 
 def test_historical_performance_returns_none_below_min_sample(tmp_path):

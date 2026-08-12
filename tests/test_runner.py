@@ -18,12 +18,15 @@ from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
 from tradebot.detectors import DailyAnchors, Detection
 from tradebot.events import add_event_window
 from tradebot.marketdata import Bar, Quote
+from tradebot.journal import backfill_marks
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import write_cluster
+from tradebot.telegram_bot import outbox
 import tradebot.runner as runner_mod
 from tradebot.detectors import atr as compute_atr
 from tradebot.runner import (
     HeartbeatStats,
+    _alert_if_backfill_implausible,
     bar_gap_minutes,
     evaluate_bar,
     full_session_rth_bars,
@@ -193,6 +196,135 @@ def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
     assert stats.suppression_counts["cooldown_active"] == 1
     # a plain SEND is not a suppression
     assert "send" not in stats.suppression_counts
+
+
+class _SpyAlerter:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, text, priority=None, alert_id=None):
+        self.sent.append((text, priority))
+
+
+def test_alert_if_backfill_implausible_fires_on_zero_marks_with_real_detections(caplog):
+    """2026-08-12 incident shape, exactly: ~160 real detections, 0 marks
+    written, nothing anywhere signaled it. This is the tripwire that
+    must have fired that day."""
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 12))
+    stats.record_cluster("high", Decision.SEND)
+    stats.record_cluster("log", Decision.QUEUED_FOR_EOD)
+    alerter = _SpyAlerter()
+
+    with caplog.at_level("ERROR", logger="watchtower.runner"):
+        _alert_if_backfill_implausible(alerter, stats, 0, date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert len(alerter.sent) == 1
+    text, priority = alerter.sent[0]
+    assert "0 mark" in text and "2 detection" in text
+    assert priority == outbox.PRIORITY_HIGH
+    assert len(caplog.records) == 1 and caplog.records[0].levelname == "ERROR"
+
+
+def test_alert_if_backfill_implausible_fires_on_implausibly_few_not_just_zero(caplog):
+    """Not just the literal-zero case -- 1 mark for 50 detections is just
+    as broken as 0 (a healthy day writes at least a CLOSE mark per
+    detection), and must be just as loud."""
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 12))
+    for _ in range(50):
+        stats.record_cluster("log", Decision.QUEUED_FOR_EOD)
+    alerter = _SpyAlerter()
+
+    with caplog.at_level("ERROR", logger="watchtower.runner"):
+        _alert_if_backfill_implausible(alerter, stats, 1, date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert len(alerter.sent) == 1
+    assert len(caplog.records) == 1
+
+
+def test_alert_if_backfill_implausible_stays_quiet_on_a_healthy_day():
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 12))
+    stats.record_cluster("high", Decision.SEND)
+    stats.record_cluster("log", Decision.QUEUED_FOR_EOD)
+    alerter = _SpyAlerter()
+
+    # 2 detections, 5 marks written (a plausible healthy outcome -- more
+    # than one mark per detection) -- must not alert.
+    _alert_if_backfill_implausible(alerter, stats, 5, date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert alerter.sent == []
+
+
+def test_alert_if_backfill_implausible_stays_quiet_on_a_genuinely_quiet_session():
+    """No detections at all today -- 0 marks is exactly correct, not a
+    failure. Must never false-alarm on a legitimately quiet day."""
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 12))
+    alerter = _SpyAlerter()
+
+    _alert_if_backfill_implausible(alerter, stats, 0, date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert alerter.sent == []
+
+
+def test_alert_if_backfill_implausible_logs_even_if_sending_the_alert_itself_fails():
+    """The alert channel being the thing that's broken must not swallow
+    the failure a second time -- see the incident's own shape: the first
+    layer failing silently is exactly what this whole fix exists to
+    prevent, including at this last-resort layer."""
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 12))
+    stats.record_cluster("high", Decision.SEND)
+
+    class _BrokenAlerter:
+        def send(self, text, priority=None, alert_id=None):
+            raise RuntimeError("telegram is down")
+
+    # Must not raise -- a broken alert channel must never crash the
+    # session-close sequence that runs after it (contract mid backfills,
+    # heartbeat, session-close state write).
+    _alert_if_backfill_implausible(_BrokenAlerter(), stats, 0, date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+
+def test_backfill_marks_absent_cache_actually_reaches_the_alert_end_to_end(tmp_path, caplog):
+    """The 2026-08-12 incident shape, run through the REAL pipeline, not
+    two separate assertions on each half of it: a real detection is
+    journaled, its session's intraday cache file never existed, the real
+    backfill_marks() return value is threaded into the real
+    _alert_if_backfill_implausible() -- same as runner.py's own call
+    site does, unmodified -- and both the journal-layer log line AND the
+    Telegram alert must fire from that single real 0. Neither
+    test_backfill_marks_logs_an_error_when_the_intraday_cache_file_is_absent
+    (journal.py only) nor test_alert_if_backfill_implausible_fires_on_
+    zero_marks_with_real_detections (hardcodes marks_written=0) proves
+    this connection on its own."""
+    cache_dir = tmp_path / "cache"
+    session = date(2026, 8, 12)
+    rth_open = datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc)
+    # daily.csv present (needed elsewhere in the real pipeline); the
+    # session's own intraday file is deliberately never written.
+    (cache_dir / "TSLA").mkdir(parents=True)
+    (cache_dir / "TSLA" / "daily.csv").write_text("ts,open,high,low,close,volume\n")
+
+    conn = journal_connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=session.isoformat(), symbol="TSLA", ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[Detection("TSLA", "gap", rth_open, 2.0, "gapped up", {})],
+        code_version_str="abc123",
+    )
+    conn.commit()
+
+    stats = HeartbeatStats(start_time=rth_open, session_date=session)
+    stats.record_cluster("log", Decision.QUEUED_FOR_EOD)
+    alerter = _SpyAlerter()
+    end_time = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+
+    with caplog.at_level("ERROR"):
+        marks_written = backfill_marks(conn, session, cache_dir=cache_dir)  # the real function, real return value
+        _alert_if_backfill_implausible(alerter, stats, marks_written, session, end_time)  # same call shape as runner.py:1164-1165
+
+    assert marks_written == 0
+    assert len(alerter.sent) == 1  # the Telegram alert -- the thing point 4 claimed was tested
+    assert any(r.name == "watchtower.journal" for r in caplog.records)  # the cache-missing log
+    assert any(r.name == "watchtower.runner" for r in caplog.records)  # the implausible-count log
 
 
 def _high_tier_fixture():
