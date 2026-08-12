@@ -120,7 +120,7 @@ export default function Today({ account }) {
                 <b>{topSignal.symbol}</b> below is a real signal Perch caught today — tap "View signal" on any card to see why Perch noticed.
               </p>
             ) : (
-              <p>Perch is watching SPY, QQQ, GOOGL, TSLA, BE, IONQ right now. The moment something unusual happens, a card like the ones below will show up here.</p>
+              <p>Perch is watching your full watchlist, plus scanning the market for anything else worth flagging. The moment something unusual happens, a card like the ones below will show up here.</p>
             )}
           </div>
           <button type="button" className="welcome-banner-dismiss" onClick={dismissWelcome}>Got it</button>

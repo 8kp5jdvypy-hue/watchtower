@@ -28,17 +28,36 @@ const AFTER_DETECTION_OFFSETS = [15, 30, 60]
 // a signal detected late in the session may never get all of them, and
 // that's normal, not an error (see /signals/<id>'s marks field: empty
 // until journal.backfill_marks() runs, once, at session end). Missing
-// rows render a quiet "Pending" state rather than being hidden outright,
-// so the section reads as "still developing," not "broken."
+// rows render a resolution estimate rather than a bare "Pending", so the
+// section reads as "still developing on this schedule," not "broken."
 function afterDetectionRows(marks) {
   return [
     ...AFTER_DETECTION_OFFSETS.map((offsetMin) => ({
       key: `offset-${offsetMin}`,
       label: `+${offsetMin} min after detection`,
+      offsetMin,
       mark: marks?.find((m) => m.offset_min === offsetMin && !m.at_close),
     })),
-    { key: 'close', label: 'At session close', mark: marks?.find((m) => m.at_close) },
+    { key: 'close', label: 'At session close', offsetMin: null, mark: marks?.find((m) => m.at_close) },
   ]
+}
+
+// backfill_marks() only ever runs once, at session close, for every
+// checkpoint including +15min -- there's no incremental resolution (see
+// tradebot/journal.py's backfill_marks()). So a checkpoint whose target
+// time hasn't arrived yet can honestly be given that time ("resolves
+// ~2:47 PM"), but once the target time has passed, the only honest thing
+// left to say is that it's waiting on the once-daily close batch, same
+// as the close row itself -- showing the already-elapsed target time
+// there would look exactly as broken as a bare "Pending" did.
+function pendingResolutionLabel(offsetMin, tsUtc) {
+  if (offsetMin == null) return 'Resolves after session close'
+  const targetMs = new Date(tsUtc).getTime() + offsetMin * 60 * 1000
+  if (Date.now() < targetMs) {
+    const time = new Date(targetMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+    return `Resolves ~${time}`
+  }
+  return 'Resolves after session close'
 }
 
 // Matches .signal-detail's CSS transition duration -- see sd-panel-in/
@@ -229,7 +248,7 @@ export default function SignalDetail({ id, onClose }) {
               <section className="sd-section">
                 <h2 className="sd-section-title">After detection</h2>
                 <ul className="sd-marks-list">
-                  {afterDetectionRows(data.marks).map(({ key, label, mark }) => (
+                  {afterDetectionRows(data.marks).map(({ key, label, offsetMin, mark }) => (
                     <li className="sd-mark-row" key={key}>
                       <span className="sd-mark-label">{label}</span>
                       {mark ? (
@@ -237,7 +256,7 @@ export default function SignalDetail({ id, onClose }) {
                           ${mark.price.toFixed(2)} ({(((mark.price - data.close) / data.close) * 100).toFixed(2)}%)
                         </span>
                       ) : (
-                        <span className="sd-mark-pending">Pending</span>
+                        <span className="sd-mark-pending">{pendingResolutionLabel(offsetMin, data.ts_utc)}</span>
                       )}
                     </li>
                   ))}
