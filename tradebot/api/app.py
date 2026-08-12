@@ -395,9 +395,19 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             if s not in cache or (now - cache[s][1]).total_seconds() > QUOTE_CACHE_TTL_SECONDS
         ]
         if stale:
-            fetched = fetch_quotes(stale)
-            for symbol, q in fetched.items():
-                cache[symbol] = (q, now)
+            try:
+                fetched = fetch_quotes(stale)
+            except Exception:
+                # Same "vendor hiccup shouldn't become a broken page"
+                # discipline as /auth/magic-link/request above. Unlike
+                # that endpoint, there's a good degraded response here:
+                # serve whatever's already cached (even if stale past its
+                # TTL) instead of 500ing symbols that didn't need a fetch
+                # at all.
+                logger.exception("fetch_quotes failed; serving cached quotes where available")
+            else:
+                for symbol, q in fetched.items():
+                    cache[symbol] = (q, now)
 
         return jsonify({"quotes": {s: _to_jsonable(cache[s][0]) for s in symbols if s in cache}})
 

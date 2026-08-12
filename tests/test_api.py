@@ -258,6 +258,43 @@ def test_quotes_caches_within_the_ttl(app, client, monkeypatch):
     assert call_count["n"] == 2
 
 
+def test_quotes_serves_stale_cache_instead_of_500ing_on_a_vendor_failure(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", lambda symbols: {s: _fake_quote(s, 100.0) for s in symbols})
+
+    token = _request_and_extract_token(app, client, "quotes5@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    client.get("/quotes?symbols=SPY")  # populates the cache
+    app._quote_cache["SPY"] = (app._quote_cache["SPY"][0], datetime.now(timezone.utc) - timedelta(seconds=api_app_module.QUOTE_CACHE_TTL_SECONDS + 1))
+
+    def failing_fetch_quotes(symbols):
+        raise RuntimeError("vendor is down")
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", failing_fetch_quotes)
+
+    response = client.get("/quotes?symbols=SPY")
+    assert response.status_code == 200
+    assert response.get_json()["quotes"]["SPY"]["last"] == 100.0
+
+
+def test_quotes_returns_200_with_no_quotes_when_vendor_fails_and_nothing_is_cached(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    def failing_fetch_quotes(symbols):
+        raise RuntimeError("vendor is down")
+
+    monkeypatch.setattr(api_app_module, "fetch_quotes", failing_fetch_quotes)
+
+    token = _request_and_extract_token(app, client, "quotes6@example.com")
+    client.get(f"/auth/magic-link/verify?token={token}")
+
+    response = client.get("/quotes?symbols=SPY")
+    assert response.status_code == 200
+    assert response.get_json()["quotes"] == {}
+
+
 def test_activity_is_empty_with_no_linked_telegram_identity(app, client):
     token = _request_and_extract_token(app, client, "frank@example.com")
     _verify_token(client, token)

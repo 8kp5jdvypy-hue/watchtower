@@ -11,7 +11,6 @@ import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
 import './Views.css'
 import './WelcomeBanner.css'
-import './SignalArrival.css'
 
 // How long a just-arrived card keeps its arrival treatment (see
 // SignalArrival.css's signal-arrival-glow) before the wrapper class is
@@ -138,13 +137,13 @@ export default function Today({ account }) {
         </div>
       )}
       {data && bySeverity(data.signals).map((signal) => (
-        arrivedIds.has(signal.id) ? (
-          <div className="signal-arrival" key={signal.id}>
-            <SignalCard signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
-          </div>
-        ) : (
-          <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
-        )
+        <SignalCard
+          key={signal.id}
+          signal={signal}
+          quote={quotes[signal.symbol]}
+          onView={setOpenId}
+          arrived={arrivedIds.has(signal.id)}
+        />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>

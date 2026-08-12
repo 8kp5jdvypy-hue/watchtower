@@ -20,6 +20,20 @@ export function formatEtTime(ms) {
 // firing (a slept laptop the visibility listener didn't catch) even
 // without an explicit error, so stale data is never quietly presented as
 // current just because the last request happened to succeed.
+//
+// The staleness check is evaluated before, not instead of, the literal
+// `session === 'closed'` check on purpose: useMarketClock's
+// sessionState() only ever returns 'closed' on a weekend -- every
+// weekday off-hours minute (including the middle of the night) comes
+// back as 'pre' or 'post' instead. A *stalled* poll during any non-open
+// session deserves the calm MARKET CLOSED state, not an alarming DATA
+// DELAYED, since nothing is actually expected to be updating outside
+// the open session either way (LiveStatus's compact tooltip already
+// looks up the real session label whenever status is 'closed', so this
+// doesn't lose the pre-market/after-hours distinction, just the false
+// alarm). A *healthy*, recently-succeeded poll outside 'open' still
+// reads as 'live' -- unchanged from before -- since polling can be
+// working fine even when nothing is happening market-wise.
 export function useLiveStatus({ loading, error, hasData, lastSuccessAt, session, intervalMs }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -30,7 +44,9 @@ export function useLiveStatus({ loading, error, hasData, lastSuccessAt, session,
   if (loading && !hasData) return 'loading'
   if (error && !hasData) return 'unavailable'
   if (error && hasData) return 'reconnecting'
+  if (hasData && lastSuccessAt && now - lastSuccessAt > intervalMs * 3) {
+    return session === 'open' ? 'delayed' : 'closed'
+  }
   if (session === 'closed') return 'closed'
-  if (hasData && lastSuccessAt && now - lastSuccessAt > intervalMs * 3) return 'delayed'
   return 'live'
 }
