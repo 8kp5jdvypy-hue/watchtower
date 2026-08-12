@@ -9,4 +9,10 @@ After=perch.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/perch
+# Optional (leading '-') -- backup.sh runs local-only backups fine
+# without this file; it only supplies RCLONE_REMOTE and
+# BACKUP_ENCRYPTION_PASSPHRASE_FILE for off-box shipping once that's
+# configured. Deliberately separate from the main .env (application
+# secrets) -- see docs/DEPLOYMENT.md's Backups section.
+EnvironmentFile=-/opt/perch/.backup-env
 ExecStart=/opt/perch/scripts/backup.sh
