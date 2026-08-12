@@ -166,12 +166,59 @@ docker compose up -d --build
 need to be stopped by hand — Compose recreates whichever service's
 image actually changed.
 
-## Known gap
+## Frontend deploys (Cloudflare Workers) — two separate Workers, easy to conflate
 
-The web dashboard itself (`web-app/`, a static Vite/React app talking
-only to `api.perchmarkets.com`) doesn't exist yet — this covers the
-backend (`tradebot/api/`) and its public, TLS-covered endpoint. Once
-the dashboard is built, deploy it to Cloudflare Pages (same place the
-marketing site already lives) at `app.perchmarkets.com`, and set
-`FRONTEND_URL`/`SESSION_COOKIE_DOMAIN` above so the API will accept
-requests from it.
+Everything above this section is the VPS/backend only
+(`tradebot/api/` at `api.perchmarkets.com`). The two frontends are
+**separate Cloudflare Workers, on separate projects, with separate
+deploy mechanisms** — confusing one for the other cost a real deploy
+window (2026-08-12: 40 minutes spent because this wasn't written
+down). Check the Cloudflare dashboard's project name, not just "did
+something deploy," before trusting any frontend change is live:
+
+| | `watchtower` | `perch-dashboard` |
+|---|---|---|
+| **Serves** | `perchmarkets.com` (marketing/landing, `web/`) | `app.perchmarkets.com` (the authenticated subscriber dashboard, `web-app/`) |
+| **Deploy trigger** | Auto-builds from GitHub on push, but a build still needs a **manual promote** in the Cloudflare dashboard to go live | Manual only — `wrangler deploy` from a developer's machine, no GitHub connection at all |
+| **This matters for** | Landing-page/marketing copy changes | **Every subscriber-facing dashboard change** — signal cards, copy fixes, badges, anything in `web-app/src/` |
+
+**If you just shipped a fix to `web-app/` (the actual product surface
+subscribers use), `watchtower` promoting is irrelevant to it and will
+not make your change live — only a `perch-dashboard` wrangler deploy
+does.**
+
+### Deploying `perch-dashboard` (`app.perchmarkets.com`)
+
+From `web-app/` (see that directory's own `README.md`, which already
+had this written down — this section exists so it's also findable from
+the ops doc, not just the frontend's):
+
+```bash
+npx wrangler login          # only if `npx wrangler whoami` shows not logged in
+VITE_API_URL=https://api.perchmarkets.com npm run build
+npx wrangler deploy
+```
+
+`VITE_API_URL` is baked into the JS bundle at build time, not read at
+runtime — omitting it silently falls back to `http://localhost:8000`
+(see `src/api.js`), which is a real footgun: the build still succeeds
+and deploys fine, it just points the live dashboard at a local API
+that doesn't exist from a subscriber's browser. Always set it
+explicitly for a production build; never trust an unset default.
+
+**Verify the deploy actually took** (Vite content-hashes asset
+filenames, so this proves *which* build is live, not just that
+something responded):
+```bash
+curl -s https://app.perchmarkets.com/ | grep -o 'assets/index-[A-Za-z0-9_-]*\.\(js\|css\)'
+```
+Compare the printed filenames against what your own `npm run build`
+(with `VITE_API_URL` set, same as above) just produced locally in
+`dist/assets/`. Match means the deploy landed; mismatch means it
+didn't, regardless of what the terminal said.
+
+### Deploying `watchtower` (`perchmarkets.com`)
+
+Push to the branch its GitHub build watches, then **manually promote**
+the resulting build in the Cloudflare dashboard (Workers & Pages →
+`watchtower` → Deployments) — a merge alone does not make it live.
