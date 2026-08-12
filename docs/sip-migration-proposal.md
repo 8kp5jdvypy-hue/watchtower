@@ -392,6 +392,25 @@ ii/iii) failed the same train/test consistency check
 detector `atr_units` values change as part of this cutover.** Decision
 B: Option 1 (post-cutover-only), as already recommended above.
 
+**Deploy timing matters, precisely, because of how Option 1's filter
+works.** `journal.CURRENT_FEED_FILTER_SQL` resolves "the current feed"
+from the journal's own most recent non-null `data_feed` row, not a
+fixed value. The instant this bundle deploys — **not at the later
+flip** — every new row gets `data_feed='iex'` (the env var hasn't
+changed yet), which immediately makes every pre-existing row
+(`data_feed IS NULL`) stop matching and drop out of
+`historical_performance()`/`tier_performance()`/`kind_performance()`.
+Performance goes near-empty at deploy, days before the feed itself
+ever changes, if the two steps aren't scheduled close together. (A
+second, expected reset then happens at flip itself, once the first
+`data_feed='sip'` row makes the interim post-deploy `iex` rows stop
+matching too — that one's by design, since SIP-era stats shouldn't
+include IEX-era rows regardless of exactly when they were written.)
+
+**Schedule step 1 (deploy) the evening before step 2 (flip)** —
+compresses the avoidable blank window to hours instead of however long
+elapses between an ad-hoc deploy and a separately-scheduled flip.
+
 Step 1 below has grown since it was first scoped — building it
 surfaced a second, related gap (`docs/broad-scan-honesty-proposal.md`):
 broad_scan-promoted ("screening") symbols were journaled
@@ -433,6 +452,11 @@ deployed.**
    `origin`/screening-labeling piece, however, is live-behavior-visible
    as soon as this deploys (broad_scan-promoted alerts get tagged
    immediately, independent of the feed cutover timing).
+
+   **Deploy this step the evening before step 2's flip** (see "Deploy
+   timing matters" above) — not on its own separate schedule. Deploying
+   it days ahead of the flip is not a safety margin here, it's the
+   thing that makes Performance stats blank out early for no benefit.
 2. **Flip at a session boundary, not mid-session**, in this order —
    `tradebot.runner` already "runs once per trading day and exits at
    the close" (`README.md`), so do this between one session's close and
@@ -504,12 +528,38 @@ rebuild), same-day, no git revert needed. Two things make this safe:
   same-day config rollback — no new stop mechanism needed for this
   migration specifically.
 
-**Rollback trigger criteria** (to define concretely before Phase 3, not
-left to judgment in the moment): a maximum acceptable deviation in
-daily HIGH-tier alert count vs. the Phase 1 backtest's predicted range,
-checked against the first N live sessions post-cutover. Exact N and the
-acceptable band are worth pinning down as part of Phase 2's sign-off,
-once real backtest numbers exist to anchor them against.
+**Rollback trigger criteria, pinned from the n=83 backtest (N = 5 live
+sessions):**
+
+A single session's HIGH-tier count is too noisy to trigger on by
+itself — the backtest's own per-session counts range 0–19 (mean 3.57,
+median 2, right-skewed; 0 HIGH alerts happens on ~10% of real
+historical days, so a single quiet day is not evidence of anything).
+Averaged over 5 sessions, real variability narrows a lot: computing
+every overlapping 5-session rolling average across the 83-session
+backtest (79 windows) gives a mean of 3.56/day (consistent with the
+single-session mean) and a much tighter spread —
+
+| Percentile | 5-session avg HIGH/day |
+|---|---|
+| p5 | 1.2 |
+| p25 | 2.2 |
+| p50 (median) | 3.6 |
+| p75 | 4.6 |
+| p95 | 6.8 |
+
+(Full window-mean range across all 79 windows: 1.0–7.8.)
+
+**Proposed band: [1.2, 6.8] HIGH-tier alerts/day, averaged over the
+first 5 live SIP sessions** — the p5–p95 range above, i.e. only the
+most extreme 1-in-20 historical 5-session stretches fall outside it.
+
+*(Your message cut off after "outside the band" — completing it as the
+natural reading given the band is now a single average-based range:
+**if the live 5-session average falls outside [1.2, 6.8], that's the
+rollback trigger.** Flagging this as an inference on my part, not
+something you actually said — confirm or correct before this becomes
+the operative rule.)*
 
 ## Open questions
 
