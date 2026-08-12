@@ -342,6 +342,17 @@ def _price_at_or_after(bars, target_ts: datetime) -> float | None:
     return None
 
 
+def detected_symbols_for_session(conn: sqlite3.Connection, session: date) -> list[str]:
+    """Every distinct symbol with at least one journaled detection this
+    session -- watchlist AND screening alike, unlike the old ad-hoc
+    manual backfill which only ever covered WATCHLIST. The single source
+    of truth for "which symbols does backfill_marks() need bars for," so
+    runner.py's close-time cache fetch and backfill_marks() itself never
+    drift apart on scope."""
+    rows = conn.execute("SELECT DISTINCT symbol FROM detections WHERE session = ?", (session.isoformat(),))
+    return sorted(row[0] for row in rows)
+
+
 def backfill_marks(
     conn: sqlite3.Connection,
     session: date,

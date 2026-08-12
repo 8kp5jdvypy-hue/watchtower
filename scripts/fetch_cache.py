@@ -20,7 +20,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import csv
 import logging
 import sys
 from datetime import date, timedelta
@@ -31,7 +30,7 @@ import exchange_calendars as ecals
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tradebot.config import WATCHLIST
-from tradebot.detectors import Bar
+from tradebot.marketdata import write_bars_csv as _write_bars_csv
 from tradebot.vendors.alpaca import AlpacaCredentialsError, fetch_daily_bars, fetch_intraday_bars
 
 DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
@@ -39,15 +38,6 @@ MAX_LOOKBACK_DAYS = 60  # safety cap so a long holiday streak can't loop forever
 
 logger = logging.getLogger("watchtower.fetch_cache")
 _CALENDAR = ecals.get_calendar("XNYS")  # same instance pattern as runner.py's CALENDAR
-
-
-def _write_bars_csv(path: Path, bars: list[Bar]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["ts", "open", "high", "low", "close", "volume"])
-        for b in bars:
-            writer.writerow([b.ts.isoformat(), b.open, b.high, b.low, b.close, b.volume])
 
 
 def ensure_daily(symbol: str, cache_dir: Path, n: int) -> str:

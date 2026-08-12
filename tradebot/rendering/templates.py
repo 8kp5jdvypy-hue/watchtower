@@ -346,6 +346,20 @@ def render_system_notice(text: str, when: datetime) -> str:
     return f"<b>System</b>\n{html.escape(text)}\n\n{_footer(when)}"
 
 
+def render_failure_notice(text: str, when: datetime) -> str:
+    """2026-08-12 incident: the backfill-implausible alert fired,
+    delivered correctly, and was still missed -- it sat visually
+    indistinguishable from the routine heartbeat right next to it, both
+    just plain text in the same channel. Reserved for notices that mean
+    "something is actually broken, go look now" (backfill wrote nothing,
+    the close-time cache fetch failed) as opposed to render_system_notice's
+    broader "operational, FYI" bucket (halt, stale data, cap reached) --
+    a single leading emoji, deliberately not used by any routine/
+    informational message, so this is the one thing in the channel that
+    should never blend in."""
+    return f"<b>⚠️ ALERT</b>\n{html.escape(text)}\n\n{_footer(when)}"
+
+
 def render_position_size(size, when: datetime) -> str:
     """A per-user follow-up sent alongside a HIGH alert (see
     tradebot.telegram_bot.delivery) — sizing depends on account_size and

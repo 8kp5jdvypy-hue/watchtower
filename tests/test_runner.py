@@ -17,7 +17,7 @@ import pytest
 from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
 from tradebot.detectors import DailyAnchors, Detection
 from tradebot.events import add_event_window
-from tradebot.marketdata import Bar, Quote
+from tradebot.marketdata import Bar, Quote, ReplayMarketData
 from tradebot.journal import backfill_marks
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import write_cluster
@@ -27,6 +27,7 @@ from tradebot.detectors import atr as compute_atr
 from tradebot.runner import (
     HeartbeatStats,
     _alert_if_backfill_implausible,
+    _alert_if_cache_fetch_failed,
     bar_gap_minutes,
     evaluate_bar,
     full_session_rth_bars,
@@ -265,6 +266,99 @@ def test_alert_if_backfill_implausible_stays_quiet_on_a_genuinely_quiet_session(
     assert alerter.sent == []
 
 
+def test_cache_todays_intraday_bars_writes_a_readable_file_per_symbol(tmp_path, caplog):
+    """The actual structural fix: a symbol with a real fetch result gets
+    a real, readable cache file at the exact path backfill_marks() looks
+    for."""
+    session = date(2026, 8, 12)
+    bar = Bar(symbol="TSLA", ts=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), open=100, high=101, low=99, close=100.5, volume=1000)
+
+    def fake_fetch(symbol, d):
+        assert d == session
+        return [bar]
+
+    with caplog.at_level("ERROR"):
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(tmp_path, ["TSLA"], session, fetch_fn=fake_fetch)
+
+    assert succeeded == ["TSLA"]
+    assert failed == []
+    assert caplog.records == []
+    written_path = tmp_path / "TSLA" / "intraday_2026-08-12.csv"
+    assert written_path.exists()
+    md = ReplayMarketData(tmp_path, "TSLA", session)
+    while md.advance():
+        pass
+    assert len(list(md.session_bars("TSLA", session))) == 1
+
+
+def test_cache_todays_intraday_bars_one_symbols_exception_does_not_block_the_rest(caplog, tmp_path):
+    bar = Bar(symbol="AAPL", ts=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1)
+
+    def flaky_fetch(symbol, d):
+        if symbol == "TSLA":
+            raise RuntimeError("vendor is down")
+        return [bar]
+
+    with caplog.at_level("ERROR"):
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(tmp_path, ["TSLA", "AAPL"], date(2026, 8, 12), fetch_fn=flaky_fetch)
+
+    assert succeeded == ["AAPL"]
+    assert failed == ["TSLA"]
+    assert len(caplog.records) == 1 and caplog.records[0].levelname == "ERROR"
+
+
+def test_cache_todays_intraday_bars_empty_result_is_always_a_failure_no_holiday_ambiguity(caplog, tmp_path):
+    """Unlike scripts/fetch_cache.py's historical walk-back (which must
+    tell a real holiday from a real failure), every symbol passed here
+    is known to have fired a real detection today -- there is no
+    legitimate empty-result explanation, so this never needs a calendar
+    check the way fetch_cache.py's ensure_sessions() does."""
+    with caplog.at_level("ERROR"):
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(tmp_path, ["TSLA"], date(2026, 8, 12), fetch_fn=lambda s, d: [])
+
+    assert succeeded == []
+    assert failed == ["TSLA"]
+    assert len(caplog.records) == 1
+
+
+def test_alert_if_cache_fetch_failed_fires_with_both_symbol_lists_in_the_text():
+    alerter = _SpyAlerter()
+
+    _alert_if_cache_fetch_failed(alerter, ["AAPL"], ["TSLA", "QQQ"], date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert len(alerter.sent) == 1
+    text, priority = alerter.sent[0]
+    assert "2/3" in text
+    assert "TSLA" in text and "QQQ" in text
+    assert priority == outbox.PRIORITY_HIGH
+
+
+def test_alert_if_cache_fetch_failed_stays_quiet_when_nothing_failed():
+    alerter = _SpyAlerter()
+
+    _alert_if_cache_fetch_failed(alerter, ["AAPL", "TSLA"], [], date(2026, 8, 12), datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc))
+
+    assert alerter.sent == []
+
+
+def test_alert_if_cache_fetch_failed_and_alert_if_backfill_implausible_are_separate_signals():
+    """The whole point of splitting these into two alerts: an operator
+    must be able to tell "the fetch stage broke" from "backfill found
+    nothing" without reading logs -- two different Telegram messages,
+    not one generic one."""
+    alerter = _SpyAlerter()
+    when = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+
+    _alert_if_cache_fetch_failed(alerter, [], ["TSLA"], date(2026, 8, 12), when)
+    stats = HeartbeatStats(start_time=when, session_date=date(2026, 8, 12))
+    stats.record_cluster("high", Decision.SEND)
+    _alert_if_backfill_implausible(alerter, stats, 0, date(2026, 8, 12), when)
+
+    assert len(alerter.sent) == 2
+    assert "cache fetch failed" in alerter.sent[0][0].lower()
+    assert "backfill_marks wrote only" in alerter.sent[1][0]
+
+
 def test_alert_if_backfill_implausible_logs_even_if_sending_the_alert_itself_fails():
     """The alert channel being the thing that's broken must not swallow
     the failure a second time -- see the incident's own shape: the first
@@ -325,6 +419,53 @@ def test_backfill_marks_absent_cache_actually_reaches_the_alert_end_to_end(tmp_p
     assert len(alerter.sent) == 1  # the Telegram alert -- the thing point 4 claimed was tested
     assert any(r.name == "watchtower.journal" for r in caplog.records)  # the cache-missing log
     assert any(r.name == "watchtower.runner" for r in caplog.records)  # the implausible-count log
+
+
+def test_close_time_cache_fetch_prevents_the_2026_08_12_incident_end_to_end(tmp_path, caplog):
+    """The structural fix, run through the same real pipeline as the
+    detection test above, with the one thing that test deliberately
+    lacked: the close-time cache fetch runner.py now does BEFORE
+    backfill_marks(), same call order as run_live(). Same starting
+    conditions (a real detection, no intraday cache file), opposite
+    outcome -- real marks get written and NEITHER alert fires, proving
+    this actually PREVENTS the incident rather than just detecting it
+    faster."""
+    cache_dir = tmp_path / "cache"
+    session = date(2026, 8, 12)
+    rth_open = datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc)
+    (cache_dir / "TSLA").mkdir(parents=True)
+    (cache_dir / "TSLA" / "daily.csv").write_text("ts,open,high,low,close,volume\n")
+
+    conn = journal_connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=session.isoformat(), symbol="TSLA", ts_utc=rth_open.isoformat(),
+        kinds="gap", headlines="gapped up", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[Detection("TSLA", "gap", rth_open, 2.0, "gapped up", {})],
+        code_version_str="abc123",
+    )
+    conn.commit()
+
+    stats = HeartbeatStats(start_time=rth_open, session_date=session)
+    stats.record_cluster("log", Decision.QUEUED_FOR_EOD)
+    alerter = _SpyAlerter()
+    end_time = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
+
+    def fake_fetch(symbol, d):
+        return [Bar(symbol=symbol, ts=rth_open, open=100, high=101, low=99, close=101.5, volume=1000)]
+
+    with caplog.at_level("ERROR"):
+        # Same order as run_live(): fetch+cache today's bars, THEN backfill.
+        todays_symbols = runner_mod.detected_symbols_for_session(conn, session)
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(cache_dir, todays_symbols, session, fetch_fn=fake_fetch)
+        _alert_if_cache_fetch_failed(alerter, succeeded, failed, session, end_time)
+        marks_written = backfill_marks(conn, session, cache_dir=cache_dir)
+        _alert_if_backfill_implausible(alerter, stats, marks_written, session, end_time)
+
+    assert todays_symbols == ["TSLA"]
+    assert failed == []
+    assert marks_written > 0  # the incident's own number was 0 -- this is the fix
+    assert alerter.sent == []  # neither alert fires -- nothing was wrong to report
+    assert caplog.records == []  # not even a log line -- this is prevention, not faster detection
 
 
 def _high_tier_fixture():

@@ -361,6 +361,37 @@ def test_render_system_notice_golden():
     )
 
 
+def test_render_failure_notice_golden():
+    when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
+    text = templates.render_failure_notice(
+        "backfill_marks wrote only 0 mark(s) for 132 detection(s) on 2026-08-12.", when,
+    )
+    assert text == (
+        "<b>⚠️ ALERT</b>\n"
+        "backfill_marks wrote only 0 mark(s) for 132 detection(s) on 2026-08-12.\n"
+        "\n"
+        "<i>15:00 ET · Not advice.</i>"
+    )
+
+
+def test_render_failure_notice_is_visually_distinct_from_system_notice_and_heartbeat():
+    """2026-08-12: the backfill-failure alert fired and delivered
+    correctly and was still missed, because it read exactly like the
+    routine heartbeat sitting next to it in the channel. This is the
+    fix -- confirms the two headers can never collide, and that no
+    routine/informational template already uses the same marker (which
+    would silently defeat the whole point)."""
+    when = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
+    failure_text = templates.render_failure_notice("something is broken", when)
+    system_text = templates.render_system_notice("routine operational note", when)
+    heartbeat_text = templates.render_heartbeat(date(2026, 7, 23), timedelta(hours=6), {}, {}, [], [], {}, when)
+
+    assert "⚠️ ALERT" in failure_text
+    assert "⚠️" not in system_text
+    assert "⚠️" not in heartbeat_text
+    assert failure_text.split("\n")[0] != system_text.split("\n")[0]
+
+
 def _position_size(**overrides):
     from tradebot.costs import PositionSize
 

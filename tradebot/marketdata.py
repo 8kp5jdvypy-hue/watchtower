@@ -120,6 +120,22 @@ def _read_bars(path: Path, symbol: str) -> list[Bar]:
     return bars
 
 
+def write_bars_csv(path: Path, bars: list[Bar]) -> None:
+    """The write-side counterpart to _read_bars -- same CSV shape, so a
+    file this writes is a file _read_bars (and therefore ReplayMarketData/
+    backfill_marks) can read straight back. Moved here from
+    scripts/fetch_cache.py (2026-08-12) so tradebot.runner can call it
+    too, without needing scripts/ importable inside the container -- see
+    docs/DEPLOYMENT.md's fetch_cache note about why scripts/ isn't part
+    of the image."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["ts", "open", "high", "low", "close", "volume"])
+        for b in bars:
+            writer.writerow([b.ts.isoformat(), b.open, b.high, b.low, b.close, b.volume])
+
+
 def _is_rth(bar: Bar) -> bool:
     local = bar.ts.astimezone(ET)
     return (9, 30) <= (local.hour, local.minute) < (16, 0)

@@ -14,6 +14,7 @@ from tradebot.journal import (
     backfill_marks,
     cluster_id,
     connect,
+    detected_symbols_for_session,
     historical_performance,
     hour_performance,
     iv_rank,
@@ -182,6 +183,34 @@ def test_cluster_id_is_deterministic():
     c = cluster_id("SPY", "2026-06-15", "2026-06-15T14:05:00+00:00", "gap")
     assert a == b
     assert a != c
+
+
+def test_detected_symbols_for_session_covers_watchlist_and_screening_alike(tmp_path):
+    """2026-08-12: the manual emergency backfill only covered WATCHLIST,
+    leaving screening-origin detections with 0 marks. This is the single
+    source of truth the permanent fix (runner.py's close-time cache
+    fetch) and backfill_marks() itself both use, so their symbol scope
+    can never drift apart."""
+    conn = connect(tmp_path / "journal.db")
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol="AAPL", ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", origin="watchlist",
+    )
+    write_cluster(
+        conn, session=SESSION.isoformat(), symbol="FDRX", ts_utc="2026-06-15T14:05:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=10.0, atr14=0.5,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", origin="screening",
+    )
+    # A different session -- must not appear.
+    write_cluster(
+        conn, session="2026-06-16", symbol="TSLA", ts_utc="2026-06-16T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=200.0, atr14=2.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+
+    assert detected_symbols_for_session(conn, SESSION) == ["AAPL", "FDRX"]
 
 
 def _write_bar_csv(path: Path, rows: list[dict]) -> None:
