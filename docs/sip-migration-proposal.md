@@ -550,16 +550,21 @@ single-session mean) and a much tighter spread —
 
 (Full window-mean range across all 79 windows: 1.0–7.8.)
 
-**Proposed band: [1.2, 6.8] HIGH-tier alerts/day, averaged over the
-first 5 live SIP sessions** — the p5–p95 range above, i.e. only the
-most extreme 1-in-20 historical 5-session stretches fall outside it.
+**Formal rule (approved 2026-08-12):** average the first 5 live SIP
+sessions' HIGH-tier alert count.
+- **Outside [1.2, 6.8]** → same-day rollback to `iex` (the config-flip
+  rollback procedure above).
+- **Inside [1.2, 6.8]** → migration declared stable after session 5.
 
-*(Your message cut off after "outside the band" — completing it as the
-natural reading given the band is now a single average-based range:
-**if the live 5-session average falls outside [1.2, 6.8], that's the
-rollback trigger.** Flagging this as an inference on my part, not
-something you actually said — confirm or correct before this becomes
-the operative rule.)*
+**This 5-session evaluation does not gate acute-breakage response.** A
+single grossly anomalous session, or runner errors, are handled
+immediately via the existing kill switches
+(`data/HALT`/`/halt`/`WATCHTOWER_KILL_SWITCH`) and the first-session
+observation checklist above — those act same-session, on judgment, the
+moment something looks genuinely broken. The 5-session band is the
+slower, statistical check for "is the migration's overall alert rate
+where the backtest said it would be," not a replacement for noticing a
+single day is on fire.
 
 ## Open questions
 
