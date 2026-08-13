@@ -1199,24 +1199,25 @@ _ACCOUNT_SCOPE_SQL = """(
 )"""
 
 
-def _telegram_id_for_account(conn: sqlite3.Connection, account_id: str) -> int:
+def _sentinel_telegram_id(account_id: str) -> int:
     """user_trades.telegram_user_id is NOT NULL with no default -- a
     column this table has always required, from before accounts existed.
-    Rather than rebuild the table to relax that constraint, an account
-    with a real linked Telegram identity gets its real id here (so their
-    bot-logged and web-logged trades share one bucket in this column
-    too); an account with no Telegram link gets a stable negative
-    placeholder derived from account_id (real Telegram ids are always
-    positive, so this can never collide with one). Nothing in this
-    module reads telegram_user_id back for Journal authorization or
-    display -- account_id is authoritative for that everywhere below."""
-    row = conn.execute(
-        "SELECT provider_user_id FROM linked_identities WHERE provider = 'telegram' AND account_id = ?",
-        (account_id,),
-    ).fetchone()
-    if row is not None:
-        return int(row[0])
-    digest = hashlib.sha256(f"web-only:{account_id}".encode()).hexdigest()[:12]
+    Rather than rebuild the table to relax that constraint, every
+    Journal-native row gets a stable NEGATIVE placeholder derived from
+    account_id -- negative on purpose, for ALL Journal rows, linked
+    Telegram identity or not: real Telegram ids are always positive, and
+    every legacy query in this module and handlers.py binds a real
+    (positive) id, so no legacy read (list_trades -> personal_stats /
+    monthly_recap / the /activity endpoint, get_open_trade_for_alert,
+    most_recent_open_trade, handlers' /closed lookup) can ever match a
+    Journal-native row. Writing a linked account's REAL id here instead
+    would silently leak web entries into personal_stats' total_trades
+    and adherence_score denominators. A Journal read that wants a linked
+    account's bot-logged trades gets them via _ACCOUNT_SCOPE_SQL's
+    linked_identities branch, which never contains sentinels. Nothing
+    reads telegram_user_id back for Journal authorization or display --
+    account_id is authoritative for that everywhere below."""
+    digest = hashlib.sha256(f"journal:{account_id}".encode()).hexdigest()[:12]
     return -(int(digest, 16) % 10**15 + 1)
 
 
@@ -1306,7 +1307,7 @@ def create_journal_trade(
     actually gets written, so every caller goes through the same
     account_id-derived telegram_user_id placeholder logic."""
     trade_id = uuid.uuid4().hex
-    tg_id = _telegram_id_for_account(conn, account_id)
+    tg_id = _sentinel_telegram_id(account_id)
     db_direction = _JOURNAL_DIRECTION_TO_DB.get(direction, direction)
     taken_at_iso = taken_at.astimezone(timezone.utc).isoformat()
     conn.execute(

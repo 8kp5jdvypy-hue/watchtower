@@ -599,12 +599,27 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             return jsonify({"error": "journal not available on this plan"}), 403
         return None
 
+    # The complete request-body vocabulary per endpoint. Anything else in
+    # the body is a 400, not silently dropped — a client sending a field
+    # this API doesn't know (a typo like "pnl_cent", or a probe) must
+    # find out immediately, never have its input vanish without a trace.
+    _JOURNAL_CREATE_KEYS = frozenset(
+        {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason", "detection_id", "is_skip"}
+    )
+    _JOURNAL_PATCH_KEYS = frozenset(
+        {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason"}
+    )
+
     def _parse_journal_payload(data: dict, *, partial: bool) -> tuple[dict, str | None]:
         """Server-side validation for create (partial=False) and edit
         (partial=True). Returns (fields, None) or ({}, error_message).
         Every field is validated here regardless of what the client sent
         — types, vocabulary, bounds — because nothing about the request
         body is trusted."""
+        allowed = _JOURNAL_PATCH_KEYS if partial else _JOURNAL_CREATE_KEYS
+        unknown = set(data) - allowed
+        if unknown:
+            return {}, f"unknown field(s): {', '.join(sorted(unknown))}"
         fields: dict = {}
         if "symbol" in data or not partial:
             symbol = str(data.get("symbol") or "").strip().upper()
