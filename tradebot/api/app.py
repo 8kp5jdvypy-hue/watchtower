@@ -599,6 +599,31 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             return jsonify({"error": "journal not available on this plan"}), 403
         return None
 
+    def _detection_snapshot(detection_id: str) -> dict | None:
+        """The immutable copy of a detection a journal entry keeps for
+        itself, captured at link time from journal.db. None when the row
+        isn't there — which is a real, designed-for state, not an error:
+        users.db and journal.db are separate files with no cross-database
+        transaction (see docs/BACKLOG.md's atomicity finding), so a
+        freshly-alerted detection_id can reference a row that hasn't
+        committed (or, post-crash, never will). A None snapshot degrades
+        to "signal detail unavailable" in the UI rather than blocking
+        the user from journaling the trade they really took. Log-tier
+        rows return None too — never user-facing, same rule as
+        /signals/<id>."""
+        row = app.journal_conn.execute(
+            "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, primary_kind "
+            "FROM detections WHERE id = ? AND tier IN ('high', 'medium')",
+            (detection_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row[0], "ts_utc": row[1], "session": row[2], "symbol": row[3],
+            "kinds": row[4].split(","), "headlines": row[5], "score": row[6],
+            "tier": row[7], "trend": row[8], "primary_kind": row[9],
+        }
+
     # The complete request-body vocabulary per endpoint. Anything else in
     # the body is a 400, not silently dropped — a client sending a field
     # this API doesn't know (a typo like "pnl_cent", or a probe) must
@@ -607,7 +632,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason", "detection_id", "is_skip"}
     )
     _JOURNAL_PATCH_KEYS = frozenset(
-        {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason"}
+        {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason", "detection_id"}
     )
 
     def _parse_journal_payload(data: dict, *, partial: bool) -> tuple[dict, str | None]:
@@ -728,10 +753,11 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         detection_id = data.get("detection_id")
         if detection_id is not None:
             detection_id = str(detection_id)
-        # detection_snapshot is filled in server-side in Phase 4 (from
-        # journal.db, by detection_id) — never accepted from the client,
-        # which could otherwise fabricate "this trade came from a HIGH
-        # signal" evidence.
+        # The snapshot is derived server-side from journal.db — never
+        # accepted from the client, which could otherwise fabricate
+        # "this trade came from a HIGH signal" evidence. None (missing/
+        # log-tier row) still stores the id: see _detection_snapshot.
+        snapshot = _detection_snapshot(detection_id) if detection_id else None
         trade = users_db.create_journal_trade(
             app.users_conn,
             g.account.id,
@@ -742,6 +768,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             pnl_cents=fields.get("pnl_cents"),
             note=fields.get("note"),
             detection_id=detection_id,
+            detection_snapshot=snapshot,
             is_skip=is_skip,
             skip_reason=fields.get("skip_reason"),
         )
@@ -759,6 +786,17 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         fields, err = _parse_journal_payload(data, partial=True)
         if err:
             return jsonify({"error": err}), 400
+        # detection_id passes through the payload parser untouched (it's
+        # in the PATCH vocabulary but not a validated field) — pull it
+        # out here and re-derive the snapshot server-side, exactly as
+        # POST does. null unlinks: both columns clear together so a
+        # stale snapshot can never outlive its link.
+        if "detection_id" in data:
+            detection_id = data.get("detection_id")
+            detection_id = str(detection_id) if detection_id is not None else None
+            snapshot = _detection_snapshot(detection_id) if detection_id else None
+            fields["detection_id"] = detection_id
+            fields["detection_snapshot_json"] = json.dumps(snapshot) if snapshot else None
         if not fields:
             return jsonify({"error": "nothing to update"}), 400
         trade = users_db.update_journal_trade(app.users_conn, g.account.id, trade_id, **fields)
@@ -778,6 +816,52 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not deleted:
             return jsonify({"error": "trade not found"}), 404
         return jsonify({"ok": True})
+
+    @app.route("/journal/linkable-signals")
+    @login_required
+    def journal_linkable_signals():
+        """Recent alerts THIS account was actually sent, for "link my
+        trade to the alert I got." Grounded in the outbox delivery log
+        (users.db) — one row per (alert_id, chat_id), so this is real
+        per-user delivery history, not the global feed. chat_id equals
+        telegram_user_id for DMs (see telegram_bot.db.get_or_create_user)
+        and alerts are only ever DM'd, so the linked Telegram id is the
+        chat to match. Detection details come from journal.db in a second
+        query — application-code stitching, never a cross-DB JOIN; an
+        alert whose detection row is missing (the known atomicity gap)
+        is simply omitted here. No Telegram link means no delivery
+        history: an empty list, not an error."""
+        gated = _journal_gate()
+        if gated:
+            return gated
+        tg_id = _linked_telegram_user_id(app.users_conn, g.account)
+        if tg_id is None:
+            return jsonify({"signals": [], "delivery_history": False})
+        symbol_filter = (request.args.get("symbol") or "").strip().upper() or None
+        rows = app.users_conn.execute(
+            "SELECT alert_id, delivered_at FROM outbox "
+            "WHERE chat_id = ? AND status = 'delivered' ORDER BY delivered_at DESC LIMIT 100",
+            (tg_id,),
+        ).fetchall()
+        # A sizing follow-up shares its alert's id with a ':sizing'
+        # suffix (see outbox.enqueue_broadcast callers) — fold those
+        # onto the base detection id, keeping the newest delivery time.
+        delivered: dict[str, str] = {}
+        for alert_id, delivered_at in rows:
+            base_id = alert_id.split(":", 1)[0]
+            if base_id not in delivered:
+                delivered[base_id] = delivered_at
+        signals = []
+        for detection_id, delivered_at in delivered.items():
+            snapshot = _detection_snapshot(detection_id)
+            if snapshot is None:
+                continue
+            if symbol_filter and snapshot["symbol"] != symbol_filter:
+                continue
+            signals.append({**snapshot, "detection_id": detection_id, "delivered_at": delivered_at})
+            if len(signals) >= 20:
+                break
+        return jsonify({"signals": signals, "delivery_history": True})
 
     @app.route("/journal/export.csv")
     @login_required

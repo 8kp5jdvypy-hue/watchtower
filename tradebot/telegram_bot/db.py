@@ -1348,7 +1348,16 @@ def get_journal_trade(conn: sqlite3.Connection, account_id: str, trade_id: str) 
     return _row_to_journal_trade(row) if row else None
 
 
-_JOURNAL_UPDATABLE_FIELDS = {"symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason"}
+# detection_id / detection_snapshot_json are updatable so the API's
+# PATCH can link or unlink a signal after the fact -- but the API only
+# ever accepts detection_id from a client and derives the snapshot
+# server-side (see app.py's _detection_snapshot); the snapshot column
+# being writable here is for that server-derived value, never a
+# client-supplied one.
+_JOURNAL_UPDATABLE_FIELDS = {
+    "symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason",
+    "detection_id", "detection_snapshot_json",
+}
 
 
 def update_journal_trade(conn: sqlite3.Connection, account_id: str, trade_id: str, **fields) -> JournalTrade | None:
