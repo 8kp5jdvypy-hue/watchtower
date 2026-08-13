@@ -1,0 +1,84 @@
+/* Journal entry detail -- the P&L figure is the one big element
+   (Space Grotesk, same scale as SignalDetail's symbol), everything
+   else stays meta-quiet. Skips get no number at all: the honest render
+   of "no position" is words, not $0.00. */
+
+.td-body { padding: 1.1rem 1.25rem 1.25rem; }
+
+.td-title-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.td-symbol {
+  font-family: var(--display); font-weight: 600; font-size: 1.5rem;
+  letter-spacing: -0.01em; color: var(--ink);
+}
+.td-chips { display: flex; gap: 0.4rem; }
+.td-chip {
+  font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 0.22rem 0.6rem; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--ink-dim);
+}
+/* Direction is fact, not performance -- neutral ink, never up/down
+   colors, which are reserved for realized P&L. */
+.td-chip-long, .td-chip-short { color: var(--ink-dim); }
+.td-chip-skip { color: var(--ink-faint); border-style: dashed; }
+
+.td-pnl {
+  font-family: var(--display); font-weight: 600; font-size: 2.1rem;
+  letter-spacing: -0.01em; margin-top: 0.5rem;
+  font-variant-numeric: tabular-nums;
+  display: flex; align-items: baseline; gap: 0.6rem;
+}
+.td-pnl.pnl-up { color: var(--up); }
+.td-pnl.pnl-down { color: var(--down); }
+.td-pnl.pnl-flat { color: var(--ink-dim); }
+.td-pnl-unpriced { font-family: var(--mono); font-size: 0.7rem; color: var(--ink-faint); letter-spacing: 0.04em; }
+
+.td-no-position { margin: 0.7rem 0 0; color: var(--ink-dim); font-size: 0.9rem; }
+
+.td-meta { margin: 1rem 0 0; display: flex; flex-direction: column; gap: 0.4rem; }
+.td-meta-row {
+  display: flex; justify-content: space-between; gap: 1rem;
+  font-family: var(--mono); font-size: 0.78rem;
+}
+.td-meta-row dt { color: var(--ink-faint); margin: 0; flex: none; }
+.td-meta-row dd { color: var(--ink-dim); margin: 0; text-align: right; overflow-wrap: break-word; min-width: 0; }
+
+.td-section { margin-top: 1.1rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+.td-section-title {
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--ink-faint); margin: 0 0 0.5rem; font-weight: 600;
+}
+.td-text { margin: 0; color: var(--ink); font-size: 0.88rem; line-height: 1.55; white-space: pre-wrap; }
+
+.td-error { margin: 1rem 0 0; color: var(--down); font-size: 0.82rem; }
+
+.td-foot {
+  display: flex; justify-content: space-between; align-items: center; gap: 0.6rem;
+  margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--line);
+}
+.td-btn {
+  background: none; border: 1px solid var(--line); color: var(--ink-dim);
+  border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer;
+  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.td-btn:hover:not(:disabled) { border-color: var(--ink-faint); color: var(--ink); }
+.td-btn:disabled { opacity: 0.55; cursor: default; }
+.td-btn-primary {
+  background: rgba(52, 226, 255, 0.1); border-color: rgba(52, 226, 255, 0.35); color: var(--cyan);
+}
+.td-btn-primary:hover:not(:disabled) { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); color: var(--cyan); }
+/* Destructive only once you're inside the confirm step -- the entry
+   point stays quiet so the sheet never reads as "delete-forward". */
+.td-btn-quiet { border-color: transparent; color: var(--ink-faint); }
+.td-btn-danger { border-color: rgba(251, 113, 133, 0.4); color: var(--down); }
+.td-btn-danger:hover:not(:disabled) { background: rgba(251, 113, 133, 0.08); border-color: rgba(251, 113, 133, 0.6); color: var(--down); }
+
+.td-confirm {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  color: var(--ink-dim); font-size: 0.84rem; width: 100%; justify-content: flex-end;
+}
+.td-confirm span { margin-right: auto; }
+
+@media (max-width: 640px) {
+  .td-btn { min-height: 44px; }
+}

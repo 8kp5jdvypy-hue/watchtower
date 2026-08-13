@@ -1,0 +1,87 @@
+/* The journal overlays' shared chrome -- same species as
+   SignalDetail.css's .signal-detail-overlay/.signal-detail (backdrop
+   blur, gradient panel, mobile bottom sheet, reverse-animated close),
+   with its own class family so the two can evolve independently. */
+
+.jo-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(5, 7, 10, 0.72);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  animation: jo-backdrop-in 0.2s ease-out both;
+}
+@keyframes jo-backdrop-in { from { opacity: 0; } }
+.jo-overlay.is-closing { animation: jo-backdrop-in 0.2s ease-in reverse both; }
+
+.jo-panel {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: linear-gradient(165deg, rgba(16, 20, 27, 0.97), rgba(10, 13, 18, 0.99));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6);
+  animation: jo-panel-in 0.28s var(--ease-perch) both;
+}
+@keyframes jo-panel-in {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+}
+.jo-panel.is-closing { animation: jo-panel-in 0.2s cubic-bezier(.4, 0, 1, 1) reverse both; }
+
+.jo-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  background: rgba(10, 13, 18, 0.92);
+  backdrop-filter: blur(8px);
+}
+.jo-eyebrow {
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
+  text-transform: uppercase; color: var(--ink-faint);
+}
+.jo-close {
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--ink-dim);
+  border-radius: 5px;
+  padding: 0.4rem 0.75rem;
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+  transition: border-color 0.2s ease, color 0.2s ease;
+}
+.jo-close:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+@media (max-width: 640px) {
+  .jo-overlay { align-items: flex-end; padding: 0; }
+  .jo-panel {
+    max-width: 100%;
+    max-height: 88vh;
+    border-radius: 16px 16px 0 0;
+    border-left: none; border-right: none; border-bottom: none;
+    padding-bottom: env(safe-area-inset-bottom);
+    animation: jo-sheet-in 0.28s var(--ease-perch) both;
+  }
+  @keyframes jo-sheet-in { from { transform: translateY(100%); } }
+  .jo-panel.is-closing { animation: jo-sheet-in 0.2s cubic-bezier(.4, 0, 1, 1) reverse both; }
+  .jo-close { min-height: 44px; padding-left: 1rem; padding-right: 1rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jo-overlay, .jo-panel,
+  .jo-overlay.is-closing, .jo-panel.is-closing { animation: none; }
+}
