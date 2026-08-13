@@ -9,6 +9,11 @@ After=perch.service
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/perch
+# No User= line means this runs as root -- make that explicit via HOME
+# rather than leaving it unset. Systemd does not set $HOME for a system
+# unit unless User= or this is set; unset $HOME crashed backup.sh's
+# off-box step under set -u (rclone/gpg config path resolution).
+Environment=HOME=/root
 # Optional (leading '-') -- backup.sh runs local-only backups fine
 # without this file; it only supplies RCLONE_REMOTE and
 # BACKUP_ENCRYPTION_PASSPHRASE_FILE for off-box shipping once that's
