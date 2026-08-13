@@ -37,7 +37,11 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 logger = logging.getLogger(__name__)
 
+import csv
+import io
+
 from tradebot import accounts, client_errors, config, funnel_events, rate_limit
+from tradebot.telegram_bot.access import can_access
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind_performance, tier_performance
@@ -194,7 +198,9 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Access-Control-Allow-Credentials"] = "true"
             response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            # PATCH/DELETE for the Trade Journal's edit/delete endpoints;
+            # everything else here is still GET/POST only.
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         return response
 
     def login_required(view):
@@ -567,6 +573,233 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         trades = users_db.list_trades(app.users_conn, telegram_user_id)
         stats = users_db.personal_stats(app.users_conn, telegram_user_id, trades=trades)
         return jsonify({"trades": _to_jsonable(trades), "stats": _to_jsonable(stats)})
+
+    # ---- Trade Journal ---------------------------------------------------
+    # Every route below derives its scope exclusively from g.account.id
+    # (set by login_required from the signed session cookie) — no request
+    # parameter can name a different user, and the db-layer functions
+    # repeat the account-scope check inside their own SQL (see
+    # users_db._ACCOUNT_SCOPE_SQL). Journal access routes through
+    # can_access() like every other feature: free for everyone today, and
+    # the one sanctioned seam for gating later.
+
+    MAX_JOURNAL_TEXT = 2000  # notes / skip reasons; a journal, not a blog
+    MAX_JOURNAL_SYMBOL_LEN = 12
+    # A year's aggressive day-trading is ~2-5k entries; 100k of anything
+    # is a runaway client, not a person.
+    MAX_PNL_CENTS = 10**11  # +/- one billion dollars, in cents
+
+    def _journal_gate():
+        """None when allowed; a (response, status) pair when gated. Uses
+        the linked Telegram user when one exists, None otherwise —
+        can_access accepts both."""
+        tg_id = _linked_telegram_user_id(app.users_conn, g.account)
+        user = users_db.get_user(app.users_conn, tg_id) if tg_id else None
+        if not can_access(user, "journal"):
+            return jsonify({"error": "journal not available on this plan"}), 403
+        return None
+
+    def _parse_journal_payload(data: dict, *, partial: bool) -> tuple[dict, str | None]:
+        """Server-side validation for create (partial=False) and edit
+        (partial=True). Returns (fields, None) or ({}, error_message).
+        Every field is validated here regardless of what the client sent
+        — types, vocabulary, bounds — because nothing about the request
+        body is trusted."""
+        fields: dict = {}
+        if "symbol" in data or not partial:
+            symbol = str(data.get("symbol") or "").strip().upper()
+            if not symbol or len(symbol) > MAX_JOURNAL_SYMBOL_LEN or not symbol.replace(".", "").replace("-", "").isalnum():
+                return {}, "symbol is required (letters/digits, max 12 chars)"
+            fields["symbol"] = symbol
+        if "direction" in data:
+            direction = data.get("direction")
+            if direction is not None and direction not in ("long", "short"):
+                return {}, "direction must be 'long', 'short', or null"
+            fields["direction"] = direction
+        if "source" in data:
+            source = data.get("source")
+            if source is not None and source not in users_db.JOURNAL_SOURCES:
+                return {}, f"source must be one of {list(users_db.JOURNAL_SOURCES)} or null"
+            fields["source"] = source
+        if "taken_at" in data or not partial:
+            raw = data.get("taken_at")
+            if raw is None:
+                taken_at = datetime.now(timezone.utc)
+            else:
+                try:
+                    taken_at = datetime.fromisoformat(str(raw))
+                except ValueError:
+                    return {}, "taken_at must be an ISO-8601 datetime"
+                if taken_at.tzinfo is None:
+                    return {}, "taken_at must include a timezone offset"
+                if taken_at > datetime.now(timezone.utc) + timedelta(minutes=5):
+                    return {}, "taken_at cannot be in the future"
+            fields["taken_at"] = taken_at
+        if "pnl_cents" in data:
+            pnl = data.get("pnl_cents")
+            if pnl is not None:
+                # bool is an int subclass; True would otherwise pass as 1.
+                if isinstance(pnl, bool) or not isinstance(pnl, int):
+                    return {}, "pnl_cents must be an integer number of cents (signed), not a float or string"
+                if abs(pnl) > MAX_PNL_CENTS:
+                    return {}, "pnl_cents is out of range"
+            fields["pnl_cents"] = pnl
+        for text_field in ("note", "skip_reason"):
+            if text_field in data:
+                value = data.get(text_field)
+                if value is not None:
+                    value = str(value).strip() or None
+                if value is not None and len(value) > MAX_JOURNAL_TEXT:
+                    return {}, f"{text_field} is too long (max {MAX_JOURNAL_TEXT} chars)"
+                fields[text_field] = value
+        return fields, None
+
+    @app.route("/journal/summary")
+    @login_required
+    def journal_summary():
+        gated = _journal_gate()
+        if gated:
+            return gated
+        summary = users_db.journal_summary(app.users_conn, g.account.id, now=datetime.now(timezone.utc))
+        stats = users_db.journal_stats(app.users_conn, g.account.id)
+        return jsonify({"summary": summary, "stats": stats})
+
+    @app.route("/journal/calendar")
+    @login_required
+    def journal_calendar():
+        gated = _journal_gate()
+        if gated:
+            return gated
+        month_param = request.args.get("month", "")
+        try:
+            year_s, month_s = month_param.split("-")
+            year, month = int(year_s), int(month_s)
+            if not (2000 <= year <= 2100 and 1 <= month <= 12):
+                raise ValueError
+        except ValueError:
+            return jsonify({"error": "month must be YYYY-MM"}), 400
+        days = users_db.journal_calendar(app.users_conn, g.account.id, year, month)
+        return jsonify({"month": f"{year:04d}-{month:02d}", "days": days})
+
+    @app.route("/journal/trades")
+    @login_required
+    def journal_trades():
+        gated = _journal_gate()
+        if gated:
+            return gated
+        date_param = request.args.get("date")
+        on_date = None
+        if date_param:
+            try:
+                on_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"error": "date must be YYYY-MM-DD"}), 400
+        trades = users_db.list_journal_trades(app.users_conn, g.account.id, on_date=on_date)
+        return jsonify({"trades": _to_jsonable(trades)})
+
+    @app.route("/journal/trades", methods=["POST"])
+    @login_required
+    def journal_create_trade():
+        gated = _journal_gate()
+        if gated:
+            return gated
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "a JSON body is required"}), 400
+        is_skip = bool(data.get("is_skip"))
+        fields, err = _parse_journal_payload(data, partial=False)
+        if err:
+            return jsonify({"error": err}), 400
+        detection_id = data.get("detection_id")
+        if detection_id is not None:
+            detection_id = str(detection_id)
+        # detection_snapshot is filled in server-side in Phase 4 (from
+        # journal.db, by detection_id) — never accepted from the client,
+        # which could otherwise fabricate "this trade came from a HIGH
+        # signal" evidence.
+        trade = users_db.create_journal_trade(
+            app.users_conn,
+            g.account.id,
+            symbol=fields["symbol"],
+            taken_at=fields["taken_at"],
+            direction=fields.get("direction"),
+            source=fields.get("source"),
+            pnl_cents=fields.get("pnl_cents"),
+            note=fields.get("note"),
+            detection_id=detection_id,
+            is_skip=is_skip,
+            skip_reason=fields.get("skip_reason"),
+        )
+        return jsonify({"trade": _to_jsonable(trade)}), 201
+
+    @app.route("/journal/trades/<trade_id>", methods=["PATCH"])
+    @login_required
+    def journal_update_trade(trade_id):
+        gated = _journal_gate()
+        if gated:
+            return gated
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"error": "a JSON body is required"}), 400
+        fields, err = _parse_journal_payload(data, partial=True)
+        if err:
+            return jsonify({"error": err}), 400
+        if not fields:
+            return jsonify({"error": "nothing to update"}), 400
+        trade = users_db.update_journal_trade(app.users_conn, g.account.id, trade_id, **fields)
+        if trade is None:
+            # Same 404 whether the id is unknown or belongs to someone
+            # else — never an oracle for other accounts' trade ids.
+            return jsonify({"error": "trade not found"}), 404
+        return jsonify({"trade": _to_jsonable(trade)})
+
+    @app.route("/journal/trades/<trade_id>", methods=["DELETE"])
+    @login_required
+    def journal_delete_trade(trade_id):
+        gated = _journal_gate()
+        if gated:
+            return gated
+        deleted = users_db.delete_journal_trade(app.users_conn, g.account.id, trade_id)
+        if not deleted:
+            return jsonify({"error": "trade not found"}), 404
+        return jsonify({"ok": True})
+
+    @app.route("/journal/export.csv")
+    @login_required
+    def journal_export():
+        gated = _journal_gate()
+        if gated:
+            return gated
+        trades = users_db.list_journal_trades(app.users_conn, g.account.id)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "id", "date_et", "taken_at_utc", "symbol", "direction", "source", "pnl_usd",
+            "is_skip", "skip_reason", "note", "detection_id", "status",
+        ])
+        for t in trades:
+            writer.writerow([
+                t.id,
+                users_db.et_date(t.taken_at).isoformat(),
+                t.taken_at,
+                t.symbol,
+                t.direction or "",
+                t.source or "",
+                f"{t.pnl_cents / 100:.2f}" if t.pnl_cents is not None else "",
+                int(t.is_skip),
+                t.skip_reason or "",
+                t.note or "",
+                t.detection_id or "",
+                t.status,
+            ])
+        return (
+            buf.getvalue(),
+            200,
+            {
+                "Content-Type": "text/csv; charset=utf-8",
+                "Content-Disposition": "attachment; filename=perch-journal.csv",
+            },
+        )
 
     return app
 
