@@ -95,8 +95,8 @@ export default function TradeSheet({ initialMode = 'trade', trade = null, onClos
   }
 
   const eyebrow = editing
-    ? (isSkip ? 'Edit skip' : 'Edit trade')
-    : (isSkip ? 'Log a skip' : 'Log a trade')
+    ? (isSkip ? 'Edit pass' : 'Edit trade')
+    : (isSkip ? 'Log a pass' : 'Log a trade')
 
   return (
     <JournalOverlay label={eyebrow} eyebrow={eyebrow} onClose={onClose}>
@@ -215,7 +215,7 @@ export default function TradeSheet({ initialMode = 'trade', trade = null, onClos
           <div className="ts-actions">
             <button type="button" className="ts-cancel" onClick={requestClose}>Cancel</button>
             <button type="submit" className="ts-submit" disabled={saving}>
-              {saving ? 'Saving…' : editing ? 'Save changes' : isSkip ? 'Log skip' : 'Log trade'}
+              {saving ? 'Saving…' : editing ? 'Save changes' : isSkip ? 'Log pass' : 'Log trade'}
             </button>
           </div>
         </form>

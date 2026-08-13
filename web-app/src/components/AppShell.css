@@ -166,6 +166,11 @@
     padding: 0.7rem 0.2rem 0.6rem;
     cursor: pointer;
     min-height: 48px;
+    /* No browser-default gray tap flash -- the pressed state below is
+       the deliberate one. */
+    -webkit-tap-highlight-color: transparent;
+    transition: color var(--duration-micro) var(--ease-perch);
   }
+  .mobile-nav-button:active { color: var(--ink); }
   .mobile-nav-button.active { color: var(--cyan); }
 }

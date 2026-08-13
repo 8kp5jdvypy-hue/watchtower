@@ -23,9 +23,19 @@
 
 .td-pnl {
   font-family: var(--display); font-weight: 600; font-size: 2.1rem;
-  letter-spacing: -0.01em; margin-top: 0.5rem;
+  letter-spacing: -0.02em; margin-top: 0.5rem;
   font-variant-numeric: tabular-nums;
   display: flex; align-items: baseline; gap: 0.6rem;
+  /* The one signature moment this overlay is allowed: the figure
+     settles just behind the panel -- a quiet landing, not a reveal.
+     Starts inside the panel's own 240ms, finishes 100ms after it. */
+  animation: td-pnl-settle 0.22s var(--ease-perch) 0.12s both;
+}
+@keyframes td-pnl-settle {
+  from { opacity: 0; transform: translateY(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .td-pnl { animation: none; }
 }
 .td-pnl.pnl-up { color: var(--up); }
 .td-pnl.pnl-down { color: var(--down); }
@@ -62,16 +72,19 @@
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
 .td-btn:hover:not(:disabled) { border-color: var(--ink-faint); color: var(--ink); }
+.td-btn:active:not(:disabled) { background: rgba(255, 255, 255, 0.04); }
 .td-btn:disabled { opacity: 0.55; cursor: default; }
 .td-btn-primary {
   background: rgba(52, 226, 255, 0.1); border-color: rgba(52, 226, 255, 0.35); color: var(--cyan);
 }
 .td-btn-primary:hover:not(:disabled) { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); color: var(--cyan); }
+.td-btn-primary:active:not(:disabled) { background: rgba(52, 226, 255, 0.2); }
 /* Destructive only once you're inside the confirm step -- the entry
    point stays quiet so the sheet never reads as "delete-forward". */
 .td-btn-quiet { border-color: transparent; color: var(--ink-faint); }
 .td-btn-danger { border-color: rgba(251, 113, 133, 0.4); color: var(--down); }
 .td-btn-danger:hover:not(:disabled) { background: rgba(251, 113, 133, 0.08); border-color: rgba(251, 113, 133, 0.6); color: var(--down); }
+.td-btn-danger:active:not(:disabled) { background: rgba(251, 113, 133, 0.12); }
 
 .td-confirm {
   display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;

@@ -18,6 +18,7 @@
 .ts-mode-btn + .ts-mode-btn { border-left: 1px solid var(--line); }
 .ts-mode-btn.active { background: rgba(52, 226, 255, 0.08); color: var(--ink); }
 .ts-mode-btn:hover:not(.active) { color: var(--ink); }
+.ts-mode-btn:active:not(.active) { background: rgba(255, 255, 255, 0.03); }
 
 /* Skipping is discipline, not failure -- a plain explanatory line in
    the app's normal voice, no warning color. */
@@ -47,8 +48,38 @@
 .ts-input::placeholder { color: var(--ink-faint); opacity: 0.8; }
 .ts-input-symbol { font-family: var(--display); font-weight: 600; letter-spacing: 0.04em; font-size: 1rem; }
 .ts-textarea { resize: vertical; min-height: 4.2rem; font-family: var(--sans); line-height: 1.5; }
-/* Dark-scheme picker icon stays visible on the near-black field. */
-.ts-input[type='datetime-local'] { color-scheme: dark; font-family: var(--mono); font-size: 0.82rem; }
+/* The datetime field's closed state is fully ours -- the app's mono at
+   the app's colors on the app's field, with the platform's inner boxes
+   and icon restyled on-token. Only the popup calendar stays native
+   (color-scheme: dark keeps it legible there too). */
+.ts-input[type='datetime-local'] {
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  font-family: var(--mono); font-size: 0.82rem; letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.ts-input[type='datetime-local']::-webkit-datetime-edit { padding: 0; }
+.ts-input[type='datetime-local']::-webkit-datetime-edit-fields-wrapper { padding: 0; }
+/* The segment the user is adjusting takes the same cyan-tint selection
+   treatment as the segmented controls, not the browser's default blue. */
+.ts-input[type='datetime-local']::-webkit-datetime-edit-year-field:focus,
+.ts-input[type='datetime-local']::-webkit-datetime-edit-month-field:focus,
+.ts-input[type='datetime-local']::-webkit-datetime-edit-day-field:focus,
+.ts-input[type='datetime-local']::-webkit-datetime-edit-hour-field:focus,
+.ts-input[type='datetime-local']::-webkit-datetime-edit-minute-field:focus,
+.ts-input[type='datetime-local']::-webkit-datetime-edit-ampm-field:focus {
+  background: rgba(52, 226, 255, 0.14);
+  color: var(--ink);
+  border-radius: 3px;
+  outline: none;
+}
+.ts-input[type='datetime-local']::-webkit-calendar-picker-indicator {
+  opacity: 0.45;
+  cursor: pointer;
+  transition: opacity var(--duration-hover) var(--ease-perch);
+}
+.ts-input[type='datetime-local']::-webkit-calendar-picker-indicator:hover { opacity: 0.85; }
 
 .ts-seg { display: flex; gap: 0.4rem; }
 .ts-seg-wrap { flex-wrap: wrap; }
@@ -65,6 +96,8 @@
     background var(--duration-hover) var(--ease-perch);
 }
 .ts-seg-btn:hover { color: var(--ink); border-color: var(--ink-faint); }
+.ts-seg-btn:active { background: rgba(255, 255, 255, 0.04); }
+.ts-seg-btn.active:active { background: rgba(52, 226, 255, 0.12); }
 .ts-seg-btn.active {
   background: rgba(52, 226, 255, 0.08);
   border-color: rgba(52, 226, 255, 0.35);
@@ -81,6 +114,7 @@
   transition: border-color 0.2s ease, color 0.2s ease;
 }
 .ts-cancel:hover { border-color: var(--ink-faint); color: var(--ink); }
+.ts-cancel:active { background: rgba(255, 255, 255, 0.04); }
 .ts-submit {
   background: rgba(52, 226, 255, 0.1);
   border: 1px solid rgba(52, 226, 255, 0.35);
@@ -90,6 +124,7 @@
   transition: background 0.2s ease, border-color 0.2s ease;
 }
 .ts-submit:hover:not(:disabled) { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); }
+.ts-submit:active:not(:disabled) { background: rgba(52, 226, 255, 0.2); }
 .ts-submit:disabled { opacity: 0.55; cursor: default; }
 
 @media (max-width: 640px) {

@@ -12,6 +12,12 @@
 .pnl-flat { color: var(--ink-dim); }
 .pnl-none { color: var(--ink-faint); }
 
+/* The sign and currency mark on the two big P&L figures (hero tile,
+   TradeDetail) sit at the smaller optical size financial type gives
+   marks -- the digits carry the weight, the mark identifies. Same
+   color, so the tone never splits across one number. */
+.pnl-mark { font-size: 0.74em; font-weight: 500; margin-right: 0.02em; }
+
 .jr-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
 .jr-head .view-subtitle { margin-bottom: 1.25rem; }
 .jr-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
@@ -26,6 +32,7 @@
   transition: background 0.2s ease, border-color 0.2s ease;
 }
 .jr-add:hover { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); }
+.jr-add:active { background: rgba(52, 226, 255, 0.2); }
 .jr-add-skip {
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
   border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer;
@@ -34,69 +41,98 @@
   transition: border-color 0.2s ease, color 0.2s ease;
 }
 .jr-add-skip:hover { border-color: var(--ink-faint); color: var(--ink); }
+.jr-add-skip:active { border-color: var(--ink-faint); color: var(--ink); background: rgba(255, 255, 255, 0.04); }
 
 /* ----- Summary row: today is the hero, the rest are context. ----- */
 .jr-summary {
   display: grid; grid-template-columns: 1.6fr 1fr 1fr 1fr; gap: 0.75rem;
   margin-bottom: 0.9rem;
 }
+/* Same optical recipe as the landing page's big numbers (MarketField's
+   funnel figures): display face at 600, -0.02em tracking, tabular
+   figures. The hero is the emotional center of the page -- it gets the
+   full treatment; the context tiles echo it a step down. */
 .jr-hero-value {
-  font-family: var(--display); font-weight: 600; font-size: 1.9rem;
-  letter-spacing: -0.015em; font-variant-numeric: tabular-nums; line-height: 1.15;
+  font-family: var(--display); font-weight: 600; font-size: 2.05rem;
+  letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1;
 }
 .jr-tile-value {
   font-family: var(--display); font-weight: 600; font-size: 1.15rem;
-  letter-spacing: -0.01em; font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em; font-variant-numeric: tabular-nums;
 }
 .jr-tile-sub { color: var(--ink-faint); font-size: 0.72rem; margin-top: 0.3rem; font-family: var(--mono); }
 
-/* ----- The calendar. ----- */
-.jr-cal { padding: 0.9rem 1rem 1rem; margin-bottom: 1.4rem; }
-.jr-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.7rem; }
+/* ----- The calendar. -----
+   A precision instrument, not a widget: uniform hairline grid on a 2px
+   gap, day tints as 1-2% anodized luminance shifts with an inner
+   hairline in the same metal, today's ring machined from the inside of
+   the cell. Hover is a barely-there lift -- transform only, 120ms. */
+.jr-cal { padding: 1rem 1.1rem 1.1rem; margin-bottom: 1.4rem; }
+.jr-cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.8rem; }
 .jr-cal-title {
   font-family: var(--display); font-weight: 600; font-size: 0.95rem; color: var(--ink);
   letter-spacing: -0.005em;
 }
 .jr-cal-nav {
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 5px; width: 30px; height: 30px; cursor: pointer;
-  font-size: 1rem; line-height: 1; display: flex; align-items: center; justify-content: center;
-  transition: border-color 0.2s ease, color 0.2s ease;
+  border-radius: 4px; width: 28px; height: 28px; cursor: pointer;
+  font-size: 0.95rem; line-height: 1; display: flex; align-items: center; justify-content: center;
+  transition: border-color var(--duration-hover) var(--ease-perch), color var(--duration-hover) var(--ease-perch),
+    background var(--duration-hover) var(--ease-perch);
 }
 .jr-cal-nav:hover:not(:disabled) { border-color: var(--ink-faint); color: var(--ink); }
+.jr-cal-nav:active:not(:disabled) { background: rgba(255, 255, 255, 0.04); }
 .jr-cal-nav:disabled { opacity: 0.35; cursor: default; }
 
 .jr-cal-grid {
-  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px;
+  display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px;
 }
 .jr-cal-weekday {
-  font-family: var(--mono); font-size: 0.58rem; letter-spacing: 0.08em;
-  color: var(--ink-faint); text-align: center; padding: 0.15rem 0 0.35rem;
+  font-family: var(--mono); font-size: 0.56rem; letter-spacing: 0.14em;
+  color: var(--ink-faint); text-align: center; padding: 0.2rem 0 0.45rem;
 }
 .jr-cal-blank { min-height: 1px; }
 .jr-cal-day {
   position: relative;
   display: flex; flex-direction: column; align-items: flex-start; justify-content: space-between;
   gap: 0.15rem;
-  min-height: 52px; padding: 0.3rem 0.35rem;
+  min-height: 54px; padding: 0.35rem 0.4rem 0.4rem;
   background: transparent;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 4px;
   cursor: pointer;
-  transition: border-color var(--duration-hover) var(--ease-perch), background var(--duration-hover) var(--ease-perch);
+  transition: transform 0.12s var(--ease-perch),
+    border-color var(--duration-hover) var(--ease-perch), background var(--duration-hover) var(--ease-perch);
 }
-.jr-cal-day:hover:not(:disabled) { border-color: var(--ink-faint); }
+.jr-cal-day:hover:not(:disabled) { transform: translateY(-1px); }
+.jr-cal-day:active:not(:disabled) { transform: translateY(0); }
+.jr-cal-day:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
 .jr-cal-day:disabled { opacity: 0.3; cursor: default; }
-.jr-cal-num { font-family: var(--mono); font-size: 0.62rem; color: var(--ink-faint); line-height: 1; }
+.jr-cal-num { font-family: var(--mono); font-size: 0.6rem; font-variant-numeric: tabular-nums; color: var(--ink-faint); line-height: 1; }
 .jr-cal-day.is-today .jr-cal-num { color: var(--cyan); }
-/* Low-alpha tints, deliberately just above threshold -- the calendar
-   should read as texture from arm's length, not as a scoreboard. */
-.jr-cal-day.is-up { background: rgba(52, 211, 153, 0.07); border-color: rgba(52, 211, 153, 0.18); }
-.jr-cal-day.is-down { background: rgba(251, 113, 133, 0.06); border-color: rgba(251, 113, 133, 0.16); }
-.jr-cal-day.is-flat { background: rgba(255, 255, 255, 0.03); }
+/* Anodized, not painted: a 1-2% luminance shift plus a hairline top
+   catchlight, and the cell's own border re-cut in the same metal at
+   low alpha. Texture from arm's length, never a scoreboard. */
+.jr-cal-day.is-up {
+  background: rgba(52, 211, 153, 0.055);
+  border-color: rgba(52, 211, 153, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.jr-cal-day.is-down {
+  background: rgba(251, 113, 133, 0.05);
+  border-color: rgba(251, 113, 133, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+.jr-cal-day.is-flat {
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+/* Today reads machined: an inner hairline ring cut inside the border,
+   not an outer glow and not the browser's focus ring. */
+.jr-cal-day.is-today { box-shadow: inset 0 0 0 1px rgba(52, 226, 255, 0.22); }
 .jr-cal-day.is-selected {
-  border-color: rgba(52, 226, 255, 0.55);
-  box-shadow: 0 0 0 1px rgba(52, 226, 255, 0.25);
+  border-color: rgba(52, 226, 255, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(52, 226, 255, 0.28);
 }
 .jr-cal-cell-data { display: flex; align-items: baseline; gap: 0.25rem; min-width: 0; max-width: 100%; }
 .jr-cal-pnl {
@@ -105,11 +141,14 @@
 }
 .jr-cal-day.is-up .jr-cal-pnl { color: var(--up); }
 .jr-cal-day.is-down .jr-cal-pnl { color: var(--down); }
+@media (prefers-reduced-motion: reduce) {
+  .jr-cal-day:hover:not(:disabled) { transform: none; }
+}
 
 /* ----- Selected day's entries. ----- */
 .jr-day { margin-bottom: 1.6rem; }
 .jr-section-title {
-  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--ink-faint); margin: 0 0 0.65rem; font-weight: 600;
 }
 .jr-section-count { color: var(--ink-faint); font-weight: 400; }
@@ -124,6 +163,7 @@
   transition: border-color var(--duration-hover) var(--ease-perch), background var(--duration-hover) var(--ease-perch);
 }
 .jr-row:hover { border-color: rgba(52, 226, 255, 0.3); background: var(--bg-2); }
+.jr-row:active { background: var(--bg-2); }
 /* Skips sit back a step -- ghosted fill, dashed edge. Muted respect,
    not a red flag: passing on a setup is the discipline this page is
    here to record. */
@@ -151,6 +191,10 @@
 /* ----- Stats. ----- */
 .jr-stats { margin-bottom: 0.5rem; }
 .jr-stat-grid { margin-bottom: 0.4rem; }
+/* Views.css's tile value predates the journal -- its numbers here are
+   money and counts, so they take the same tabular discipline as every
+   other figure on this page. */
+.jr-stat-grid .stat-tile-value { font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
 .jr-stats-quiet {
   background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;
   padding: 1rem 1.1rem; margin-bottom: 0.4rem;
@@ -183,9 +227,9 @@
   .jr-tile { padding: 0.7rem 0.75rem; }
   .jr-tile-value { font-size: 0.98rem; }
   .jr-tile-sub { font-size: 0.62rem; }
-  .jr-cal { padding: 0.7rem 0.6rem 0.75rem; }
+  .jr-cal { padding: 0.75rem 0.65rem 0.8rem; }
   .jr-cal-grid { gap: 2px; }
-  .jr-cal-day { min-height: 46px; padding: 0.25rem 0.25rem; border-radius: 4px; }
+  .jr-cal-day { min-height: 47px; padding: 0.3rem 0.3rem; border-radius: 3px; }
   .jr-cal-pnl { font-size: 0.53rem; letter-spacing: -0.02em; }
   .jr-row { padding: 0.6rem 0.75rem; }
   .jr-row-note { max-width: 100%; }

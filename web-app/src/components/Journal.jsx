@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { api, JOURNAL_EXPORT_URL } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import {
-  SOURCE_LABELS, etDateKey, etTime, formatCents, formatCentsCompact, pnlToneClass,
+  SOURCE_LABELS, etDateKey, etTime, formatCents, formatCentsCompact, formatCentsParts, pnlToneClass,
 } from '../journalFormat'
 import PerchMark from './PerchMark'
 import TradeSheet from './TradeSheet'
@@ -149,7 +149,7 @@ export default function Journal() {
             Log a trade
           </button>
           <button type="button" className="jr-add-skip" onClick={() => setSheet({ mode: 'skip' })}>
-            Log a skip
+            Log a pass
           </button>
         </div>
       </div>
@@ -158,7 +158,12 @@ export default function Journal() {
         <div className="stat-tile jr-hero">
           <div className="stat-tile-label">Today</div>
           <div className={`jr-hero-value ${pnlToneClass(s.today.trade_count ? s.today.pnl_cents : null)}`}>
-            {s.today.trade_count ? formatCents(s.today.pnl_cents, { sign: true }) : '—'}
+            {s.today.trade_count
+              ? (() => {
+                  const parts = formatCentsParts(s.today.pnl_cents, { sign: true })
+                  return <><span className="pnl-mark">{parts.prefix}</span>{parts.value}</>
+                })()
+              : '—'}
           </div>
           <div className="jr-tile-sub">
             {s.today.trade_count

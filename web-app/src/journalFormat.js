@@ -31,6 +31,22 @@ export function formatCents(cents, { sign = false } = {}) {
   return `${sign && cents > 0 ? '+' : ''}$${dollars}`
 }
 
+// Split form for the two big P&L figures (today's hero tile, the
+// detail view): prefix carries the sign and currency mark so CSS can
+// set them at the smaller optical size financial type gives marks,
+// while the digits stay full-size tabular figures. Exactly the same
+// characters formatCents produces -- never a different spelling.
+export function formatCentsParts(cents, { sign = false } = {}) {
+  if (cents == null) return null
+  const abs = Math.abs(cents)
+  const dollars = (abs / 100).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  const prefix = cents < 0 ? '−$' : sign && cents > 0 ? '+$' : '$'
+  return { prefix, value: dollars }
+}
+
 // Calendar-cell version: "+$1.2k" / "−$85" -- a glanceable magnitude,
 // not an accounting figure (the row list below the calendar carries
 // the exact numbers).

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api'
-import { SOURCE_LABELS, etDateTime, formatCents, pnlToneClass } from '../journalFormat'
+import { SOURCE_LABELS, etDateTime, formatCentsParts, pnlToneClass } from '../journalFormat'
 import JournalOverlay from './JournalOverlay'
 import './TradeDetail.css'
 
@@ -45,7 +45,11 @@ export default function TradeDetail({ trade, onClose, onEdit, onDeleted }) {
             <p className="td-no-position">No position taken &mdash; logged as a pass.</p>
           ) : (
             <div className={`td-pnl ${pnlToneClass(trade.pnl_cents)}`}>
-              {formatCents(trade.pnl_cents, { sign: true })}
+              {(() => {
+                const parts = formatCentsParts(trade.pnl_cents, { sign: true })
+                if (!parts) return '—'
+                return <span><span className="pnl-mark">{parts.prefix}</span>{parts.value}</span>
+              })()}
               {trade.pnl_cents == null && <span className="td-pnl-unpriced">no P&amp;L recorded</span>}
             </div>
           )}

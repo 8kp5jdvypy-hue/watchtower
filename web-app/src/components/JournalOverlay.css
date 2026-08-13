@@ -28,11 +28,15 @@
   background: linear-gradient(165deg, rgba(16, 20, 27, 0.97), rgba(10, 13, 18, 0.99));
   border: 1px solid var(--line);
   border-radius: 12px;
-  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6);
-  animation: jo-panel-in 0.28s var(--ease-perch) both;
+  /* Same recipe as the landing page's AlertReveal panel: one deep soft
+     shadow that's felt, not seen, plus a hairline inner catchlight. */
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+  /* One confident move -- the panel arrives as a single unit, no
+     staggered children. 240ms on the app's own curve. */
+  animation: jo-panel-in 0.24s var(--ease-perch) both;
 }
 @keyframes jo-panel-in {
-  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
 }
 .jo-panel.is-closing { animation: jo-panel-in 0.2s cubic-bezier(.4, 0, 1, 1) reverse both; }
 
@@ -65,6 +69,7 @@
   transition: border-color 0.2s ease, color 0.2s ease;
 }
 .jo-close:hover { border-color: var(--ink-faint); color: var(--ink); }
+.jo-close:active { background: rgba(255, 255, 255, 0.04); }
 
 @media (max-width: 640px) {
   .jo-overlay { align-items: flex-end; padding: 0; }
@@ -74,7 +79,7 @@
     border-radius: 16px 16px 0 0;
     border-left: none; border-right: none; border-bottom: none;
     padding-bottom: env(safe-area-inset-bottom);
-    animation: jo-sheet-in 0.28s var(--ease-perch) both;
+    animation: jo-sheet-in 0.25s var(--ease-perch) both;
   }
   @keyframes jo-sheet-in { from { transform: translateY(100%); } }
   .jo-panel.is-closing { animation: jo-sheet-in 0.2s cubic-bezier(.4, 0, 1, 1) reverse both; }
