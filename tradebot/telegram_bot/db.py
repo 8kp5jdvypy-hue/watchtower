@@ -13,11 +13,12 @@ discipline as tradebot.journal (see MIN_HISTORY_SAMPLE there).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -25,6 +26,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "users.db"
 
 MIN_STAT_SAMPLE = 5  # same floor as tradebot.journal.MIN_HISTORY_SAMPLE — never report a rate on fewer
+# Same convention as tradebot.journal.ET / tradebot.runner.ET — every
+# calendar-day bucketing decision in this codebase converts to ET first.
+# monthly_recap()/personal_stats() below predate this and bucket by raw
+# UTC year/month instead (see docs/BACKLOG.md) -- the Journal functions
+# further down do not repeat that.
+ET = ZoneInfo("America/New_York")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -242,6 +249,20 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     # behavior; 'aggressive' also personally forwards the hourly MEDIUM
     # digest, not just HIGH alerts. See tradebot.telegram_bot.delivery.
     _add_column_if_missing(conn, "users", "alert_sensitivity", "TEXT NOT NULL DEFAULT 'balanced'")
+    # Trade Journal (web-native entries) — extends the same user_trades
+    # table Telegram's /took and /closed already write to. All nullable,
+    # all additive; see create_journal_trade's docstring for why
+    # telegram_user_id (NOT NULL, legacy, unchanged here) isn't the key
+    # these new columns are scoped by.
+    _add_column_if_missing(conn, "user_trades", "account_id", "TEXT")
+    _add_column_if_missing(conn, "user_trades", "pnl_cents", "INTEGER")
+    _add_column_if_missing(conn, "user_trades", "source", "TEXT")
+    _add_column_if_missing(conn, "user_trades", "is_skip", "INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "user_trades", "skip_reason", "TEXT")
+    _add_column_if_missing(conn, "user_trades", "detection_snapshot_json", "TEXT")
+    _add_column_if_missing(conn, "user_trades", "quantity", "REAL")
+    _add_column_if_missing(conn, "user_trades", "fees_cents", "INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_user_trades_account ON user_trades(account_id)")
     return conn
 
 
@@ -1126,5 +1147,333 @@ def monthly_recap(conn: sqlite3.Connection, telegram_user_id: int, year: int, mo
         "leaks": [
             {"label": label, "avg_pnl_pct": avg, "n": n, "gap_pct": avg - overall_avg} for label, avg, n in leaks
         ],
+    }
+
+
+# --------------------------------------------------------------------------
+# Trade Journal (web-native entries)
+#
+# Same user_trades table Telegram's /took and /closed already write to —
+# extended, not duplicated, per the columns added in connect() above.
+# Scoped by `account_id` (the Perch-native identity, see the `accounts`
+# table), never by telegram_user_id: a web-only account with no linked
+# Telegram identity must be able to use the Journal, and telegram_user_id
+# is a legacy NOT NULL column on this table with no sensible value for
+# such an account. See _telegram_id_for_account for how that constraint
+# is satisfied without meaning anything for Journal purposes — account_id
+# is the only column any function below trusts for scoping or
+# authorization, and it must always come from the caller's own resolved
+# session (g.account.id in the API layer), never from request data.
+#
+# Every read/update/delete below repeats the account-scope check inside
+# its own SQL WHERE clause (not just as a preceding lookup) — a defense
+# a caller can't accidentally bypass by skipping the "does this belong to
+# them" check before mutating.
+# --------------------------------------------------------------------------
+
+JOURNAL_SOURCES = ("perch_signal", "own_analysis", "both", "other")
+
+# The `direction` column already exists (added for Telegram-origin rows)
+# and stores the SIGNAL's direction ('up'/'down' -> bullish/bearish, see
+# _DIRECTION_LABELS above) -- not literally "long/short" a user's own
+# position. Journal entries reuse the same column but speak "long/short"
+# at the API boundary; translated here so the one column keeps one
+# consistent on-disk vocabulary instead of mixing two.
+_JOURNAL_DIRECTION_TO_DB = {"long": "up", "short": "down"}
+_JOURNAL_DIRECTION_FROM_DB = {"up": "long", "down": "short"}
+
+# Every Journal read scopes to rows that are either directly tagged with
+# this account_id (any trade logged through the web Journal) or reachable
+# through a linked Telegram identity (trades logged via /took and
+# /closed, before this account ever touched the web Journal) -- both
+# live in this same users.db file, so this is a real SQL join, not the
+# cross-database stitching journal.db-linked data would need. An account
+# with no Telegram link simply gets an empty result from the subquery,
+# which is harmless.
+_ACCOUNT_SCOPE_SQL = """(
+    account_id = :account_id
+    OR telegram_user_id IN (
+        SELECT CAST(provider_user_id AS INTEGER) FROM linked_identities
+        WHERE provider = 'telegram' AND account_id = :account_id
+    )
+)"""
+
+
+def _sentinel_telegram_id(account_id: str) -> int:
+    """user_trades.telegram_user_id is NOT NULL with no default -- a
+    column this table has always required, from before accounts existed.
+    Rather than rebuild the table to relax that constraint, every
+    Journal-native row gets a stable NEGATIVE placeholder derived from
+    account_id -- negative on purpose, for ALL Journal rows, linked
+    Telegram identity or not: real Telegram ids are always positive, and
+    every legacy query in this module and handlers.py binds a real
+    (positive) id, so no legacy read (list_trades -> personal_stats /
+    monthly_recap / the /activity endpoint, get_open_trade_for_alert,
+    most_recent_open_trade, handlers' /closed lookup) can ever match a
+    Journal-native row. Writing a linked account's REAL id here instead
+    would silently leak web entries into personal_stats' total_trades
+    and adherence_score denominators. A Journal read that wants a linked
+    account's bot-logged trades gets them via _ACCOUNT_SCOPE_SQL's
+    linked_identities branch, which never contains sentinels. Nothing
+    reads telegram_user_id back for Journal authorization or display --
+    account_id is authoritative for that everywhere below."""
+    digest = hashlib.sha256(f"journal:{account_id}".encode()).hexdigest()[:12]
+    return -(int(digest, 16) % 10**15 + 1)
+
+
+@dataclass(frozen=True)
+class JournalTrade:
+    id: str
+    account_id: str | None
+    detection_id: str | None
+    detection_snapshot: dict | None
+    symbol: str
+    direction: str | None  # 'long' | 'short' | None
+    source: str | None  # one of JOURNAL_SOURCES | None
+    taken_at: str  # ISO UTC
+    closed_at: str | None  # ISO UTC; None only for an is_skip row
+    pnl_cents: int | None
+    quantity: float | None
+    entry_price: float | None
+    exit_price: float | None
+    fees_cents: int | None
+    is_skip: bool
+    skip_reason: str | None
+    note: str | None
+    status: str
+
+
+_JOURNAL_COLUMNS = (
+    "id, account_id, detection_id, detection_snapshot_json, symbol, direction, source, taken_at, "
+    "closed_at, pnl_cents, quantity, entry_price, exit_price, fees_cents, is_skip, skip_reason, note, status"
+)
+
+
+def _row_to_journal_trade(row) -> JournalTrade:
+    (
+        tid, account_id, detection_id, snapshot_json, symbol, direction, source, taken_at, closed_at,
+        pnl_cents, quantity, entry_price, exit_price, fees_cents, is_skip, skip_reason, note, status,
+    ) = row
+    return JournalTrade(
+        id=tid,
+        account_id=account_id,
+        detection_id=detection_id,
+        detection_snapshot=json.loads(snapshot_json) if snapshot_json else None,
+        symbol=symbol,
+        direction=_JOURNAL_DIRECTION_FROM_DB.get(direction, direction),
+        source=source,
+        taken_at=taken_at,
+        closed_at=closed_at,
+        pnl_cents=pnl_cents,
+        quantity=quantity,
+        entry_price=entry_price,
+        exit_price=exit_price,
+        fees_cents=fees_cents,
+        is_skip=bool(is_skip),
+        skip_reason=skip_reason,
+        note=note,
+        status=status,
+    )
+
+
+def et_date(iso_utc: str) -> date:
+    """The one place Journal code converts a stored UTC timestamp to a
+    calendar day -- always ET, matching tradebot.journal.ET /
+    tradebot.runner.ET's session_date_fn convention, deliberately not
+    repeating monthly_recap/personal_stats' raw-UTC bucketing above (see
+    docs/BACKLOG.md)."""
+    return datetime.fromisoformat(iso_utc).astimezone(ET).date()
+
+
+def create_journal_trade(
+    conn: sqlite3.Connection,
+    account_id: str,
+    *,
+    symbol: str,
+    taken_at: datetime,
+    direction: str | None = None,
+    source: str | None = None,
+    pnl_cents: int | None = None,
+    note: str | None = None,
+    detection_id: str | None = None,
+    detection_snapshot: dict | None = None,
+    is_skip: bool = False,
+    skip_reason: str | None = None,
+) -> JournalTrade:
+    """Payload validation (required fields, source/direction vocabulary,
+    pnl_cents parsing) happens in the API layer, not here -- this
+    function trusts its keyword arguments the same way log_took/
+    log_closed above trust theirs, and is the single place a row
+    actually gets written, so every caller goes through the same
+    account_id-derived telegram_user_id placeholder logic."""
+    trade_id = uuid.uuid4().hex
+    tg_id = _sentinel_telegram_id(account_id)
+    db_direction = _JOURNAL_DIRECTION_TO_DB.get(direction, direction)
+    taken_at_iso = taken_at.astimezone(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO user_trades
+            (id, telegram_user_id, account_id, detection_id, detection_snapshot_json, symbol,
+             direction, source, taken_at, closed_at, pnl_cents, is_skip, skip_reason, note, status)
+        VALUES (:id, :tg_id, :account_id, :detection_id, :snapshot, :symbol, :direction, :source,
+                :taken_at, :closed_at, :pnl_cents, :is_skip, :skip_reason, :note, :status)
+        """,
+        {
+            "id": trade_id,
+            "tg_id": tg_id,
+            "account_id": account_id,
+            "detection_id": detection_id,
+            "snapshot": json.dumps(detection_snapshot) if detection_snapshot else None,
+            "symbol": symbol,
+            "direction": db_direction,
+            "source": source,
+            "taken_at": taken_at_iso,
+            "closed_at": None if is_skip else taken_at_iso,
+            "pnl_cents": None if is_skip else pnl_cents,
+            "is_skip": int(is_skip),
+            "skip_reason": skip_reason if is_skip else None,
+            "note": note,
+            "status": "skipped" if is_skip else "closed",
+        },
+    )
+    conn.commit()
+    return get_journal_trade(conn, account_id, trade_id)
+
+
+def get_journal_trade(conn: sqlite3.Connection, account_id: str, trade_id: str) -> JournalTrade | None:
+    row = conn.execute(
+        f"SELECT {_JOURNAL_COLUMNS} FROM user_trades WHERE id = :trade_id AND {_ACCOUNT_SCOPE_SQL}",
+        {"trade_id": trade_id, "account_id": account_id},
+    ).fetchone()
+    return _row_to_journal_trade(row) if row else None
+
+
+# detection_id / detection_snapshot_json are updatable so the API's
+# PATCH can link or unlink a signal after the fact -- but the API only
+# ever accepts detection_id from a client and derives the snapshot
+# server-side (see app.py's _detection_snapshot); the snapshot column
+# being writable here is for that server-derived value, never a
+# client-supplied one.
+_JOURNAL_UPDATABLE_FIELDS = {
+    "symbol", "direction", "source", "taken_at", "pnl_cents", "note", "skip_reason",
+    "detection_id", "detection_snapshot_json",
+}
+
+
+def update_journal_trade(conn: sqlite3.Connection, account_id: str, trade_id: str, **fields) -> JournalTrade | None:
+    """Returns None if trade_id doesn't exist OR doesn't belong to
+    account_id -- indistinguishable on purpose, same as get_journal_trade,
+    so a caller can't probe for the existence of another account's trade
+    id. The UPDATE's own WHERE clause repeats the account-scope check
+    (not just this preceding lookup) -- belt and suspenders against a
+    future caller skipping the pre-check."""
+    existing = get_journal_trade(conn, account_id, trade_id)
+    if existing is None:
+        return None
+    sets, params = [], {"trade_id": trade_id, "account_id": account_id}
+    for key, value in fields.items():
+        if key not in _JOURNAL_UPDATABLE_FIELDS:
+            raise ValueError(f"cannot update field: {key}")
+        if key == "direction" and value is not None:
+            value = _JOURNAL_DIRECTION_TO_DB.get(value, value)
+        if key == "taken_at" and isinstance(value, datetime):
+            value = value.astimezone(timezone.utc).isoformat()
+        sets.append(f"{key} = :{key}")
+        params[key] = value
+    if not sets:
+        return existing
+    conn.execute(f"UPDATE user_trades SET {', '.join(sets)} WHERE id = :trade_id AND {_ACCOUNT_SCOPE_SQL}", params)
+    conn.commit()
+    return get_journal_trade(conn, account_id, trade_id)
+
+
+def delete_journal_trade(conn: sqlite3.Connection, account_id: str, trade_id: str) -> bool:
+    existing = get_journal_trade(conn, account_id, trade_id)
+    if existing is None:
+        return False
+    conn.execute(
+        f"DELETE FROM user_trades WHERE id = :trade_id AND {_ACCOUNT_SCOPE_SQL}",
+        {"trade_id": trade_id, "account_id": account_id},
+    )
+    conn.commit()
+    return True
+
+
+def list_journal_trades(conn: sqlite3.Connection, account_id: str, *, on_date: date | None = None) -> list[JournalTrade]:
+    """Fetches the account's full Journal history and buckets by ET date
+    in Python, not SQL -- SQLite has no DST-aware timezone support, and a
+    fixed UTC offset would silently misbucket half the year (the exact
+    class of bug flagged in docs/BACKLOG.md for monthly_recap). Fine at
+    Journal v1's per-user scale; revisit if this ever needs to scan
+    thousands of rows per request."""
+    rows = conn.execute(
+        f"SELECT {_JOURNAL_COLUMNS} FROM user_trades WHERE {_ACCOUNT_SCOPE_SQL} ORDER BY taken_at",
+        {"account_id": account_id},
+    ).fetchall()
+    trades = [_row_to_journal_trade(r) for r in rows]
+    if on_date is not None:
+        trades = [t for t in trades if et_date(t.taken_at) == on_date]
+    return trades
+
+
+def _pnl_bucket(trades: list[JournalTrade]) -> dict:
+    scored = [t for t in trades if not t.is_skip and t.pnl_cents is not None]
+    return {
+        "pnl_cents": sum(t.pnl_cents for t in scored),
+        "trade_count": len(scored),
+        "wins": sum(1 for t in scored if t.pnl_cents > 0),
+        "losses": sum(1 for t in scored if t.pnl_cents < 0),
+    }
+
+
+def journal_summary(conn: sqlite3.Connection, account_id: str, *, now: datetime) -> dict:
+    """Today/week(Mon-start)/month/all-time P&L and counts, all ET-bucketed
+    off the same et_date() helper every other Journal function uses."""
+    trades = list_journal_trades(conn, account_id)
+    today = now.astimezone(ET).date()
+    week_start = today - timedelta(days=today.weekday())
+    month_start = today.replace(day=1)
+    by_day = [(t, et_date(t.taken_at)) for t in trades]
+    return {
+        "today": _pnl_bucket([t for t, d in by_day if d == today]),
+        "week": _pnl_bucket([t for t, d in by_day if week_start <= d <= today]),
+        "month": _pnl_bucket([t for t, d in by_day if month_start <= d <= today]),
+        "all_time": _pnl_bucket(trades),
+    }
+
+
+def journal_calendar(conn: sqlite3.Connection, account_id: str, year: int, month: int) -> dict[str, dict]:
+    """One entry per day in `year`/`month` that has at least one trade --
+    days with none are simply absent, the caller/frontend renders those as
+    blank rather than this returning a zero-filled row for every day of
+    the month."""
+    trades = list_journal_trades(conn, account_id)
+    by_day: dict[date, list[JournalTrade]] = {}
+    for t in trades:
+        d = et_date(t.taken_at)
+        if d.year == year and d.month == month:
+            by_day.setdefault(d, []).append(t)
+    return {d.isoformat(): _pnl_bucket(day_trades) for d, day_trades in by_day.items()}
+
+
+def journal_stats(conn: sqlite3.Connection, account_id: str) -> dict:
+    """Basic v1 analytics. `meaningful` is False below MIN_STAT_SAMPLE --
+    the same floor personal_stats/monthly_recap use above -- so the
+    frontend can render an honest "not enough trades yet" state instead
+    of a win rate computed from 2 data points."""
+    trades = [t for t in list_journal_trades(conn, account_id) if not t.is_skip and t.pnl_cents is not None]
+    n = len(trades)
+    wins = [t.pnl_cents for t in trades if t.pnl_cents > 0]
+    losses = [t.pnl_cents for t in trades if t.pnl_cents < 0]
+    return {
+        "sample_size": n,
+        "meaningful": n >= MIN_STAT_SAMPLE,
+        "total_trades": n,
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
+        "total_pnl_cents": sum(t.pnl_cents for t in trades),
+        "win_rate": (len(wins) / n) if n >= MIN_STAT_SAMPLE else None,
+        "avg_win_cents": round(sum(wins) / len(wins)) if wins else None,
+        "avg_loss_cents": round(sum(losses) / len(losses)) if losses else None,
     }
 

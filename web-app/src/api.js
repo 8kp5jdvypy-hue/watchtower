@@ -44,6 +44,29 @@ export const api = {
   // Restricted server-side to the account's own watchlist -- an empty
   // or all-outside-watchlist symbols list just returns {quotes: {}}.
   quotes: (symbols) => request(`/quotes?symbols=${symbols.map(encodeURIComponent).join(',')}`),
+
+  // Trade Journal (Phase 3) -- pnl_cents is always integer cents, signed;
+  // the dollars<->cents conversion lives in journalFormat.js, never here.
+  // Day bucketing (calendar keys, ?date=) is US-Eastern and done by the
+  // API -- the client never re-buckets timestamps into days itself.
+  journalSummary: () => request('/journal/summary'),
+  journalCalendar: (month) => request(`/journal/calendar?month=${encodeURIComponent(month)}`),
+  journalTrades: (date) => request(date ? `/journal/trades?date=${encodeURIComponent(date)}` : '/journal/trades'),
+  journalCreateTrade: (payload) => request('/journal/trades', { method: 'POST', body: JSON.stringify(payload) }),
+  journalUpdateTrade: (id, payload) =>
+    request(`/journal/trades/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  journalDeleteTrade: (id) => request(`/journal/trades/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // The alerts this account was actually sent (outbox delivery log, not
+  // the global feed) -- delivery_history: false means no linked Telegram,
+  // which the UI renders as nothing at all, never an upsell.
+  journalLinkableSignals: (symbol) =>
+    request(symbol ? `/journal/linkable-signals?symbol=${encodeURIComponent(symbol)}` : '/journal/linkable-signals'),
 }
+
+// A plain top-level navigation, not a fetch: the browser downloads the
+// CSV with the session cookie attached (SameSite=Lax allows top-level
+// GET navigations cross-subdomain, and CORS doesn't apply to
+// navigations) -- no blob plumbing needed.
+export const JOURNAL_EXPORT_URL = `${API_URL}/journal/export.csv`
 
 export { ApiError }

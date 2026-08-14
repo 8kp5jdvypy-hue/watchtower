@@ -9,6 +9,7 @@ import VerifyMagicLink from './components/VerifyMagicLink'
 import Today from './components/Today'
 import Watchlist from './components/Watchlist'
 import Feed from './components/Feed'
+import Journal from './components/Journal'
 import Performance from './components/Performance'
 import Activity from './components/Activity'
 import Settings from './components/Settings'
@@ -25,13 +26,19 @@ const TABS = [
   { id: 'today', label: 'Today', Component: Today },
   { id: 'watchlist', label: 'Watchlist', Component: Watchlist },
   { id: 'signals', label: 'Signals', Component: Feed },
+  // Journal sits right after Signals on purpose: "what Perch saw" then
+  // "what I did about it" -- a primary destination, not a history tab.
+  { id: 'journal', label: 'Journal', Component: Journal },
   { id: 'performance', label: 'Performance', Component: Performance },
   { id: 'activity', label: 'Activity', Component: Activity },
   { id: 'settings', label: 'Settings', Component: Settings },
 ]
-// Same six on mobile, no "more" menu -- see AppShell.css's mobile-nav
-// sizing; six compact buttons still fits a bottom bar without wrapping
-// or truncation at the narrowest supported width (360px).
+// All seven on mobile, still no "more" menu. Six equal-width buttons was
+// the max at 360px; seven fit because .mobile-nav-button now sizes to
+// its label (flex: 1 1 auto) instead of forcing seven equal columns --
+// "Performance" gets the width it needs, "Today" stops hoarding the
+// width it doesn't -- plus slightly tighter type. Verified no wrapping
+// or truncation at 360px; see AppShell.css's .mobile-nav-button.
 
 function LoadingShell() {
   return (

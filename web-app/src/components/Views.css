@@ -6,7 +6,15 @@
   max-width: 720px;
   width: 100%;
   margin: 0 auto;
-  animation: view-in var(--duration-reveal) var(--ease-perch) both;
+  /* No fill mode on purpose: with `both`, the transform animation keeps
+     applying after it finishes, which makes .view a containing block for
+     every position:fixed overlay inside it (TradeSheet/TradeDetail/
+     SignalDetail) -- a scrolled page then renders overlays displaced by
+     scrollY instead of viewport-centered. There's no delay, so the
+     `from` frame still applies from t=0 and the end state is identical;
+     the only difference is the containing block being released when the
+     reveal completes. */
+  animation: view-in var(--duration-reveal) var(--ease-perch);
 }
 /* A tab switch replaces the whole view (see App.jsx's ActiveComponent
    swap) -- this is the one "page transition" moment in the app, kept to
