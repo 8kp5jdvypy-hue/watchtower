@@ -56,6 +56,11 @@ export const api = {
   journalUpdateTrade: (id, payload) =>
     request(`/journal/trades/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   journalDeleteTrade: (id) => request(`/journal/trades/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // The alerts this account was actually sent (outbox delivery log, not
+  // the global feed) -- delivery_history: false means no linked Telegram,
+  // which the UI renders as nothing at all, never an upsell.
+  journalLinkableSignals: (symbol) =>
+    request(symbol ? `/journal/linkable-signals?symbol=${encodeURIComponent(symbol)}` : '/journal/linkable-signals'),
 }
 
 // A plain top-level navigation, not a fetch: the browser downloads the

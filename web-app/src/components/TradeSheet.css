@@ -104,6 +104,63 @@
   color: var(--cyan);
 }
 
+/* Alert linking -- auxiliary by design. The toggle borrows the app's
+   quiet-disclosure voice (SignalDetail's "Technical details" summary):
+   mono, faint, no border. It earns no more presence than that; the
+   selected chip takes the same cyan tint every selected control here
+   already uses, so "linked" reads as just another chosen state. */
+.ts-link-toggle {
+  align-self: flex-start; background: none; border: none; padding: 0.1rem 0; cursor: pointer;
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--ink-faint); display: inline-flex; align-items: center; gap: 0.35rem;
+  transition: color var(--duration-hover) var(--ease-perch);
+}
+.ts-link-toggle:hover { color: var(--ink-dim); }
+
+.ts-link-list {
+  display: flex; flex-direction: column; gap: 0.35rem;
+  max-height: 12.5rem; overflow-y: auto;
+}
+.ts-link-row {
+  display: flex; align-items: center; gap: 0.55rem; width: 100%; text-align: left;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+  padding: 0.5rem 0.65rem; cursor: pointer;
+  font-family: var(--sans); color: var(--ink-dim);
+  transition: border-color var(--duration-hover) var(--ease-perch), color var(--duration-hover) var(--ease-perch);
+}
+.ts-link-row:hover { border-color: rgba(52, 226, 255, 0.3); color: var(--ink); }
+.ts-link-row:active { background: rgba(255, 255, 255, 0.03); }
+.ts-link-row-headline {
+  flex: 1; min-width: 0; font-size: 0.8rem; line-height: 1.35;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ts-link-row-time { font-family: var(--mono); font-size: 0.62rem; color: var(--ink-faint); flex: none; }
+
+/* Same pill recipe as SignalDetail's .sd-tier -- tier is a fact the
+   alert arrived with, in the exact dress it wears everywhere else. */
+.ts-link-tier {
+  font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+  font-weight: 600; padding: 0.16rem 0.5rem; border-radius: 999px; flex: none;
+}
+.ts-link-tier.is-high { background: rgba(52, 226, 255, 0.14); color: var(--cyan); }
+.ts-link-tier.is-medium { background: rgba(52, 226, 255, 0.08); color: var(--cyan); }
+
+.ts-linked {
+  display: flex; align-items: center; gap: 0.55rem;
+  background: rgba(52, 226, 255, 0.08); border: 1px solid rgba(52, 226, 255, 0.35);
+  border-radius: 6px; padding: 0.42rem 0.4rem 0.42rem 0.65rem;
+}
+.ts-linked-text {
+  flex: 1; min-width: 0; font-size: 0.8rem; color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ts-linked-remove {
+  background: none; border: none; color: var(--ink-faint); cursor: pointer;
+  font-size: 1rem; line-height: 1; padding: 0.2rem 0.45rem; border-radius: 4px; flex: none;
+  transition: color var(--duration-hover) var(--ease-perch);
+}
+.ts-linked-remove:hover { color: var(--ink); }
+
 .ts-error { margin: 0; color: var(--down); font-size: 0.82rem; line-height: 1.45; }
 
 .ts-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 0.2rem; }
@@ -131,4 +188,5 @@
   .ts-row { grid-template-columns: 1fr; }
   .ts-mode-btn, .ts-seg-btn, .ts-cancel, .ts-submit { min-height: 44px; }
   .ts-input { min-height: 44px; }
+  .ts-link-toggle, .ts-link-row { min-height: 44px; }
 }

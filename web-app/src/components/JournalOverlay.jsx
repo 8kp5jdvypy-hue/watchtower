@@ -17,7 +17,12 @@ function prefersReducedMotion() {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 }
 
-export default function JournalOverlay({ label, eyebrow, onClose, children }) {
+// `suspended`: true while another overlay (SignalDetail, opened from a
+// linked trade) is stacked on top of this one. Both overlays listen for
+// Escape at the document level, so without this, one Escape would close
+// both layers at once; suspended makes this layer's keyboard handling
+// yield until the layer above is gone.
+export default function JournalOverlay({ label, eyebrow, onClose, suspended = false, children }) {
   const dialogRef = useRef(null)
   const previouslyFocused = useRef(null)
   const [closing, setClosing] = useState(false)
@@ -48,6 +53,7 @@ export default function JournalOverlay({ label, eyebrow, onClose, children }) {
   }, [])
 
   useEffect(() => {
+    if (suspended) return
     function onKeyDown(e) {
       if (e.key === 'Escape') {
         requestClose()
@@ -70,7 +76,7 @@ export default function JournalOverlay({ label, eyebrow, onClose, children }) {
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [requestClose])
+  }, [requestClose, suspended])
 
   return (
     <div

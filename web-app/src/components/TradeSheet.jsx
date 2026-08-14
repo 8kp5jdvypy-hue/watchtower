@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { api } from '../api'
-import { SOURCE_LABELS, dollarsToCents, toApiIso } from '../journalFormat'
+import { SOURCE_LABELS, dollarsToCents, etTime, toApiIso } from '../journalFormat'
 import JournalOverlay from './JournalOverlay'
 import './TradeSheet.css'
 
@@ -45,6 +45,53 @@ export default function TradeSheet({ initialMode = 'trade', trade = null, onClos
   const [error, setError] = useState(null)
   const [saving, setSaving] = useState(false)
 
+  // Linking a trade to the alert the user was actually sent (Phase 4).
+  // Strictly auxiliary: it only exists once the source says "a Perch
+  // signal was involved", it never blocks submit, and when the account
+  // has no delivery history (no linked Telegram) it renders nothing at
+  // all -- absence is the quiet state, not an upsell.
+  const originalDetectionId = trade?.detection_id ?? null
+  const [detectionId, setDetectionId] = useState(originalDetectionId)
+  // What the selected-alert chip shows. Seeded from the trade's own
+  // snapshot when editing; null with a detectionId set is the honest
+  // "linked, detail unavailable" degenerate state (see _detection_snapshot
+  // in tradebot/api/app.py).
+  const [linkedMeta, setLinkedMeta] = useState(trade?.detection_snapshot ?? null)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [linkable, setLinkable] = useState(null) // {signals, delivery_history} | null
+
+  const signalSource = !isSkip && (source === 'perch_signal' || source === 'both')
+  const cleanSymbolNow = symbol.trim().toUpperCase()
+
+  useEffect(() => {
+    if (!signalSource) return undefined
+    let cancelled = false
+    // Debounced a beat behind typing in the symbol field -- the API
+    // filters by symbol, and refetching per keystroke buys nothing.
+    const t = setTimeout(() => {
+      api
+        .journalLinkableSignals(cleanSymbolNow || undefined)
+        .then((result) => { if (!cancelled) setLinkable(result) })
+        // A failed fetch here degrades to the same nothing as no
+        // history -- linking must never get between the user and submit.
+        .catch(() => { if (!cancelled) setLinkable({ signals: [], delivery_history: false }) })
+    }, 250)
+    return () => { cancelled = true; clearTimeout(t) }
+  }, [signalSource, cleanSymbolNow])
+
+  function selectSignal(s) {
+    setDetectionId(s.detection_id)
+    setLinkedMeta(s)
+    setPickerOpen(false)
+    if (!symbol.trim()) setSymbol(s.symbol)
+  }
+
+  function unlinkSignal() {
+    setDetectionId(null)
+    setLinkedMeta(null)
+    setPickerOpen(false)
+  }
+
   async function submit(e, requestClose) {
     e.preventDefault()
     if (saving) return
@@ -74,6 +121,17 @@ export default function TradeSheet({ initialMode = 'trade', trade = null, onClos
       payload.source = source
       payload.pnl_cents = cents
       payload.note = note.trim() || null
+    }
+
+    // The link travels only with a signal-involved source -- switching
+    // source away hides the chip, and what's submitted matches what the
+    // form shows. Only sent when it changed: POST omits an absent link,
+    // PATCH sends null to unlink (see /journal/trades in app.py).
+    const effectiveDetectionId = signalSource ? detectionId : null
+    if (editing) {
+      if (effectiveDetectionId !== originalDetectionId) payload.detection_id = effectiveDetectionId
+    } else if (effectiveDetectionId) {
+      payload.detection_id = effectiveDetectionId
     }
 
     setSaving(true)
@@ -187,6 +245,53 @@ export default function TradeSheet({ initialMode = 'trade', trade = null, onClos
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Only rendered when there is something true to show: a link
+              already on the entry, or actual delivered alerts to pick
+              from. No history, empty list, failed fetch -- nothing. */}
+          {signalSource && (detectionId != null || (linkable?.delivery_history && linkable.signals.length > 0)) && (
+            <div className="ts-field">
+              {detectionId != null ? (
+                <div className="ts-linked">
+                  {linkedMeta?.tier && (
+                    <span className={`ts-link-tier is-${linkedMeta.tier}`}>{linkedMeta.tier}</span>
+                  )}
+                  <span className="ts-linked-text">
+                    {linkedMeta ? linkedMeta.headlines : 'Linked signal'}
+                  </span>
+                  <button
+                    type="button" className="ts-linked-remove" onClick={unlinkSignal}
+                    aria-label="Remove linked alert"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <button
+                    type="button" className="ts-link-toggle" aria-expanded={pickerOpen}
+                    onClick={() => setPickerOpen((o) => !o)}
+                  >
+                    Link the alert <span aria-hidden="true">{pickerOpen ? '▴' : '▾'}</span>
+                  </button>
+                  {pickerOpen && (
+                    <div className="ts-link-list">
+                      {linkable.signals.map((s) => (
+                        <button
+                          type="button" className="ts-link-row" key={s.detection_id}
+                          onClick={() => selectSignal(s)}
+                        >
+                          <span className={`ts-link-tier is-${s.tier}`}>{s.tier}</span>
+                          <span className="ts-link-row-headline">{s.headlines}</span>
+                          <span className="ts-link-row-time">{etTime(s.delivered_at)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 
