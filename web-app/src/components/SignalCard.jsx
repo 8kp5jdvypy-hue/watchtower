@@ -72,16 +72,27 @@ export default function SignalCard({ signal, quote, onView, arrived = false }) {
 
       <div className="sc-body">
         <div className="sc-symbol-row">
-          <span className={`sc-symbol ${signal.trend === 'up' ? 'trend-up' : 'trend-down'}`}>
+          <span
+            className={`sc-symbol ${signal.trend === 'up' ? 'trend-up' : 'trend-down'}`}
+            title={`Perch's direction call for this signal: ${signal.trend}`}
+          >
             {signal.symbol}
             <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
           </span>
           {/* Colored by raw price direction since detection, same
               convention as the modal's "After detection" marks -- not
-              flipped for the signal's own directional call. */}
+              flipped for the signal's own directional call. The arrow and
+              this figure state two different facts (the call vs. what
+              price has done since), so a down-arrow beside a green "+"
+              is legitimate -- the visible "since detection" note plus
+              the tooltips exist so it reads as two facts, not a bug. */}
           {changePct != null && (
-            <span className={`sc-change ${changePct >= 0 ? 'trend-up' : 'trend-down'}`}>
+            <span
+              className={`sc-change ${changePct >= 0 ? 'trend-up' : 'trend-down'}`}
+              title="Live price vs. price at detection — independent of the direction Perch called"
+            >
               {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
+              <span className="sc-change-note">since detection</span>
             </span>
           )}
         </div>

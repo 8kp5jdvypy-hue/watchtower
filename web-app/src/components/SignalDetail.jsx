@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
@@ -142,7 +143,13 @@ export default function SignalDetail({ id, onClose }) {
   const kinds = data?.kinds || []
   const contexts = data?.contexts || []
 
-  return (
+  // Portaled to <body>: rendered in place, this fixed overlay sits inside
+  // .view's `z-index: 1` stacking context (Views.css), so its z-index: 50
+  // competes as a 1 -- the tab bar (z 2) and mobile nav (z 10) painted on
+  // top of the open dialog and stayed clickable. The portal opts it out of
+  // every ancestor stacking context; focus trap, scroll lock, and Escape
+  // handling are document-level already and don't care where it mounts.
+  return createPortal(
     <div
       className={`signal-detail-overlay${closing ? ' is-closing' : ''}`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose() }}
@@ -295,7 +302,8 @@ export default function SignalDetail({ id, onClose }) {
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
