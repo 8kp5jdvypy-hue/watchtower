@@ -108,8 +108,15 @@ export default function Journal() {
   const s = summary.data.summary
   const stats = summary.data.stats
 
+  // key="sheet": the empty-state branch and the main branch place this
+  // element at different child indexes under div.view. Saving the very
+  // first entry flips isEmpty mid-close, and without a key React's
+  // index-based reconciliation would unmount the in-flight sheet
+  // (cancelling its close timer) and mount a fresh, blank, open one.
+  // A stable key keeps the same instance across the branch switch.
   const sheetEl = sheet && (
     <TradeSheet
+      key="sheet"
       initialMode={sheet.mode}
       trade={sheet.trade ?? null}
       onClose={() => setSheet(null)}
