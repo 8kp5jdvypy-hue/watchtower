@@ -80,6 +80,34 @@ checklist once a real live SIP session closes cleanly on its own.
    question: screen such symbols out of detection entirely, or accept
    occasional unresolvable marks as a real, bounded cost. Undecided.
 
+## Bucketing inconsistency: `monthly_recap`/`personal_stats` use UTC, not ET (found 2026-08-13)
+
+Not one of the 27 findings in `docs/full-code-review.md` — surfaced
+during architecture recon for the Trade Journal feature. Every
+session/day-boundary decision elsewhere in the codebase converts to ET
+(`America/New_York`) first: `ET = ZoneInfo("America/New_York")` in both
+`tradebot/journal.py` and `tradebot/runner.py`, and `session_date_fn` in
+`runner.py` (`now.astimezone(ET).date()`) is the canonical "what day is
+this" function, explicitly reused by the subscriber-alert hook and the
+medium-digest fanout, with `/signals/today` in `tradebot/api/app.py`
+carrying a comment calling out exactly this risk ("not the server's own
+local/UTC date, which would be wrong ... around the ET midnight
+rollover").
+
+`monthly_recap()` and `personal_stats()` in `tradebot/telegram_bot/db.py`
+do not follow that convention: they bucket closed trades by
+`closed_at.year`/`closed_at.month` taken directly from a
+`datetime.fromisoformat()` parse of the ISO-UTC-stored `closed_at`
+string, with no ET conversion. A trade closed in the evening ET (e.g.
+8pm ET = past midnight UTC) can land in the wrong UTC calendar
+day/month relative to every other ET-bucketed view in the app.
+
+Not the Trade Journal's job to fix — flagging so it isn't silently
+inherited by whatever extends `user_trades` next, and doesn't get lost.
+Low severity today (no UI currently exposes `monthly_recap` output
+prominently), but worth closing before any feature buckets trades by
+day/week/month at user-facing granularity.
+
 ## Code review triage (`docs/full-code-review.md`)
 
 27 ranked findings (5 CRITICAL, 8 HIGH, 11 MEDIUM, 3 LOW) plus a Silent
