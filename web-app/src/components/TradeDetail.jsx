@@ -11,7 +11,8 @@ import './TradeDetail.css'
 // off to TradeSheet (via onEdit) rather than growing a second form here.
 //
 // A linked trade's click-through opens the existing SignalDetail overlay
-// *stacked over* this one (a DOM sibling of the JournalOverlay, so no
+// *stacked over* this one (both portal to document.body; SignalDetail
+// mounts later, so it's the later body child and paints above -- no
 // fixed-positioning fights with the panel's backdrop-filter/transform),
 // rather than swapping views: closing the signal lands you back on the
 // exact trade you left, which is the whole point of the link. While it's

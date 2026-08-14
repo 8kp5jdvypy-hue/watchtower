@@ -78,10 +78,15 @@ export default function SignalCard({ signal, quote, onView, arrived = false }) {
           </span>
           {/* Colored by raw price direction since detection, same
               convention as the modal's "After detection" marks -- not
-              flipped for the signal's own directional call. */}
+              flipped for the signal's own directional call. The "since
+              alert" label says so out loud: without it, a red ▼ (the
+              signal's call) next to a green +% (price since detection)
+              reads as a rendering bug (design review H4). Lives inside
+              .sc-change so figure and label wrap as one unit at 390. */}
           {changePct != null && (
             <span className={`sc-change ${changePct >= 0 ? 'trend-up' : 'trend-down'}`}>
               {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
+              <span className="sc-change-label"> since alert</span>
             </span>
           )}
         </div>

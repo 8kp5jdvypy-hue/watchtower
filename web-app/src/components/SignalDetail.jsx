@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
-import { SMALL_SAMPLE_THRESHOLD, interpretHistory } from '../signalHistory'
+import { SMALL_SAMPLE_THRESHOLD, interpretHistory, isRoughlyFlat } from '../signalHistory'
 import { kindLabel } from '../kindLabels'
 import PerchMark from './PerchMark'
 import './SignalDetail.css'
@@ -142,7 +143,14 @@ export default function SignalDetail({ id, onClose }) {
   const kinds = data?.kinds || []
   const contexts = data?.contexts || []
 
-  return (
+  // Portaled to document.body: rendered in place, this fixed overlay sits
+  // inside `.view`'s stacking context (z-index: 1) and loses to .tabs (2)
+  // and .mobile-nav (10) -- undimmed chrome above the modal, tabs still
+  // clickable under it. At body level its own z-index: 50 clears all app
+  // chrome. Mount order keeps the journal's stack correct: opened from
+  // TradeDetail this mounts after the JournalOverlay portal, so it's the
+  // later body child and paints above the trade sheet.
+  return createPortal(
     <div
       className={`signal-detail-overlay${closing ? ' is-closing' : ''}`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose() }}
@@ -223,16 +231,24 @@ export default function SignalDetail({ id, onClose }) {
                   <p className="sd-history">
                     <b>{data.history.sample_size}</b> historical observation{data.history.sample_size === 1 ? '' : 's'} of this
                     same setup · <b>{pct(data.history.continuation_rate)}</b> continued in the same direction within{' '}
-                    {data.history.offset_min} min · avg follow-through{' '}
-                    <b>{data.history.avg_return_pct.toFixed(2)}%</b>
-                    {data.history.avg_return_atr != null && (
-                      <span className="sd-history-atr"> (≈{data.history.avg_return_atr.toFixed(2)}× ATR)</span>
+                    {data.history.offset_min} min ·{' '}
+                    {/* Inside the flat band, printing a signed figure
+                        overstates what the data says (H5) -- say flat. */}
+                    {isRoughlyFlat(data.history) ? (
+                      <>roughly flat on average</>
+                    ) : (
+                      <>
+                        avg follow-through <b>{data.history.avg_return_pct.toFixed(2)}%</b>
+                        {data.history.avg_return_atr != null && (
+                          <span className="sd-history-atr"> (≈{data.history.avg_return_atr.toFixed(2)}× ATR)</span>
+                        )}
+                      </>
                     )}
                   </p>
                   {data.history.sample_size < SMALL_SAMPLE_THRESHOLD && (
                     <span className="sd-small-sample">Small sample — treat as weak evidence</span>
                   )}
-                  <p className="sd-history-interpretation">{interpretHistory(data.history, data.trend)}</p>
+                  <p className="sd-history-interpretation">{interpretHistory(data.history)}</p>
                 </>
               ) : (
                 <p className="sd-history sd-history-empty">
@@ -295,7 +311,8 @@ export default function SignalDetail({ id, onClose }) {
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
