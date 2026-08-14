@@ -417,6 +417,32 @@ def test_historical_performance_avg_return_pct_is_trend_signed_not_raw(tmp_path)
     assert result.avg_return_pct == pytest.approx(-0.6)
 
 
+def test_historical_performance_avg_return_atr_is_signed_and_agrees_with_pct(tmp_path):
+    """Regression for design review H5: avg_return_atr was an abs() mean
+    (always positive), so the UI could print "avg follow-through 0.07%
+    (~-0.15x ATR)" -- the same statistic with two opposite signs. It now
+    uses the SAME signed, trend-flipped per-entry convention as
+    avg_return_pct, so the two figures always agree in sign. atr14=1.0
+    in the helper, so the ATR mean is just the trend-signed mean point
+    move."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    closes_marks = [105, 102, 98, 101, 97]
+    for trend, expected_atr_mean in (("up", 0.6), ("down", -0.6)):
+        kind = f"gap_{trend}"
+        for i, mark in enumerate(closes_marks):
+            _write_cluster_with_mark(
+                conn, kind=kind, trend=trend, close=100.0, price_at_30=mark,
+                ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+            )
+        result = historical_performance(conn, kind=kind, trend=trend, exclude_id="nonexistent")
+        assert result is not None
+        # signed mean: [+5,+2,-2,+1,-3]/1.0 for up, negated for down
+        assert result.avg_return_atr == pytest.approx(expected_atr_mean)
+        # the H5 invariant itself: both representations share a sign
+        assert (result.avg_return_atr > 0) == (result.avg_return_pct > 0)
+
+
 def test_historical_performance_returns_none_below_min_sample(tmp_path):
     conn = connect(tmp_path / "journal.db")
     base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
@@ -771,7 +797,10 @@ def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp
     conn.commit()
 
     result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent")
-    expected = sum(abs(m - c) / a for c, m, a in rows) / len(rows)
+    # signed convention (see the H5 sign-agreement test above): up-trend
+    # rows contribute (mark - close)/atr14 as-is, so the 100->99 reversal
+    # counts NEGATIVE instead of abs()'s +1.0
+    expected = sum((m - c) / a for c, m, a in rows) / len(rows)
     assert result.avg_return_atr == pytest.approx(expected)
 
 

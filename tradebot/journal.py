@@ -513,7 +513,15 @@ def historical_performance(
     ]
     continued = sum(1 for r in returns if r > 0)
 
-    atr_normalized = [abs(price - close) / atr14 for close, price, atr14 in rows if atr14]
+    # Signed and trend-flipped, the SAME per-entry convention as `returns`
+    # above -- previously abs(), which made this an unsigned magnitude
+    # that could contradict avg_return_pct's sign in the UI ("0.07%
+    # (~-0.15x ATR)", design review H5). One convention, both figures.
+    atr_normalized = [
+        (((price - close) / atr14) if trend == "up" else -((price - close) / atr14))
+        for close, price, atr14 in rows
+        if atr14
+    ]
     avg_return_atr = sum(atr_normalized) / len(atr_normalized) if atr_normalized else None
 
     return HistoricalPerformance(
