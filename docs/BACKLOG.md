@@ -47,6 +47,26 @@ already merged (via #24). Not yet written anywhere:
   (stale, source of an earlier out-of-date deploy). Doc should name the
   canonical one; recommend deleting the stale clone.
 
+## From the design-hotfixes batch (2026-08-14)
+
+- **Revisit `FLAT_BAND_ATR = 0.25`** (`web-app/src/signalHistory.js`) as
+  journal sample sizes grow. The constant was derived from the Aug 2026
+  samples: it exactly reproduces the |mean| < 1 SE partition (per-sample
+  SE of the signed ATR mean ran 0.35–0.83, median ~0.41). SE shrinks as
+  n grows, so smaller true effects become distinguishable from zero and
+  the band should narrow — re-derive against the journal at that point
+  (the unit test pins the constant on purpose so a nudge without a
+  re-derivation fails loudly), don't hand-tune it.
+- **Document the zone-side caching contract in DEPLOYMENT.md.** Nothing
+  about edge caching, Cache Rules, or Purge Everything is written down
+  anywhere in the repo, yet stale-HTML-at-the-zone forced manual purges
+  on consecutive deploys until the `_headers` no-cache rule (this
+  batch). The `_headers` files are the origin half; DEPLOYMENT.md should
+  record what the zone half is (whether any Cache Rule / Cache
+  Everything / Edge-TTL override exists on the perchmarkets.com zone,
+  and that it must respect origin Cache-Control for HTML) so the next
+  stale-deploy debugging session doesn't start from zero.
+
 ## Copy fixes
 
 - **Near-close detections**: a detection fired close enough to session
