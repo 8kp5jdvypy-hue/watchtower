@@ -1,4 +1,20 @@
 # Cloudflare Workers static-assets reads this the same way Pages does.
+# When several rules match one request, later rules override earlier
+# ones for the same header -- so the catch-all sits FIRST and the
+# specific long-cache rules below beat it for their own paths.
+
+# HTML is the one thing that must never be cached long: it's served at
+# stable URLs (/ for the SPA, every deep path via
+# not_found_handling=single-page-application) whose CONTENT changes
+# each deploy -- it's what points at the newly-hashed asset URLs.
+# `no-cache` still allows storing but forces an etag revalidation
+# (cheap 304) on every use, at the edge and in browsers alike. Two
+# consecutive deploys needed a manual zone Purge Everything before
+# this; see docs/DEPLOYMENT.md's "Dashboard cache behavior" for the
+# zone-side half of the fix.
+/*
+  Cache-Control: no-cache
+
 # /assets/* filenames are content-hashed by Vite (index-<hash>.js) --
 # the URL itself changes whenever the content does, so "cache forever"
 # is correct, not stale: a new deploy is a new URL, never the same URL

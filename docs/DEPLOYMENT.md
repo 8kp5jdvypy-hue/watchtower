@@ -329,6 +329,38 @@ Compare the printed filenames against what your own `npm run build`
 `dist/assets/`. Match means the deploy landed; mismatch means it
 didn't, regardless of what the terminal said.
 
+### Dashboard cache behavior (why deploys no longer need Purge Everything)
+
+Two consecutive dashboard deploys served the OLD `index.html` from the
+edge until a manual zone **Purge Everything** — the failure mode: the
+HTML lives at a stable URL (`/`) whose content changes every deploy
+(it's what points at the new content-hashed asset filenames), so any
+edge/browser caching of the HTML pins visitors to the previous build's
+assets.
+
+The fix has two halves:
+
+1. **Origin headers (in-repo, `web-app/public/_headers`)** — shipped
+   with the app: `Cache-Control: no-cache` on everything by default
+   (forces an etag revalidation, a cheap 304, on every use), overridden
+   with `public, max-age=31536000, immutable` for `/assets/*` and
+   `/fonts/*`, whose Vite content-hashed URLs change whenever their
+   bytes do. New deploy = new asset URLs + revalidated HTML: correct
+   with zero purging.
+2. **Zone Cache Rule (one-time, Cloudflare dashboard)** — origin
+   headers only help if the edge respects them. In the zone that holds
+   `perchmarkets.com` DNS: **Caching → Cache Rules → Create rule**,
+   name it `app HTML bypass`, expression
+   `(http.host eq "app.perchmarkets.com" and not starts_with(http.request.uri.path, "/assets/") and not starts_with(http.request.uri.path, "/fonts/"))`,
+   then set **Cache eligibility: Bypass cache**. This exempts the
+   dashboard's HTML (and API-adjacent paths) from any zone-wide cache
+   setting while leaving the immutable hashed assets cacheable. If no
+   zone-wide "Cache Everything" rule exists, this rule is a harmless
+   no-op that future-proofs against one being added.
+
+After both halves are in place, a deploy is live the moment `wrangler
+deploy` finishes — verify with the hash check above; no purge step.
+
 ### Deploying `watchtower` (`perchmarkets.com`)
 
 Push to the branch its GitHub build watches, then **manually promote**
