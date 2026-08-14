@@ -14,7 +14,12 @@
     radial-gradient(ellipse 80% 60% at 50% 100%, rgba(5,7,10,0.9), transparent 60%),
     linear-gradient(180deg, rgba(5,7,10,0.35) 0%, transparent 30%, transparent 70%, rgba(5,7,10,0.75) 100%);
 }
-.hero-content { position: relative; z-index: 2; padding: 6rem 0 4rem; width: 100%; }
+/* Longhand vertical padding ON PURPOSE: the shorthand `6rem 0 4rem`
+   zeroed the horizontal padding .wrap supplies (padding: 0 var(--edge)),
+   and this file loads after index.css so it won. Invisible at 1440
+   (max-width + auto margins mask it); at 390 the hero sat flush at x=0
+   with the eyebrow diamond half-clipped (design review H1). */
+.hero-content { position: relative; z-index: 2; padding-top: 6rem; padding-bottom: 4rem; width: 100%; }
 
 .hero-line { display: block; overflow: hidden; padding-bottom: 0.06em; }
 .hero-line-i { display: block; will-change: transform; }
@@ -60,5 +65,5 @@ h1 em { font-style: normal; color: var(--cyan); text-shadow: 0 0 50px rgba(52,22
 
 @media (max-width: 760px) {
   h1 { font-size: var(--step-5); }
-  .hero-content { padding: 4rem 0 3rem; }
+  .hero-content { padding-top: 4rem; padding-bottom: 3rem; }
 }

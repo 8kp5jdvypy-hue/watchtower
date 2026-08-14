@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import './JournalOverlay.css'
 
 // The journal's overlay chrome: SignalDetail.jsx's dialog behavior
@@ -78,7 +79,15 @@ export default function JournalOverlay({ label, eyebrow, onClose, suspended = fa
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [requestClose, suspended])
 
-  return (
+  // Portaled to document.body: `.view`'s `position: relative; z-index: 1`
+  // creates a stacking context, so a fixed overlay rendered inside it
+  // stacks at the view's own level -- beneath .tabs (2) and .mobile-nav
+  // (10) -- and the chrome paints undimmed/clickable over an open sheet.
+  // At body level the overlay's z-index: 50 wins outright. React portals
+  // append in mount order, so a SignalDetail opened from TradeDetail
+  // (mounted after this overlay) still lands later in the DOM and paints
+  // above, exactly as the pre-portal sibling arrangement did.
+  return createPortal(
     <div
       className={`jo-overlay${closing ? ' is-closing' : ''}`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose() }}
@@ -102,6 +111,7 @@ export default function JournalOverlay({ label, eyebrow, onClose, suspended = fa
             chrome itself uses. */}
         {typeof children === 'function' ? children(requestClose) : children}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }

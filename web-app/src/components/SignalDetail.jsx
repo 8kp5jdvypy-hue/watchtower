@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
@@ -142,7 +143,14 @@ export default function SignalDetail({ id, onClose }) {
   const kinds = data?.kinds || []
   const contexts = data?.contexts || []
 
-  return (
+  // Portaled to document.body: rendered in place, this fixed overlay sits
+  // inside `.view`'s stacking context (z-index: 1) and loses to .tabs (2)
+  // and .mobile-nav (10) -- undimmed chrome above the modal, tabs still
+  // clickable under it. At body level its own z-index: 50 clears all app
+  // chrome. Mount order keeps the journal's stack correct: opened from
+  // TradeDetail this mounts after the JournalOverlay portal, so it's the
+  // later body child and paints above the trade sheet.
+  return createPortal(
     <div
       className={`signal-detail-overlay${closing ? ' is-closing' : ''}`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) requestClose() }}
@@ -303,7 +311,8 @@ export default function SignalDetail({ id, onClose }) {
           </>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   )
 }
 
