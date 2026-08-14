@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
-import { SMALL_SAMPLE_THRESHOLD, interpretHistory } from '../signalHistory'
+import { SMALL_SAMPLE_THRESHOLD, atrFollowThroughLabel, interpretHistory } from '../signalHistory'
 import { kindLabel } from '../kindLabels'
 import PerchMark from './PerchMark'
 import './SignalDetail.css'
@@ -232,14 +232,18 @@ export default function SignalDetail({ id, onClose }) {
                     same setup · <b>{pct(data.history.continuation_rate)}</b> continued in the same direction within{' '}
                     {data.history.offset_min} min · avg follow-through{' '}
                     <b>{data.history.avg_return_pct.toFixed(2)}%</b>
+                    {/* Signed by the backend (positive = continued in the
+                        called direction); the label helper renders
+                        "roughly flat on average" inside the flat band
+                        where the sign of a near-zero mean is noise. */}
                     {data.history.avg_return_atr != null && (
-                      <span className="sd-history-atr"> (≈{data.history.avg_return_atr.toFixed(2)}× ATR)</span>
+                      <span className="sd-history-atr"> ({atrFollowThroughLabel(data.history.avg_return_atr)})</span>
                     )}
                   </p>
                   {data.history.sample_size < SMALL_SAMPLE_THRESHOLD && (
                     <span className="sd-small-sample">Small sample — treat as weak evidence</span>
                   )}
-                  <p className="sd-history-interpretation">{interpretHistory(data.history, data.trend)}</p>
+                  <p className="sd-history-interpretation">{interpretHistory(data.history)}</p>
                 </>
               ) : (
                 <p className="sd-history sd-history-empty">

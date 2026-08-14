@@ -1,4 +1,21 @@
 # Cloudflare Workers static-assets reads this the same way Pages does.
+
+# The HTML document is the one un-hashed URL whose bytes change every
+# deploy -- it's the pointer to the hashed bundles below. Without an
+# explicit rule the zone cached it long, forcing a manual Purge
+# Everything per deploy. `no-cache` means "store, but revalidate before
+# use": a cheap ETag 304 when unchanged, immediate pickup of new bundle
+# references when not. Two exact HTML paths, not a /* catch-all -- a
+# catch-all would also match /assets/* and make the effective header
+# depend on rule-override ordering. The landing is a single page (its
+# sections are #fragments, not paths), so / and /index.html are the
+# entire HTML surface.
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
 # /assets/* filenames are content-hashed by Vite (index-<hash>.js) --
 # the URL itself changes whenever the content does, so "cache forever"
 # is correct, not stale: a new deploy is a new URL, never the same URL

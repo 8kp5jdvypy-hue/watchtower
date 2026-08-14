@@ -417,6 +417,54 @@ def test_historical_performance_avg_return_pct_is_trend_signed_not_raw(tmp_path)
     assert result.avg_return_pct == pytest.approx(-0.6)
 
 
+def test_historical_performance_avg_return_atr_is_trend_signed_not_absolute(tmp_path):
+    """Regression for the abs() half of the 2026-08 sign-convention
+    cluster: avg_return_atr must be a trend-signed mean sharing
+    avg_return_pct's convention (positive = continued in the called
+    direction), not a mean of absolute moves. abs() measured volatility
+    magnitude -- structurally positive, so it contradicted a negative
+    avg_return_pct on every historically-weak setup, and inflated
+    (mean |x| >= |mean x|). Same 5 marks as the pct tests above so the
+    numbers line up exactly: helper atr14 is 1.0, so ATR moves equal
+    raw price deltas."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 102, 98, 101, 97]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="down", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+
+    result = historical_performance(conn, kind="gap", trend="down", exclude_id="nonexistent")
+    assert result is not None
+    # signed to "down": [-5, -2, +2, -1, +3] ATR -> mean -0.6. The old
+    # abs() code reported +2.6 here (and could never go negative at all).
+    assert result.avg_return_atr == pytest.approx(-0.6)
+    # the two stats must agree in sign -- they are the same measurement
+    # in different units (avg_return_pct is -0.6% on these rows)
+    assert (result.avg_return_atr < 0) == (result.avg_return_pct < 0)
+
+
+def test_historical_performance_avg_return_atr_sign_matches_pct_for_continued_down_trend(tmp_path):
+    """The direction the live double-flip actually hurt: a down-trend
+    setup that historically CONTINUED must report positive in BOTH units.
+    4 of 5 marks fall below the 100 close."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([95, 97, 102, 96, 98]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="down", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(),
+        )
+
+    result = historical_performance(conn, kind="gap", trend="down", exclude_id="nonexistent")
+    assert result is not None
+    assert result.continuation_rate == pytest.approx(0.8)
+    # signed to "down": [+5, +3, -2, +4, +2] -> mean +2.4 in both units
+    assert result.avg_return_pct == pytest.approx(2.4)
+    assert result.avg_return_atr == pytest.approx(2.4)
+
+
 def test_historical_performance_returns_none_below_min_sample(tmp_path):
     conn = connect(tmp_path / "journal.db")
     base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
@@ -771,8 +819,12 @@ def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp
     conn.commit()
 
     result = historical_performance(conn, kind="gap", trend="up", exclude_id="nonexistent")
-    expected = sum(abs(m - c) / a for c, m, a in rows) / len(rows)
+    # signed per-row (trend=up, so raw m-c), each over its OWN atr14:
+    # [+1, +2, +3, +1, -1] -> mean 1.2 -- the reversal row subtracts,
+    # it doesn't add as a magnitude
+    expected = sum((m - c) / a for c, m, a in rows) / len(rows)
     assert result.avg_return_atr == pytest.approx(expected)
+    assert result.avg_return_atr == pytest.approx(1.2)
 
 
 def test_historical_performance_avg_return_atr_is_none_when_no_row_has_atr14(tmp_path):

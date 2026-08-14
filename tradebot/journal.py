@@ -446,8 +446,14 @@ class HistoricalPerformance:
     # atr14 (real per-instance data from the detections table) rather
     # than the current decision's atr14 — a %-move average can't be
     # converted to "typical ATR units" after the fact without each
-    # instance's own scale. None only when every row in the sample is
-    # missing atr14 (never fabricated by borrowing today's ATR instead).
+    # instance's own scale. Trend-signed with the SAME convention as
+    # avg_return_pct (positive = continued in the detection's called
+    # direction) — previously a mean of ABSOLUTE moves, which is a
+    # volatility magnitude, not follow-through: structurally positive,
+    # inflated (mean |x| >= |mean x|), and contradicting avg_return_pct's
+    # sign whenever the setup was historically weak. None only when every
+    # row in the sample is missing atr14 (never fabricated by borrowing
+    # today's ATR instead).
     avg_return_atr: float | None = None
 
 
@@ -513,7 +519,16 @@ def historical_performance(
     ]
     continued = sum(1 for r in returns if r > 0)
 
-    atr_normalized = [abs(price - close) / atr14 for close, price, atr14 in rows if atr14]
+    # Trend-signed like `returns` above, NOT abs(): abs() averaged
+    # magnitudes, which measures volatility around the entry, not
+    # follow-through, and could never go negative — so it disagreed in
+    # sign with avg_return_pct for every historically-weak setup and
+    # overstated typical follow-through (mean |x| >= |mean x|).
+    atr_normalized = [
+        ((price - close) if trend == "up" else (close - price)) / atr14
+        for close, price, atr14 in rows
+        if atr14
+    ]
     avg_return_atr = sum(atr_normalized) / len(atr_normalized) if atr_normalized else None
 
     return HistoricalPerformance(

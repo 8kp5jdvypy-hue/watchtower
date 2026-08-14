@@ -10,27 +10,43 @@
 // in half: below it, treat the stat as thin evidence.
 export const SMALL_SAMPLE_THRESHOLD = 10
 
-const NEAR_ZERO_PCT = 0.1
-
-// avg_return_pct from historical_performance() is a RAW signed return, not
-// flipped for the signal's own direction (see that function's docstring:
-// continuation_rate IS direction-aware, avg_return_pct is not). For a
-// "down" trend signal, a good outcome (price kept falling) shows up as a
-// NEGATIVE avg_return_pct. This flips it to "average return in the
-// signal's own direction" before judging it -- interpreting the existing
-// number correctly, not computing a new one.
-function directionalAvgReturn(avgReturnPct, trend) {
-  return trend === 'down' ? -avgReturnPct : avgReturnPct
-}
-
-export function interpretHistory(history, trend) {
-  const dirAvg = directionalAvgReturn(history.avg_return_pct, trend)
-  const nearZero = Math.abs(dirAvg) < NEAR_ZERO_PCT
-  if (history.continuation_rate < 0.45 || (dirAvg < 0 && !nearZero)) {
+// The verdict sentence keys off continuation_rate ONLY -- the robust
+// statistic. It deliberately never consults a signed mean: with samples
+// this small, both avg_return_pct and avg_return_atr hover near zero
+// where their sign is noise, and an earlier version of this file that
+// judged on avg_return_pct also compensated for a backend sign
+// convention that journal.py had since fixed, double-flipping down-trend
+// setups into inverted verdicts ("weak" for setups that historically
+// continued). Continuation rate has no sign to flip and no near-zero
+// cliff, so neither failure mode can recur here.
+export function interpretHistory(history) {
+  if (history.continuation_rate < 0.45) {
     return 'Historically weak follow-through for this setup.'
   }
-  if (history.continuation_rate >= 0.6 && dirAvg > 0 && !nearZero) {
+  if (history.continuation_rate >= 0.6) {
     return 'Historically decent follow-through for this setup.'
   }
   return 'Historically mixed results for this setup.'
+}
+
+// Flat band for the ATR parenthetical, in ATR units. Derived from the
+// journal's own samples (Aug 2026, offset 30m): the per-sample standard
+// error of the signed ATR mean runs ~0.35-0.83 (median ~0.41), and 0.25
+// exactly reproduces the |mean| < 1 SE partition on live data -- every
+// sample under it is statistically indistinguishable from zero, every
+// sample over it is not. Below this, printing a signed number would be
+// printing noise, so the label says "roughly flat" instead; sign noise
+// structurally cannot flip the language again. It's also a legible unit:
+// a quarter of a typical bar's range.
+export const FLAT_BAND_ATR = 0.25
+
+// The display label for avg_return_atr (trend-signed by the backend:
+// positive = continued in the called direction, per CLAUDE.md's
+// ATR-units convention). Returns null when the stat is absent so the
+// caller renders nothing rather than a placeholder.
+export function atrFollowThroughLabel(avgReturnAtr) {
+  if (avgReturnAtr == null) return null
+  if (Math.abs(avgReturnAtr) < FLAT_BAND_ATR) return 'roughly flat on average'
+  const signed = `${avgReturnAtr > 0 ? '+' : ''}${avgReturnAtr.toFixed(2)}`
+  return `≈${signed}× ATR`
 }
