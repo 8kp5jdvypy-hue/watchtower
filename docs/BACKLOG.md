@@ -122,3 +122,14 @@ name during tonight's hotfix work:
 
 Everything else in the review is unreviewed by a human; CRITICALs
 should come first.
+
+## `RefreshResult.delisted == ()` is ambiguous (from finding #6's fix)
+
+`refresh_universe()` now refuses to delist on an implausibly small
+vendor fetch (PR #37), but returns `delisted=()` for both "nothing
+needed delisting" and "refused to delist" — the same two-states-one-
+output shape findings #2/#14 flag elsewhere. The ERROR log distinguishes
+them; a caller can't. Add a `delist_skipped` field to `RefreshResult`
+when finding #14's API-status work lands, so both get done under one
+consistent "make the status machine-readable" decision rather than
+piecemeal.
