@@ -265,6 +265,44 @@ class TelegramHaltChecker:
 # --------------------------------------------------------------------------
 
 
+def _commit_then_send(conn, alerter, text: str, *, priority: int, alert_id: str | None = None) -> None:
+    """Commit journal.db, THEN send. The only way process_new_bar is
+    allowed to alert.
+
+    journal.db and users.db are separate SQLite files with no
+    cross-database transaction. `alerter.send()` writes to users.db's
+    outbox and commits there immediately, and a separate worker process
+    delivers from that outbox within seconds — so the moment this
+    function's send returns, the alert is durable and on its way,
+    whether or not journal.db's own transaction ever closes. Before this
+    helper existed, a HIGH alert on the NO TRADE path went out at a
+    point where the detection row it references (INSERTed at the top of
+    process_new_bar) was still uncommitted: a SIGKILL/OOM/power-loss in
+    that window rolled the detection back and left a real subscriber
+    alert pointing at a detection_id that never existed. That breaks
+    CLAUDE.md's "every detection is journaled before any alert is sent",
+    and concretely it breaks the alert's own inline keyboard — tapping
+    "I took this" resolves the id against journal.db
+    (telegram_bot/handlers.py:_resolve_detection) and answers "I don't
+    recognize alert id ...", refusing to log a trade the subscriber
+    really took.
+
+    The trade path happened not to be exposed: record_contract_selection()
+    commits, which flushes the pending detection INSERT with it. That's
+    an accident of an unrelated function's commit, not a guarantee —
+    hence a helper rather than one more bare commit() that the next
+    edit can forget to keep ahead of a new send().
+
+    Deliberately does NOT carry the post-alert writes (the alerted flag,
+    suppression reasons). Committing `alerted=1` before the send would
+    risk recording an alert we never actually sent; leaving it after
+    risks not recording one we did. For a product whose whole positioning
+    is an unedited track record, only the undercount direction is
+    acceptable — see docs/full-code-review.md finding #5."""
+    conn.commit()
+    alerter.send(text, priority=priority, alert_id=alert_id)
+
+
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
     subscriber_hook=None, now=None, market_bars=None, data_feed=None, origin="watchlist",
@@ -471,7 +509,10 @@ def process_new_bar(
                 )
 
             text = templates.render_high_alert(cluster, anchors, quote, selection, similar_setups, news_driven=news_driven)
-            alerter.send(text, priority=outbox.PRIORITY_HIGH, alert_id=detection_id)
+            # Commits the detection (and everything enriched onto it
+            # above: news_driven, lifecycle_state, no_trade) before the
+            # alert referencing it can exist. See _commit_then_send.
+            _commit_then_send(conn, alerter, text, priority=outbox.PRIORITY_HIGH, alert_id=detection_id)
             conn.execute("UPDATE detections SET alerted=1 WHERE id=?", (detection_id,))
             if subscriber_hook is not None:
                 try:
@@ -493,7 +534,14 @@ def process_new_bar(
                 (f"data_integrity_failed: {guard_reason}", SuppressionCategory.DATA_INTEGRITY.value, detection_id),
             )
         if decision == Decision.CAP_REACHED_NOTICE:
-            alerter.send(
+            # Carries no detection_id, so it can't dangle the way the
+            # HIGH alert above could — routed through the same helper
+            # anyway so that every send inside process_new_bar commits
+            # first, and "send with journal writes still pending" isn't
+            # a shape this function can express.
+            _commit_then_send(
+                conn,
+                alerter,
                 templates.render_system_notice(
                     f"Daily high-tier alert cap ({budget.max_high_per_day}) reached. "
                     "Suppressing further HIGH alerts today.",
