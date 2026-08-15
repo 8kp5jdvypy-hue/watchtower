@@ -81,7 +81,12 @@ else
   # .env: not a sqlite db, no .backup step needed — straight encrypt.
   [[ -f "$REPO_ROOT/.env" ]] && encrypt_and_stage "$REPO_ROOT/.env" "env_${STAMP}"
 
-  RCLONE_CONFIG="${RCLONE_CONFIG:-$HOME/.config/rclone/rclone.conf}"
+  # Systemd services get no $HOME unless the unit sets one, and this
+  # line used to crash under set -u the moment that was true. Falling
+  # back to /root keeps this script correct under any caller (systemd,
+  # cron, a manual run) without requiring every caller to remember to
+  # set HOME.
+  RCLONE_CONFIG="${RCLONE_CONFIG:-${HOME:-/root}/.config/rclone/rclone.conf}"
   rclone copy "$OFFBOX_STAGE" "$RCLONE_REMOTE" --config "$RCLONE_CONFIG"
   echo "shipped off-box to $RCLONE_REMOTE: $(ls "$OFFBOX_STAGE" | tr '\n' ' ')"
 
