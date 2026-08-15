@@ -8,10 +8,22 @@
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 
-# The brand share image and fonts are stable, un-hashed filenames --
-# still safe to cache long, just not "immutable" (a future redeploy
-# could legitimately replace og-landing.png at the same URL).
+# The brand share image, the favicon set, and fonts are stable,
+# un-hashed filenames -- still safe to cache long, just not "immutable"
+# (a future redeploy could legitimately replace og-landing.png, or a new
+# designer mark could replace the icons, at the same URL). Google
+# requires the favicon URL to be STABLE, which is exactly what these
+# un-hashed paths give it -- see web/scripts/gen_favicons.py.
 /brand/*
+  Cache-Control: public, max-age=86400
+
+# Root-level icon probes: /favicon.ico is what browsers and Googlebot
+# request when no <link> resolves, and the manifest is referenced by
+# index.html. Same stable-URL reasoning as /brand/* above.
+/favicon.ico
+  Cache-Control: public, max-age=86400
+
+/site.webmanifest
   Cache-Control: public, max-age=86400
 
 /fonts/*
