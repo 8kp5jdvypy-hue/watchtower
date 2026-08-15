@@ -12,12 +12,14 @@
 # magic links land on "/?token=...", which is still path /). The HTML's
 # content changes every deploy (it points at the newly-hashed asset
 # URLs), so it must never be cached long: `no-cache` still allows
-# storing but forces an etag revalidation (cheap 304) on every use, at
-# the edge and in browsers alike. A hand-typed deep link served by
-# not_found_handling=single-page-application falls outside these rules
-# and gets the platform default -- acceptable, since nothing ever links
-# such a path. See docs/DEPLOYMENT.md's "Dashboard cache behavior" for
-# the zone-side half of the fix.
+# storing but forces an etag revalidation (cheap 304) on every use in
+# browsers. Browsers are this file's whole jurisdiction: the Workers
+# assets edge cache ignores these headers and is superseded atomically
+# by each deploy (proven live 2026-08-15). A hand-typed deep link
+# served by not_found_handling=single-page-application falls outside
+# these rules and gets the platform default -- acceptable, since
+# nothing ever links such a path. See docs/DEPLOYMENT.md's "Frontend
+# cache behavior" for the full caching model.
 /
   Cache-Control: no-cache
 
