@@ -3,11 +3,21 @@
 Fresh-eyes handoff doc, written 2026-08-12 from a cold read of the repo:
 `docs/PROGRAM-STATE.md`, `docs/ROADMAP.md`, `docs/BACKLOG.md`,
 `docs/full-code-review.md`, `docs/DEPLOYMENT.md`, and the last ~20
-commits on `main` (current HEAD: `eaf7a67`, 2026-08-12, "Merge pull
-request #25 from docs-review-and-backlog"). Every claim below is
-either sourced to a specific file/commit, or explicitly marked as
-inference/unverifiable — see section 5 for the honest limits of a
-repo-only read.
+commits on `main`. Every claim below is either sourced to a specific
+file/commit, or explicitly marked as inference/unverifiable — see
+section 5 for the honest limits of a repo-only read.
+
+**Refreshed 2026-08-15** (current HEAD: `bec981d`). The original was
+written at `eaf7a67` and had fallen ~11 PRs behind. Two things changed
+in kind, not just in detail:
+
+- **All five CRITICAL findings are now resolved** (section 4), the last
+  one — the cross-database alert-before-commit bug — by PR #36.
+- **This document is no longer a repo-only read.** The 2026-08-15 sweep
+  hit the live sites over HTTP and rebuilt both frontends locally to
+  compare against what's deployed, so several items section 5 listed as
+  structurally unknowable are now answered. What remains unknowable is
+  narrower, and still marked as such.
 
 ---
 
@@ -35,10 +45,10 @@ views, no order placement (`web-app/README.md`).
 
 ### What's verifiable from the repo alone
 
-- **Current `main` HEAD**: `eaf7a67796a44288d9702f471f2756b98391f09c`
-  (2026-08-12), a docs-only merge (adds `BACKLOG.md` and
-  `full-code-review.md`). The last *code* change on `main` is
-  `d3d373e` (PR #24, "backfill-structural-fix").
+- **Current `main` HEAD**: `bec981d` (2026-08-15, PR #39). The last
+  *code* changes are PR #37 (universe delist guard) and PR #36
+  (cross-database alert atomicity); the last product feature is PR #31
+  (Trade Journal).
 - **Detector feed**: `tradebot/vendors/alpaca.py:44` resolves
   `DETECTOR_DATA_FEED` from an environment variable, defaulting to
   `"iex"` if unset. The repo does not commit `.env`, so which value is
@@ -52,11 +62,9 @@ views, no order placement (`web-app/README.md`).
     dashboard (Today/Watchlist/Signals/Performance), intended for
     `app.perchmarkets.com`, talking only to `api.perchmarkets.com`
     (`web-app/README.md`).
-  - `docs/DEPLOYMENT.md` on `main` still describes the dashboard as
-    **not built yet** ("Known gap" section, line 179) — this is
-    **stale**. The fix for this (PR #22,
-    `docs-two-workers-clarification`) exists as an open, unmerged PR
-    per `docs/BACKLOG.md` — confirmed still open via `git branch -a`.
+  - `docs/DEPLOYMENT.md`'s stale "dashboard doesn't exist yet" section
+    is **fixed** — PR #22 merged 2026-08-14, and PR #35 later corrected
+    the caching half of that same section (see below).
 - **VPS deployment shape**: `docs/DEPLOYMENT.md` describes a single
   VPS running `worker`/`bot`/`runner`/`api`/`caddy` via Docker Compose,
   with `systemd` units keeping the stack up across reboots and a
@@ -74,6 +82,27 @@ views, no order placement (`web-app/README.md`).
   `create_app()` raises without it, per `docs/DEPLOYMENT.md:88-93`),
   and the magic-link verify endpoint no longer accepts a bare GET
   (`56eaa29`, CSRF fix).
+
+### Verified live over HTTP, 2026-08-15
+
+Not repo claims — these were measured:
+
+- **Both frontends are serving current `main`.** Local builds of `web/`
+  and `web-app/` (with `VITE_API_URL` set) produced exactly the asset
+  hashes the live sites serve. No drift between deployed and source.
+- **The frontends are Workers static-assets Workers, and the zone cache
+  is not in their request path.** `cf-cache-status: HIT` on both
+  surfaces comes from the Workers assets platform's own cache, which is
+  version-scoped and content-addressed; a `wrangler deploy` supersedes
+  it atomically. Proven live: a `_headers`-only deploy with zero purge
+  flipped the served headers within seconds. **There is no purge step in
+  this pipeline**, and a zone Cache Rule created against these hostnames
+  is inert. See `DEPLOYMENT.md`'s "Frontend cache behavior".
+- **The landing's favicon was uncrawlable** (a `data:` URI, which
+  Googlebot-Image cannot fetch) — the reason search results showed a
+  generic globe for `perchmarkets.com` while `app.` showed the mark.
+  Fixed in PR #38; **that fix requires a manual Promote to go live**,
+  since `watchtower` is Promote-only.
 
 ### What's asserted in-repo but not independently verifiable by this read
 
@@ -110,6 +139,47 @@ views, no order placement (`web-app/README.md`).
 ---
 
 ## 3. What changed recently (from commit history, not speculation)
+
+### Since this document was first written (2026-08-13 → 08-15)
+
+The original's list picks up below; these landed after it:
+
+1. **Trade Journal** (PR #31) — schema, `/journal` API, dashboard UI,
+   signal linking, tests. The largest product addition since the
+   dashboard itself. Its `_detection_snapshot()` deliberately tolerates
+   a missing journal row, citing the cross-DB atomicity finding — that
+   tolerance is now belt-and-braces rather than load-bearing, since
+   PR #36 closed the hole underneath it.
+2. **August 2026 design review + hotfixes** (PRs #30, #33) — portal
+   overlays, the sign-convention cluster, hero padding, trend labels.
+3. **Caching contract, twice** (PRs #34, #35) — #34 made the `_headers`
+   rules mutually exclusive so assets emit one `Cache-Control` instead
+   of a stacked, self-contradicting pair; #35 then corrected the whole
+   model after live investigation (zone Cache Rules are inert for
+   Workers static assets; `_headers` governs browser caching only;
+   deploys supersede the assets cache atomically; no purge, ever).
+4. **Backup crash fix** (PR #28) — `backup.sh` used a bare `$HOME`,
+   which is unset for a systemd unit with no `User=`, so the off-box
+   shipping step crashed under `set -u`. Off-box backups were failing
+   nightly until this landed.
+5. **Heartbeat threshold** — `HEARTBEAT_STALE_SECONDS` raised from 5min
+   to 15min. The old value equalled the runner's own bar cadence, i.e.
+   zero margin; a validation run paged 12 times in 68 minutes with zero
+   real incidents.
+6. **CRITICAL #5 closed** (PR #36) — a Telegram alert could be durably
+   enqueued before the detection row it references committed to
+   `journal.db`, so a crash in that window delivered a real subscriber
+   alert citing a `detection_id` that never existed (and broke the
+   alert's own "I took this" button). Now routed through
+   `_commit_then_send()`.
+7. **Universe mass-delist guard** (PR #37) — an empty or truncated
+   vendor fetch would have marked the entire scan universe delisted in
+   one call; the delisting pass is now skipped, loudly, below a 50%
+   plausibility floor.
+8. **Landing favicon** (PR #38) — real crawlable square icon files
+   replacing an uncrawlable `data:` URI. **Awaiting a Promote click.**
+
+### The original 2026-08-12 reconstruction
 
 Reconstructed from `git log` on `main`, most recent first:
 
@@ -179,7 +249,9 @@ Reconstructed from `git log` on `main`, most recent first:
    5 CRITICAL, 8 HIGH, 11 MEDIUM, 3 LOW — plus a 19-item "Silent
    Failure Inventory." Explicitly **not triaged yet** except for the
    two items already fixed same-night (the backfill-loudness chain,
-   and the `historical_performance` sign bug).
+   and the `historical_performance` sign bug). *(That was the state on
+   2026-08-12. The findings were triaged by code re-read on 2026-08-15
+   — see §4 for current statuses; all five CRITICALs are resolved.)*
 
 Earlier same-window work still on `main` (2026-08-11, one day prior):
 security fixes (`56eaa29` CSRF fix on magic-link verify, `2534139`
@@ -204,13 +276,35 @@ assessment against current `main`, not a re-run of the review.
 | 2 | Missing cache file silently becomes `[]`, not an error | **Fixed** — `0b03712`/`a92ec76` make this loud and, per #3 below, prevent the missing-file case outright on the live path. |
 | 3 | `fetch_cache.py`'s silent "no data (holiday?)" mislabels real fetch failures | **Fixed** — `0b03712` checks the real NYSE calendar. |
 | 4 | No test for `backfill_marks()` with missing/empty cache dir | **Fixed** — `a92ec76`'s 18 new tests include the exact incident-shape case. |
-| 5 | Telegram alert can be sent before its detection row commits to `journal.db` (cross-database ordering bug) | **Open, explicitly deferred.** `docs/BACKLOG.md` names this by hand as "explicitly queued for triage, not touched tonight on purpose." **This is the one CRITICAL still live** — a SIGKILL/OOM between the alert send and the journal commit currently can deliver an alert referencing a detection ID that then never exists. Flagging as genuinely risky: it's a data-integrity bug on the money/trust path (an alert a subscriber acts on could reference a row that silently vanishes), not just a UX gap. |
+| 5 | Telegram alert can be sent before its detection row commits to `journal.db` (cross-database ordering bug) | **CLOSED** (PR #36, 2026-08-15). `_commit_then_send()` commits journal.db before any send that could reference a detection, making "send without committing first" inexpressible in `process_new_bar` rather than a convention to remember. The exposure was narrower than this table originally implied — the trade path was already safe, since `record_contract_selection()` commits and flushes the pending INSERT with it — but the **NO TRADE** path was genuinely exposed, and NO TRADE is a common outcome. 6 tests; 4 fail against the pre-fix ordering. |
 
-### HIGH (8 total) — all appear unreviewed/untriaged by a human per BACKLOG.md
+**All five CRITICALs are now resolved**, with one caveat worth keeping
+visible: **#3 is partial.** The production path is covered, but
+`scripts/fetch_cache.py` still exits 0 when a symbol ends its run with
+`"gave up"`, so manual and cron invocations still fail silently. See
+`BACKLOG.md` for the remnant.
 
-None of findings #6–#13 (empty-vendor-response mass delisting, tier-performance's missing `news_driven` filter, frontend pending-state ambiguity, an admin-halt test that can't distinguish `chat_id` from `user_id`, non-atomic cache-file writes, a swallowed exception in options-chain fetch one layer below its own handler, and zero test coverage on the highest-blast-radius per-symbol error-isolation loop in `run_live`/`run_replay`) show any sign of having been touched since the review landed. `docs/BACKLOG.md` says explicitly: "Everything else in the review is unreviewed by a human; CRITICALs should come first" — meaning even finding #5 above hasn't been formally triaged yet, just named and consciously deferred.
+Also worth stating plainly, since this document's own earlier revision
+is the source of the confusion: **#1, #2 and #4 were already fixed by
+the 2026-08-12/13 hotfix work while `BACKLOG.md` still described the
+review as untriaged.** Only #5 was fixed after a sweep identified it as
+the last one standing. Four of the five were closed before anyone
+formally triaged the list.
 
-Worth flagging as risky specifically: **#13** (zero test coverage on `run_live`/`run_replay`'s per-symbol exception isolation) — this is the mechanism that keeps one bad symbol from taking down the scan for every watched ticker, and it currently has no regression protection at all.
+### HIGH (8 total) — triaged 2026-08-15 by code re-read
+
+- **#6** (empty vendor response mass-delists the universe) — the
+  destructive half is **closed** (PR #37): the delisting pass is skipped
+  below a 50% plausibility floor, with an ERROR naming both counts.
+- **#7** (`historical_performance` sign convention) — **DONE** (PR #23),
+  with regression tests asserting the sibling functions agree in sign.
+- **#13** (`run_live`/`run_replay` coverage) — **partially done**:
+  `run_live` now has tests, but the per-symbol exception-isolation loop
+  still has none. **Still the riskiest untested path in the project** —
+  it is what stops one bad symbol taking down the scan for every
+  watched ticker.
+- **#8, #9, #10, #11, #12** — **still open**, each confirmed present in
+  current `main`.
 
 ### MEDIUM (11) / LOW (3)
 
@@ -225,17 +319,21 @@ of bug that wouldn't announce itself.
 
 ### Operational backlog (`docs/BACKLOG.md`)
 
+Statuses re-verified 2026-08-15:
+
 | Item | Status |
 |---|---|
-| PR #22 — document the two Cloudflare Workers | **Open, unmerged** (confirmed via `git branch -a`: `docs-two-workers-clarification` exists as a branch, not merged into `main`). |
-| Off-box backups (GPG + rclone to DigitalOcean Spaces) | **Not merged** — branch `ops-offbox-backups` (and a `-rebased` variant) exists but, per BACKLOG.md, no PR opened yet. Marked "top priority per standing instruction." |
-| Operational resilience review (deadman gap, autoheal) | **Not merged** — branch `ops-resilience-review` exists, no PR yet. |
-| `broad_scan` honesty proposal (labeling, stats exclusion) | **Doc only, no code** — branch `broad-scan-honesty-proposal` exists. |
-| `deploy.sh` wrapper for the `GIT_SHA=... docker compose up -d --build` invocation | **Open** — BACKLOG.md notes the manual invocation "already was forgotten once tonight." |
-| RFAMU-type thin-symbol policy (a symbol can fire a detection but be too thin for the vendor to backfill) | **Open, undecided** — confirmed real during the incident repair (1 of 33 symbols), not yet a policy decision either way. |
-| Near-close detection copy ("Resolves after session close" shown for a detection that can never resolve) | **Open, not implemented.** |
-| First-session observation report (signal-rate/volume-multiple/error-log checklist against a real, cleanly-closed live SIP session) | **Owed, not delivered** — BACKLOG.md is explicit that tonight's manual repair proved the fix works mechanically but is not a substitute for this. |
-| DEPLOYMENT.md gaps (in-container `fetch_cache` invocation, the "never clear today's cache before backfill runs" warning, the two-local-checkouts note) | **Open**, listed item-by-item in BACKLOG.md. |
+| PR #22 — document the two Cloudflare Workers | **MERGED** 2026-08-14. |
+| Off-box backups (GPG + rclone to DigitalOcean Spaces) | **MERGED** as PR #26. Remnant: the GPG/rclone restore legs have still never been run against a real bucket — `DEPLOYMENT.md` says so itself. A backup nobody has restored from is a hope, not a backup. |
+| `backup.sh` crashing under systemd (unset `$HOME`) | **MERGED** as PR #28 — off-box backups were failing nightly before this. |
+| Operational resilience review (deadman gap, autoheal) | **Still unmerged**, no PR. Branch `ops-resilience-review`. |
+| `broad_scan` honesty proposal (labeling, stats exclusion) | **Still unmerged**, doc only. **Needs a decision, not a session.** |
+| `deploy.sh` wrapper for the `GIT_SHA=...` invocation | **Open** — the convention was already forgotten once. |
+| RFAMU-type thin-symbol policy | **Open, undecided** — a human decision, not code. |
+| Near-close detection copy | **Open, not implemented.** |
+| First-session observation report (against a real, cleanly-closed live SIP session) | **Still owed, not delivered.** |
+| DEPLOYMENT.md gaps | **Partially closed** — the two-Workers split, the `GIT_SHA` line and the caching contract are now written (#22, #24, #35). The in-container `fetch_cache` invocation, the "never clear today's cache before backfill runs" warning, and the two-local-checkouts note remain unwritten. |
+| Landing favicon (PR #38) | **Merged, not live** — needs a manual Promote in the Cloudflare dashboard, then a Search Console re-crawl request. |
 
 ---
 
@@ -243,26 +341,22 @@ of bug that wouldn't announce itself.
 
 Explicit, not implied:
 
-- **No live access.** This read never connected to the VPS
-  (`67.207.83.138` per `TODO.md`), never ran `docker compose ps`, and
-  never hit `api.perchmarkets.com`, `app.perchmarkets.com`, or
-  `perchmarkets.com` over HTTP. Every claim about what's *actually
-  running right now* is sourced to what the repo's own docs/commits
-  *say* is running, not independent confirmation. Concretely unknown:
+- **Still no VPS access.** Nothing here ran `docker compose ps` or hit
+  `api.perchmarkets.com`. Concretely still unknown:
   - Whether `DETECTOR_DATA_FEED=sip` is actually set in the VPS's
     `.env` today (the code defaults to `iex` if unset — see §2).
-  - Whether all 5 Compose services are currently `Up`, and which
-    image `GIT_SHA` they were last built from — i.e., whether the VPS
-    is actually running `main`'s current HEAD or something a few
-    commits behind it.
-  - Whether the two Cloudflare Workers (`watchtower`,
-    `perch-dashboard`) are serving the latest built assets, or are a
-    few `npm run build && wrangler deploy` cycles behind their source
-    branches.
-- **Root cause of finding #5 (cross-DB alert-before-commit bug)** is
-  understood mechanically from the review but this read did not trace
-  every call site to confirm no other mitigating logic exists
-  elsewhere in the codebase.
+  - Whether all 5 Compose services are currently `Up`, and which image
+    `GIT_SHA` they were last built from.
+- ~~Whether the two Cloudflare Workers are serving the latest built
+  assets~~ — **answered 2026-08-15**: both serve exactly the asset
+  hashes a local build of current `main` produces. See §2's live-verified
+  block. (The favicon fix in PR #38 is the one known exception — merged
+  but not yet promoted.)
+- ~~Root cause of finding #5~~ — **answered**: traced through every
+  write between the detection INSERT and the final commit. The trade
+  path had incidental mitigation (`record_contract_selection()` commits,
+  flushing the pending INSERT); the NO TRADE path had none. Fixed in
+  PR #36.
 - **Which document is authoritative where PROGRAM-STATE.md/BACKLOG.md
   and ROADMAP.md disagree on SIP-cutover timing** (§2) — this read
   flags the tension but cannot resolve it without asking whoever
