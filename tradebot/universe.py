@@ -17,6 +17,7 @@ deep analysis applied only to whatever Stage 1 promotes.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,6 +28,18 @@ from tradebot.marketdata import AssetInfo
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "universe.db"
+
+logger = logging.getLogger("watchtower.universe")
+
+# Below this share of the currently-active count, a fetch is treated as
+# vendor trouble rather than a real market event, and the delisting half
+# of refresh_universe is skipped. The catalog is ~14,200 symbols and
+# moves by single digits on a normal day (see this module's docstring),
+# so a fetch returning less than half of what's active has no legitimate
+# reading -- the entire US market did not delist overnight. 0.5 leaves
+# enormous headroom over any real day while still catching the failure
+# that matters: a 200 OK carrying a truncated or empty list.
+MIN_FETCH_RATIO_TO_DELIST = 0.5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
@@ -86,7 +99,14 @@ def refresh_universe(
     what counts as 'active' here — per tradebot.vendors.alpaca's
     live-observed data, that's ~1,100 of the ~14,200 active us_equity
     assets Alpaca reports; they're still stored (never silently dropped
-    from the fetch), just not counted active unless explicitly enabled."""
+    from the fetch), just not counted active unless explicitly enabled.
+
+    Delisting is guarded: a fetch returning fewer than
+    MIN_FETCH_RATIO_TO_DELIST of the currently-active count is treated as
+    vendor trouble, logged as an ERROR naming both counts, and the
+    delisting pass is skipped entirely (additions/refreshes still apply).
+    An empty or truncated 200 OK would otherwise delist the whole scan
+    universe in one call — see the comment at that branch."""
     now_iso = now.isoformat()
     fetched = {a.symbol: a for a in fetch_fn()}
 
@@ -119,13 +139,35 @@ def refresh_universe(
             ),
         )
 
+    # Delisting is reconciliation by ABSENCE — the one operation here that
+    # a bad fetch turns into mass destruction. fetch_fn() reports success
+    # by returning a list, so a 200 OK carrying zero or a truncated set of
+    # rows (rate limit, pagination bug, transient vendor issue) is
+    # indistinguishable from "the market really shrank" to the loop below,
+    # and would mark every real symbol is_active=0 in a single call. The
+    # additions half above is safe either way: a short fetch just upserts
+    # fewer rows, and nothing is lost.
+    active_before = sum(1 for was_active in existing.values() if was_active)
+    fetch_is_plausible = (
+        not active_before or len(fetched) >= active_before * MIN_FETCH_RATIO_TO_DELIST
+    )
+
     delisted = []
-    for symbol, was_active in existing.items():
-        if was_active and symbol not in fetched:
-            conn.execute(
-                "UPDATE assets SET is_active = 0, delisted_at = ? WHERE symbol = ?", (now_iso, symbol)
-            )
-            delisted.append(symbol)
+    if not fetch_is_plausible:
+        logger.error(
+            "vendor fetch returned %d assets vs %d currently active — refusing to delist "
+            "(below the %.0f%% floor). Additions/refreshes from this fetch were applied "
+            "normally; no symbol was marked delisted. If the market really did shrink this "
+            "much, re-run once the vendor is healthy and this will reconcile itself.",
+            len(fetched), active_before, MIN_FETCH_RATIO_TO_DELIST * 100,
+        )
+    else:
+        for symbol, was_active in existing.items():
+            if was_active and symbol not in fetched:
+                conn.execute(
+                    "UPDATE assets SET is_active = 0, delisted_at = ? WHERE symbol = ?", (now_iso, symbol)
+                )
+                delisted.append(symbol)
 
     conn.commit()
     total_active = conn.execute("SELECT COUNT(*) FROM assets WHERE is_active = 1").fetchone()[0]
