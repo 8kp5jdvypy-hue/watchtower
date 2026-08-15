@@ -45,8 +45,8 @@ of users; resize later if a Postgres migration changes that.
    own ACME (Let's Encrypt) challenge and terminate TLS itself; routing
    it through Cloudflare's proxy first would fight that. `app.` (the
    dashboard, once it's deployed) is separate — that one *should* stay
-   proxied through Cloudflare, since it's a static site on Cloudflare
-   Pages, not something this VPS serves.
+   proxied through Cloudflare, since it's a Workers static-assets
+   Worker (`perch-dashboard`), not something this VPS serves.
 7. `cp systemd/perch.service systemd/perch-backup.* /etc/systemd/system/`
    then:
    ```bash
@@ -329,42 +329,65 @@ Compare the printed filenames against what your own `npm run build`
 `dist/assets/`. Match means the deploy landed; mismatch means it
 didn't, regardless of what the terminal said.
 
-### Dashboard cache behavior (why deploys no longer need Purge Everything)
+### Frontend cache behavior (Workers static assets: no purge, ever)
 
-Two consecutive dashboard deploys served the OLD `index.html` from the
-edge until a manual zone **Purge Everything** — the failure mode: the
-HTML lives at a stable URL (`/`) whose content changes every deploy
-(it's what points at the new content-hashed asset filenames), so any
-edge/browser caching of the HTML pins visitors to the previous build's
-assets.
+Both frontends are Cloudflare **Workers with static assets** and no
+Worker script (each `wrangler.toml` has only an `[assets]` block), and
+that changes which caches are even in the request path. Verified
+against Cloudflare's docs and against live behavior on 2026-08-15;
+each claim below cites its source.
 
-The fix has two halves:
+- **The zone HTTP cache is not in front of these responses.** Zone
+  Cache Rules, cache-level settings, and Purge Everything configure the
+  *zone's* cache, which Worker responses never pass through: "Workers
+  Caching is your Worker's cache, not your zone's cache… None of the
+  following applies: Cache Rules…"
+  (developers.cloudflare.com/workers/cache/limitations/). A Bypass
+  rule for these hostnames is inert — one exists in the zone (named
+  `app HTML bypass`, created 2026-08-15 while chasing exactly this)
+  and was verified live to have no effect. Safe to delete; harmless to
+  keep in case either hostname ever points at a real cacheable origin.
+- **The `cf-cache-status: HIT` on responses is the Workers assets
+  platform's own cache** — `CF-Cache-Status` is a default header of
+  static asset serving, and the docs note it isn't always accurate
+  (developers.cloudflare.com/workers/static-assets/headers/). That
+  cache is version-scoped and content-addressed: every deploy uploads
+  a manifest mapping each path to a file hash, tracked per Worker
+  version (…/workers/static-assets/direct-upload/), and requests
+  resolve against the currently deployed version's manifest. A
+  `wrangler deploy` therefore supersedes the cache atomically.
+  **Proven live 2026-08-15**: a `_headers`-only change was deployed
+  with zero purge, and within seconds the live asset responses carried
+  the new header. There is no purge step in this pipeline, ever — a
+  `HIT` on `/` is the normal steady state, not a staleness signal.
+- **`_headers` governs browser caching only** (there is no
+  configuration surface for the platform's edge cache — the complete
+  `assets` config is directory/binding/run_worker_first/html_handling/
+  not_found_handling). It still matters: `Cache-Control: no-cache` on
+  the HTML entry points (`/` and `/index.html`, named explicitly — the
+  SPA has no other real document URLs) forces an etag revalidation (a
+  cheap 304) in browsers, so a browser can never pin an old
+  `index.html`; `public, max-age=31536000, immutable` on `/assets/*`
+  and `/fonts/*` lets browsers keep content-hashed files forever. Keep
+  the rules mutually exclusive: when several `_headers` rules match
+  one request, same-named headers CONCATENATE rather than override (a
+  `/*` catch-all briefly shipped assets with "no-cache, public,
+  max-age=31536000, immutable" stacked in one header).
+- **The hash check above is the definitive deploy verification.** It
+  proves which build is actually being served end-to-end, which
+  subsumes every caching question — trust it over any cache header.
 
-1. **Origin headers (in-repo, `web-app/public/_headers`)** — shipped
-   with the app: `Cache-Control: no-cache` on the HTML entry points
-   (`/` and `/index.html`, named explicitly — the SPA has no other real
-   document URLs), which forces an etag revalidation (a cheap 304) on
-   every use, and `public, max-age=31536000, immutable` for `/assets/*`
-   and `/fonts/*`, whose Vite content-hashed URLs change whenever their
-   bytes do. The rules are mutually exclusive on purpose: when several
-   `_headers` rules match one request, same-named headers CONCATENATE
-   rather than override (a `/*` catch-all briefly shipped assets with
-   "no-cache, public, max-age=31536000, immutable" stacked in one
-   header). New deploy = new asset URLs + revalidated HTML: correct
-   with zero purging.
-2. **Zone Cache Rule (one-time, Cloudflare dashboard)** — origin
-   headers only help if the edge respects them. In the zone that holds
-   `perchmarkets.com` DNS: **Caching → Cache Rules → Create rule**,
-   name it `app HTML bypass`, expression
-   `(http.host eq "app.perchmarkets.com" and not starts_with(http.request.uri.path, "/assets/") and not starts_with(http.request.uri.path, "/fonts/"))`,
-   then set **Cache eligibility: Bypass cache**. This exempts the
-   dashboard's HTML (and API-adjacent paths) from any zone-wide cache
-   setting while leaving the immutable hashed assets cacheable. If no
-   zone-wide "Cache Everything" rule exists, this rule is a harmless
-   no-op that future-proofs against one being added.
-
-After both halves are in place, a deploy is live the moment `wrangler
-deploy` finishes — verify with the hash check above; no purge step.
+**What actually caused the historical "stale deploy" incidents** (two
+deploys that appeared to serve the old `index.html` until a manual
+Purge Everything): not the zone cache, which was never in the path.
+The real culprits: (a) the old `/*` `_headers` rule stamped the
+year-long `max-age` onto the HTML itself, so *browsers* held the
+previous `index.html` — Purge Everything got the credit while
+cache-bypassing re-checks (fresh curls, hard refreshes) did the work;
+and (b) for `watchtower`, a pushed build that was never **promoted**
+(see below) isn't live at all, which reads as "stale" from outside.
+Both are closed by the current `_headers` files and the hash-check
+habit.
 
 ### Deploying `watchtower` (`perchmarkets.com`)
 
