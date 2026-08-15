@@ -1,18 +1,27 @@
 # Cloudflare Workers static-assets reads this the same way Pages does.
-# When several rules match one request, later rules override earlier
-# ones for the same header -- so the catch-all sits FIRST and the
-# specific long-cache rules below beat it for their own paths.
+# NOTE: when several rules match one request, same-named headers are
+# CONCATENATED, not overridden -- observed live: a /* no-cache rule plus
+# the /assets/* rule shipped assets with "no-cache, public,
+# max-age=31536000, immutable" stacked in one header. Browsers resolved
+# it correctly (immutable won in practice) but the header contradicted
+# itself on its face. So the rules below are mutually exclusive by
+# construction: no catch-all, HTML paths named explicitly.
 
-# HTML is the one thing that must never be cached long: it's served at
-# stable URLs (/ for the SPA, every deep path via
-# not_found_handling=single-page-application) whose CONTENT changes
-# each deploy -- it's what points at the newly-hashed asset URLs.
-# `no-cache` still allows storing but forces an etag revalidation
-# (cheap 304) on every use, at the edge and in browsers alike. Two
-# consecutive deploys needed a manual zone Purge Everything before
-# this; see docs/DEPLOYMENT.md's "Dashboard cache behavior" for the
-# zone-side half of the fix.
-/*
+# The SPA's HTML entry points -- the only document URLs a real visitor
+# ever loads (the app has no URL routing; tabs are client state, and
+# magic links land on "/?token=...", which is still path /). The HTML's
+# content changes every deploy (it points at the newly-hashed asset
+# URLs), so it must never be cached long: `no-cache` still allows
+# storing but forces an etag revalidation (cheap 304) on every use, at
+# the edge and in browsers alike. A hand-typed deep link served by
+# not_found_handling=single-page-application falls outside these rules
+# and gets the platform default -- acceptable, since nothing ever links
+# such a path. See docs/DEPLOYMENT.md's "Dashboard cache behavior" for
+# the zone-side half of the fix.
+/
+  Cache-Control: no-cache
+
+/index.html
   Cache-Control: no-cache
 
 # /assets/* filenames are content-hashed by Vite (index-<hash>.js) --
