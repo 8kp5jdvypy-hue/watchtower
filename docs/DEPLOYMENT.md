@@ -341,11 +341,16 @@ assets.
 The fix has two halves:
 
 1. **Origin headers (in-repo, `web-app/public/_headers`)** — shipped
-   with the app: `Cache-Control: no-cache` on everything by default
-   (forces an etag revalidation, a cheap 304, on every use), overridden
-   with `public, max-age=31536000, immutable` for `/assets/*` and
-   `/fonts/*`, whose Vite content-hashed URLs change whenever their
-   bytes do. New deploy = new asset URLs + revalidated HTML: correct
+   with the app: `Cache-Control: no-cache` on the HTML entry points
+   (`/` and `/index.html`, named explicitly — the SPA has no other real
+   document URLs), which forces an etag revalidation (a cheap 304) on
+   every use, and `public, max-age=31536000, immutable` for `/assets/*`
+   and `/fonts/*`, whose Vite content-hashed URLs change whenever their
+   bytes do. The rules are mutually exclusive on purpose: when several
+   `_headers` rules match one request, same-named headers CONCATENATE
+   rather than override (a `/*` catch-all briefly shipped assets with
+   "no-cache, public, max-age=31536000, immutable" stacked in one
+   header). New deploy = new asset URLs + revalidated HTML: correct
    with zero purging.
 2. **Zone Cache Rule (one-time, Cloudflare dashboard)** — origin
    headers only help if the edge respects them. In the zone that holds
