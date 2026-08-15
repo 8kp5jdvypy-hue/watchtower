@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1154,6 +1155,237 @@ def _fake_chain(*contracts):
     from tradebot.marketdata import OptionChain
 
     return OptionChain(symbol="X", expiry=date(2026, 8, 14), contracts=list(contracts))
+
+
+# -------------------------------------------------------------------- #
+# CRITICAL #5 -- no alert may reference a not-yet-durable detection
+# -------------------------------------------------------------------- #
+
+
+class _SimulatedCrash(RuntimeError):
+    """Stands in for a SIGKILL/OOM/power-loss at one specific line."""
+
+
+class _DurabilityProbeAlerter:
+    """Records, at the exact moment of each send, which detection rows are
+    visible from an INDEPENDENT connection to journal.db.
+
+    Why a second connection rather than actually killing the process: an
+    uncommitted SQLite transaction is invisible to every other connection,
+    and is exactly what a SIGKILL/OOM/power-loss discards. So "visible from
+    a separate connection at send time" is precisely "would have survived
+    the process dying right here" -- checkable in-process, with nothing to
+    kill.
+
+    An exception is NOT a substitute for that check, which is why no test
+    below leans on one alone: `raise` unwinds the stack but leaves the
+    original connection's transaction and every pending write in it fully
+    intact, so a test built only on raising passes just as happily against
+    the pre-fix ordering it is meant to catch."""
+
+    def __init__(self, db_path, crash_before_send=False, crash_after_send=False):
+        self.db_path = str(db_path)
+        self.sends = []
+        self.crash_before_send = crash_before_send
+        self.crash_after_send = crash_after_send
+
+    def send(self, text, priority=None, alert_id=None):
+        if self.crash_before_send:
+            raise _SimulatedCrash("died between the commit and the send")
+        probe = sqlite3.connect(self.db_path)
+        try:
+            durable = {row[0] for row in probe.execute("SELECT id FROM detections")}
+        finally:
+            probe.close()
+        self.sends.append({"alert_id": alert_id, "durable_ids": durable})
+        if self.crash_after_send:
+            raise _SimulatedCrash("died between the send and the final commit")
+
+
+def _on_disk_high_tier(tmp_path, monkeypatch, max_high_per_day=8):
+    """The _high_tier_fixture() cluster, but against a real on-disk
+    journal.db -- ":memory:" can't be opened by a second connection, and a
+    second connection is the whole point of these tests."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+    db_path = tmp_path / "journal.db"
+    conn = journal_connect(db_path)
+    budget = AlertBudget(now=lambda: bar.ts, max_high_per_day=max_high_per_day)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+    return anchors, bar, result, db_path, conn, budget, stats
+
+
+def _quote_fn_for(bar):
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    return quote_fn
+
+
+def _no_trade_chain_fn(symbol, expiry):
+    """NotImplementedError -> bound_chain_fn returns None -> no breakeven
+    -> the NO TRADE path, which is the one the bug was live on."""
+    raise NotImplementedError
+
+
+def _run(conn, budget, alerter, bar, anchors, stats, chain_fn=_no_trade_chain_fn):
+    process_new_bar(
+        conn, budget, alerter, "v1", "TSLA", date(2026, 7, 23), [bar], anchors,
+        _quote_fn_for(bar), chain_fn, stats,
+    )
+
+
+def test_no_trade_alert_is_not_sent_until_its_detection_row_is_durable(tmp_path, monkeypatch):
+    """The bug itself. On the NO TRADE path nothing used to commit
+    journal.db between the detection INSERT and alerter.send(), so a crash
+    in that window delivered a real subscriber alert referencing a
+    detection row that then rolled back. Fails against the pre-fix
+    ordering; passes now that _commit_then_send() owns the send."""
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch)
+    alerter = _DurabilityProbeAlerter(db_path)
+
+    _run(conn, budget, alerter, bar, anchors, stats)
+
+    assert conn.execute("SELECT no_trade FROM detections").fetchone()[0] == 1  # really the NO TRADE path
+    assert len(alerter.sends) == 1
+    sent = alerter.sends[0]
+    assert sent["alert_id"] is not None
+    assert sent["alert_id"] in sent["durable_ids"]
+
+
+def test_trade_path_alert_is_also_durable_before_sending(tmp_path, monkeypatch):
+    """The trade path was never exposed -- record_contract_selection()
+    commits, which flushes the pending detection INSERT along with it. That
+    was an accident of an unrelated function's commit, not a guarantee, and
+    nothing protected it. This pins it."""
+    from tradebot.marketdata import OptionChain, OptionContract
+
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch)
+    contract = OptionContract(
+        symbol="TSLA_TEST_CALL", expiry=date(2026, 7, 31), strike=100.0, right="call",
+        bid=2.00, ask=2.05, last=2.02, delta=0.50, theta=-0.10, open_interest=1000,
+        implied_volatility=0.35, day_volume=500,
+    )
+
+    def chain_fn(symbol, expiry):
+        if expiry != date(2026, 7, 31):
+            return OptionChain(symbol=symbol, expiry=expiry, contracts=[])
+        return OptionChain(symbol=symbol, expiry=expiry, contracts=[contract])
+
+    alerter = _DurabilityProbeAlerter(db_path)
+    _run(conn, budget, alerter, bar, anchors, stats, chain_fn=chain_fn)
+
+    assert conn.execute("SELECT no_trade FROM detections").fetchone()[0] == 0  # a contract WAS selected
+    sent = alerter.sends[0]
+    assert sent["alert_id"] in sent["durable_ids"]
+
+
+def test_cap_reached_notice_also_commits_before_it_sends(tmp_path, monkeypatch):
+    """The cap notice carries no detection_id so it cannot dangle, but it
+    still goes through _commit_then_send -- every send in process_new_bar
+    commits first, so "send with journal writes still pending" isn't a
+    shape the function can express."""
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch, max_high_per_day=1)
+    alerter = _DurabilityProbeAlerter(db_path)
+
+    _run(conn, budget, alerter, bar, anchors, stats)  # 1st: SEND, burns the cap
+
+    # score must clear ESCALATION_SCORE_DELTA over the first cluster's,
+    # or dedup suppresses this as a non-escalating repeat and it never
+    # reaches the budget (and so never reaches the cap notice) at all.
+    second = {**result, "ts": result["ts"] + timedelta(minutes=5), "score": result["score"] + 3.0}
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: second)
+    _run(conn, budget, alerter, bar, anchors, stats)  # 2nd: CAP_REACHED_NOTICE
+
+    notice = alerter.sends[-1]
+    assert notice["alert_id"] is None  # the system notice, not a detection alert
+    ids = {row[0] for row in conn.execute("SELECT id FROM detections")}
+    assert len(ids) == 2
+    assert ids == notice["durable_ids"]  # both detections durable before the notice went out
+    for sent in alerter.sends:
+        if sent["alert_id"] is not None:
+            assert sent["alert_id"] in sent["durable_ids"]
+
+
+def test_crash_after_the_send_leaves_the_detection_durable_with_alerted_still_zero(tmp_path, monkeypatch):
+    """Partial state #1, newly possible after this fix: the alert is out,
+    the detection is durable, but the alerted flag never committed. Nothing
+    rescans alerted=0 (it is read-only downstream), so there is no resend
+    and no duplicate -- the cost is a track record that undercounts itself
+    by one, which is the only acceptable direction to be wrong for a
+    product whose positioning is an unedited record."""
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch)
+    alerter = _DurabilityProbeAlerter(db_path, crash_after_send=True)
+
+    with pytest.raises(_SimulatedCrash):
+        _run(conn, budget, alerter, bar, anchors, stats)
+
+    sent = alerter.sends[0]
+    assert sent["alert_id"] in sent["durable_ids"]
+
+    fresh = sqlite3.connect(db_path)  # what a restarted process sees
+    try:
+        row = fresh.execute("SELECT id, alerted FROM detections").fetchone()
+        assert row is not None
+        detection_id, alerted = row
+        assert alerted == 0  # undercount, never overcount
+        # The alert's inline keyboard resolves ids exactly this way
+        # (telegram_bot/handlers.py:_resolve_detection) -- "I took this"
+        # still works, which is what the bug used to break.
+        resolved = fresh.execute(
+            "SELECT id FROM detections WHERE id = ? OR id LIKE ?",
+            (detection_id[:8], f"{detection_id[:8]}%"),
+        ).fetchone()
+        assert resolved == (detection_id,)
+    finally:
+        fresh.close()
+
+
+def test_crash_between_the_commit_and_the_send_journals_a_detection_nobody_was_alerted_about(tmp_path, monkeypatch):
+    """Partial state #2: committed, then died before the alert went out.
+    The row exists with alerted=0, which is exactly what that column means
+    -- indistinguishable from any suppressed detection, self-describing,
+    and honest. No alert exists to dangle."""
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch)
+    alerter = _DurabilityProbeAlerter(db_path, crash_before_send=True)
+
+    with pytest.raises(_SimulatedCrash):
+        _run(conn, budget, alerter, bar, anchors, stats)
+
+    assert alerter.sends == []  # nothing was ever sent
+
+    fresh = sqlite3.connect(db_path)
+    try:
+        row = fresh.execute("SELECT alerted FROM detections").fetchone()
+        assert row == (0,)
+    finally:
+        fresh.close()
+
+
+def test_guard_rejected_path_still_rolls_the_whole_cluster_back_on_a_crash(tmp_path, monkeypatch):
+    """Semantics deliberately unchanged where no alert is sent: the guard
+    rejection path never reaches _commit_then_send, so a crash before the
+    final commit still discards the entire cluster exactly as it did
+    before. Proves the fix widened durability only where an alert forced
+    it to, not everywhere."""
+    anchors, bar, result, db_path, conn, budget, stats = _on_disk_high_tier(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_mod, "validate_alert_data", lambda *a, **k: "stale_quote: 900s old")
+
+    def boom(*args, **kwargs):
+        raise _SimulatedCrash("died while recording the guard rejection")
+
+    monkeypatch.setattr(runner_mod.metrics, "increment", boom)
+
+    alerter = _DurabilityProbeAlerter(db_path)
+    with pytest.raises(_SimulatedCrash):
+        _run(conn, budget, alerter, bar, anchors, stats)
+
+    assert alerter.sends == []
+    fresh = sqlite3.connect(db_path)
+    try:
+        assert fresh.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 0
+    finally:
+        fresh.close()
 
 
 def _fake_contract(right, strike, bid, ask):
