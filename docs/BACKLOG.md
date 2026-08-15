@@ -4,29 +4,50 @@ Compiled 2026-08-12, from the night of the SIP flip and the backfill
 incident. Verified against actual repo/PR state before writing this
 down, not from memory — see each item's status.
 
+**Corrected 2026-08-15** against a full completion sweep (repo, live
+sites, and code re-read finding by finding). Several items below were
+already done when this file still called them open — those are marked
+inline rather than deleted, so the record shows what was actually true
+versus what this file claimed.
+
 ## Open PRs needing review/merge
 
-- **[#22](https://github.com/8kp5jdvypy-hue/watchtower/pull/22) —
-  Document the two separate Cloudflare Workers.** Open, not merged.
-  Rewrites `DEPLOYMENT.md`'s stale "web dashboard doesn't exist yet"
-  section with the real `watchtower` vs `perch-dashboard` split. Should
-  land before the items below extend that same section further.
+- ~~**[#22](https://github.com/8kp5jdvypy-hue/watchtower/pull/22) —
+  Document the two separate Cloudflare Workers.**~~ **MERGED**
+  2026-08-14. `DEPLOYMENT.md` now carries the real `watchtower` vs
+  `perch-dashboard` split.
+- **[#32](https://github.com/8kp5jdvypy-hue/watchtower/pull/32) —
+  design hotfixes.** **CLOSED, superseded.** Its fixes shipped via #33
+  and #34; its one remaining unique piece (a `signalHistory` test file
+  that nothing ever executed) was salvaged in #40. Note that #32's
+  branch carries a *different* `signalHistory.js` — an
+  `atrFollowThroughLabel` export that never merged, and `FLAT_BAND_ATR`
+  at 0.25 where main has 0.05 — so nothing else on it can be
+  cherry-picked without failing against main.
 
 ## PRs not yet opened (branches pushed, sitting unreviewed)
 
-- **`ops-offbox-backups`** — off-box backup shipping (GPG + rclone to
-  DigitalOcean Spaces), documented restore procedure. Top priority per
-  standing instruction: open first.
-- **`ops-resilience-review`** — the operational resilience review doc
-  (backups, hung-worker deadman gap, autoheal), with next-up specs for
-  findings #2/#3 already written in.
-- **`broad-scan-honesty-proposal`** — the broad_scan labeling/stats-
-  exclusion proposal (doc only, no code yet).
+- ~~**`ops-offbox-backups`**~~ — **MERGED** as
+  [#26](https://github.com/8kp5jdvypy-hue/watchtower/pull/26)
+  (2026-08-12). Off-box GPG+rclone shipping and the restore procedure
+  are on main. The restore path's GPG/rclone legs are still untested
+  against a real bucket — see `DEPLOYMENT.md`'s own note, which is the
+  live remnant of this item.
+- **`ops-resilience-review`** — still unmerged, no PR. The doc (backups,
+  hung-worker deadman gap, autoheal) with next-up specs for findings
+  #2/#3. Content still applies; open it as a docs PR.
+- **`broad-scan-honesty-proposal`** — still unmerged, no PR. Doc only,
+  no code. **Needs a decision, not a session**: adopt the proposal or
+  drop the branch.
 
 ## DEPLOYMENT.md — still missing (confirmed against current main)
 
-PR #22 covers the two-Workers split; GIT_SHA's deploy-command line is
-already merged (via #24). Not yet written anywhere:
+Now merged and no longer missing: the two-Workers split (#22), GIT_SHA's
+deploy-command line (#24), and the frontend caching contract (#35, which
+also corrected it — zone Cache Rules are inert for Workers static
+assets, `_headers` governs browser caching only, deploys supersede the
+assets cache atomically, and no purge step exists). Still not written
+anywhere:
 - In-container `fetch_cache` invocation — `docker compose run --rm -v
   /opt/perch/scripts:/app/scripts -e DETECTOR_DATA_FEED=sip runner
   python3 scripts/fetch_cache.py` (host has no Python deps; the image
@@ -112,16 +133,80 @@ day/week/month at user-facing granularity.
 
 27 ranked findings (5 CRITICAL, 8 HIGH, 11 MEDIUM, 3 LOW) plus a Silent
 Failure Inventory (19 paths), from the overnight full-codebase review.
-Not triaged yet. Two findings already known and explicitly deferred by
-name during tonight's hotfix work:
-- Cross-database atomicity bug (a Telegram alert can reference a
-  `detection_id` before that row commits to `journal.db`) — HIGH,
-  explicitly queued for triage, not touched tonight on purpose.
-- `historical_performance()`'s sign-convention bug — already fixed
-  (part of PR #23).
 
-Everything else in the review is unreviewed by a human; CRITICALs
-should come first.
+### CRITICALs — all five resolved, verified in code 2026-08-15
+
+Verified by re-reading the code finding by finding, not by trusting this
+file's own earlier "not triaged yet". Note the sequence honestly: four
+of the five were already fixed by the 2026-08-12/13 hotfix work while
+this document still described them as untriaged; only #5 was fixed
+after the sweep identified it as the last one standing.
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | `run_live`'s `backfill_marks()` return value discarded | **DONE** (PRs #23/#24) — `_alert_if_backfill_implausible` captures, logs and pages; 4 tests |
+| 2 | Missing cache file silently becomes `[]` | **DONE** (PRs #23/#24) — per-symbol ERROR plus the close-time `_cache_todays_intraday_bars` structural fix; incident-replay test |
+| 3 | `fetch_cache.py` fetch failures are print-only | **PARTIALLY DONE** — see the remnant below |
+| 4 | No test for `backfill_marks()` with a missing cache dir | **DONE** (PR #24) — covers the exact incident shape end to end |
+| 5 | A Telegram alert can reference a `detection_id` before it commits | **DONE** ([#36](https://github.com/8kp5jdvypy-hue/watchtower/pull/36)) — `_commit_then_send()`; 6 tests, 4 of which fail against the pre-fix ordering |
+
+**The C3 remnant (still open, small).** The production path is covered:
+`run_live` fetches today's bars at close and
+`_alert_if_cache_fetch_failed` pages on a total failure. But
+`scripts/fetch_cache.py` itself still **exits 0** when a symbol ends its
+run with `"gave up"` — only `AlpacaCredentialsError` produces a non-zero
+exit. A manual or cron invocation therefore still fails silently, which
+is exactly finding #3's original complaint, just narrowed to the
+out-of-band callers. Fix: exit non-zero (or alert) when any symbol
+finishes with `"gave up"`, and treat a `WATCHLIST` symbol missing
+today's session file as a hard failure.
+
+### HIGH / MEDIUM / LOW — corrected statuses
+
+Also verified in code during the same sweep, since this file previously
+called the whole set untriaged:
+
+- **#7 (`historical_performance` sign convention)** — **DONE** (PR #23),
+  with regression tests asserting the sibling functions agree.
+- **#13 (`run_live`/`run_replay` coverage)** — **PARTIALLY DONE**:
+  `run_live` now has tests (non-trading-day idle, restart-after-close),
+  but the per-symbol exception-isolation loop — the actual
+  highest-blast-radius path — still has none.
+- **#22 (Watchlist error discarded)** — **PARTIALLY DONE**: the
+  watchlist fetch's own error is surfaced; the `fetchToday` error this
+  finding named is still dropped.
+- **Everything else (#6, #8, #9, #10, #11, #12, #14–#21, #23–#27) —
+  STILL OPEN**, each confirmed present in current main. #6's mass-delist
+  half is now guarded ([#37](https://github.com/8kp5jdvypy-hue/watchtower/pull/37)),
+  which closes the destructive part of that finding.
+- The **Priority 2** `rvol_spike`/`relative_strength_break` list-position
+  baseline misalignment is **unchanged** (`detectors.py:240`) — a
+  statistical bug on the money path that announces itself nowhere.
+
+## Small items found during the 2026-08-15 sweep
+
+- **`_commit_then_send()` covers `process_new_bar` only.** The other
+  `alerter.send()` sites (digests, heartbeats, recaps, session
+  open/close) don't reference a `detection_id`, so none of them can
+  dangle one today — but that's a property of what those call sites
+  currently render, not an invariant anything enforces. If a future
+  alert starts citing a detection, it must route through
+  `_commit_then_send()` too.
+- **The landing has no `robots.txt` and no `sitemap.xml`.** Both
+  currently resolve to the SPA shell at HTTP 200 (via
+  `not_found_handling=single-page-application`). Neither blocks
+  crawling — an absent robots.txt means nothing is disallowed — so this
+  is not why the favicon was missing from search results (that was an
+  uncrawlable `data:` URI, fixed in
+  [#38](https://github.com/8kp5jdvypy-hue/watchtower/pull/38)). A real
+  sitemap would still help Search Console discover and re-crawl pages.
+- **The dashboard's own favicon** is non-square (190×178) and has no
+  `.ico`. Google renders it today, so this is cosmetic consistency with
+  the landing's new set, not a defect.
+- **Branch/worktree hygiene**: ~35 fully-merged local branches and
+  several stale worktrees are prunable. The only branches with unmerged
+  content are `ops-resilience-review` and `broad-scan-honesty-proposal`
+  (both listed above).
 
 ## `RefreshResult.delisted == ()` is ambiguous (from finding #6's fix)
 
