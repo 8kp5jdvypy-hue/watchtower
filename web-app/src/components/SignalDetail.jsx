@@ -357,7 +357,9 @@ function SignalWhyExplanation({ kind, context }) {
       <p>{plain}</p>
       {technical.length > 0 && (
         <details className="sd-why-technical">
-          <summary>Technical detail</summary>
+          {/* Plural, matching the cluster-level disclosure above (review
+              L1) -- one label for the same species of control. */}
+          <summary>Technical details</summary>
           <dl>
             {technical.map(([label, value]) => (
               <div key={label} className="sd-why-technical-row">

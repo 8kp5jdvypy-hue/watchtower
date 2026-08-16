@@ -26,7 +26,10 @@
   background: linear-gradient(165deg, rgba(16, 20, 27, 0.97), rgba(10, 13, 18, 0.99));
   border: 1px solid var(--line);
   border-radius: 12px;
-  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6);
+  /* Same shadow + hairline inner catchlight recipe as the journal's
+     overlay panel (JournalOverlay.css), which took it from the
+     landing's AlertReveal -- overlay surfaces read as one material. */
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
   animation: sd-panel-in 0.28s cubic-bezier(.2,.8,.2,1) both;
 }
 @keyframes sd-panel-in {
@@ -102,7 +105,7 @@
 .sd-section { padding: 1.1rem 1.25rem 0; }
 .sd-section:last-of-type { padding-bottom: 1.1rem; }
 .sd-section-title {
-  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--ink-faint); margin: 0 0 0.7rem; font-weight: 600;
   border-top: 1px solid var(--line); padding-top: 1rem;
 }

@@ -56,7 +56,7 @@ export default function Performance() {
       {kinds.length > 0 && (
         <>
           <h2 className="view-section-title">By signal type</h2>
-          <div className="stat-grid">
+          <div className="stat-grid stat-grid-kinds">
             {kinds.map((k) => (
               <div className="stat-tile" key={k.kind}>
                 <div className="stat-tile-label">{kindLabel(k.kind)}</div>

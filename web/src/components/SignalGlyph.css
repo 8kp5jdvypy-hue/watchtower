@@ -9,7 +9,12 @@
 .signal-glyph.is-in .sg-noise { opacity: 0.55; transform: scale(1); }
 
 .sg-line {
-  stroke: var(--line);
+  /* ink-faint, not --line: the hairline token disappears against the
+     footer's --bg-deep, and this stroke is the "resolving into" beat of
+     the mark's narrative -- at rest the glyph read as a smudge of dots
+     with no signal story (review L10). Still dimmer than the cyan
+     endpoint, so the hierarchy noise < line < signal holds. */
+  stroke: var(--ink-faint);
   stroke-width: 1;
   stroke-dasharray: 14;
   stroke-dashoffset: 14;

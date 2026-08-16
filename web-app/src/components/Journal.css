@@ -191,10 +191,9 @@
 /* ----- Stats. ----- */
 .jr-stats { margin-bottom: 0.5rem; }
 .jr-stat-grid { margin-bottom: 0.4rem; }
-/* Views.css's tile value predates the journal -- its numbers here are
-   money and counts, so they take the same tabular discipline as every
-   other figure on this page. */
-.jr-stat-grid .stat-tile-value { font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
+/* Tabular figures + tracking now come from Views.css's own
+   .stat-tile-value -- this page's discipline became the app-wide rule
+   in the Phase 3 elevation pass. */
 .jr-stats-quiet {
   background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;
   padding: 1rem 1.1rem; margin-bottom: 0.4rem;

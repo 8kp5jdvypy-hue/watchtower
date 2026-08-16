@@ -15,10 +15,15 @@ export default function Activity() {
   if (loading) return <div className="view"><p className="empty-state">Loading…</p></div>
   if (error) return <div className="view"><p className="empty-state">Couldn't load your activity.</p></div>
 
+  // Same page anatomy as the linked state (review M11): the h1 and
+  // subtitle stay, the quiet-state replaces only the content below
+  // them -- an eyebrow floating alone reads as a broken page.
   if (data && data.stats === null) {
     return (
       <div className="view">
         <span className="view-eyebrow"><span className="dot" /> MY ACTIVITY</span>
+        <h1>Your own trade log.</h1>
+        <p className="view-subtitle">Logged via /took and /closed in Telegram.</p>
         <div className="quiet-state">
           <PerchMark size={30} state="idle" />
           <h2>Not linked yet.</h2>

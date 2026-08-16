@@ -1,7 +1,7 @@
 .pricing {
   position: relative;
   padding: clamp(6rem, 14vw, 10rem) 0;
-  background: #000;
+  background: var(--bg-deep);
   text-align: center;
   overflow: hidden;
 }

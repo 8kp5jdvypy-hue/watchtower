@@ -60,6 +60,12 @@ h1 em { font-style: normal; color: var(--cyan); text-shadow: 0 0 50px rgba(52,22
 .hero-scroll-hint:hover { color: var(--ink); }
 .hero-scroll-line { width: 1px; height: 26px; background: linear-gradient(var(--ink-dim), transparent); animation: scrollcue 1.8s ease-in-out infinite; }
 @keyframes scrollcue { 0% { transform: scaleY(0.3); opacity: 0.4; } 50% { transform: scaleY(1); opacity: 1; } 100% { transform: scaleY(0.3); opacity: 0.4; } }
+/* On touch there's no hover to complete the cue's affordance, and at
+   its resting frame the line reads as a stray "|" after the text
+   (review L4) -- the words alone carry the invitation there. */
+@media (hover: none) and (pointer: coarse) {
+  .hero-scroll-line { display: none; }
+}
 
 .hero-clock { color: var(--ink); font-variant-numeric: tabular-nums; }
 

@@ -33,12 +33,20 @@ export default function LiveStatus({ status, session, time, lastSuccessAt, compa
     return <span className={`live-dot live-dot-${status}`} title={title} aria-hidden="true" />
   }
 
+  // When the status word and the session label are the same phrase
+  // (MARKET CLOSED + MARKET CLOSED), the session span keeps only the
+  // clock -- one fact, said once.
+  const sessionLabel = session ? SESSION_LABEL[session] : null
+  const sessionText = sessionLabel === label
+    ? (time ? `${time} ET` : null)
+    : sessionLabel ? `${sessionLabel}${time ? ` — ${time} ET` : ''}` : null
+
   return (
     <div className={`live-status live-status-${status}`}>
       <span className="live-status-row">
         <span className={`live-dot live-dot-${status}`} aria-hidden="true" />
         <span className="live-status-label">{label}</span>
-        {session && <span className="live-status-session">{SESSION_LABEL[session]}{time ? ` — ${time} ET` : ''}</span>}
+        {sessionText && <span className="live-status-session">{sessionText}</span>}
       </span>
       {updated && status !== 'closed' && (
         <span className="live-status-sub">Signals updated {updated} ET</span>

@@ -48,7 +48,9 @@
    inline-styled h1s (review M1) demote onto this instead. Ink, not
    faint: these are page-level sections, not in-card labels. */
 .view-section-title {
-  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em;
+  /* 0.14em: the journal elevation's aligned label tracking
+     (.jr-section-title) -- one tracking for every section label. */
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
   text-transform: uppercase; font-weight: 600; color: var(--ink);
   margin: 1.9rem 0 0.75rem;
 }
@@ -70,9 +72,18 @@
 .empty-state { color: var(--ink-dim); font-size: 0.88rem; padding: 1.5rem 0; text-align: center; }
 
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+/* Performance's by-kind grid caps at 3 columns (min 210px): its five
+   tiles were landing 4+1, one orphan alone on row two (review L6) --
+   3+2 balances. Scoped here, not on .stat-grid, so the journal's
+   four-tile grid keeps its clean 4-up row. */
+.stat-grid-kinds { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .stat-tile { background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px; padding: 0.95rem 1.05rem; }
 .stat-tile-label { color: var(--ink-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.4rem; font-family: var(--mono); }
-.stat-tile-value { font-family: var(--display); font-size: 1.35rem; font-weight: 600; color: var(--ink); }
+/* Tabular figures + the journal's big-number tracking on every stat
+   tile, not just the journal's (its .jr-stat-grid override was the
+   prototype; now the app-wide rule). Numbers are the emotional center
+   everywhere they appear. */
+.stat-tile-value { font-family: var(--display); font-size: 1.35rem; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
 .stat-tile .headline { color: var(--ink-faint); font-size: 0.78rem; margin-top: 0.2rem; }
 /* Same amber "worth a second look" pill as SignalDetail.css's
    .sd-small-sample -- a caveat, not a cyan "Perch confirmed this" fact. */
