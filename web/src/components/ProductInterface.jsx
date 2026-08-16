@@ -43,7 +43,7 @@ export default function ProductInterface() {
         <div className="pi-frame">
           <img
             src="/brand/product-interface.webp"
-            alt="The Perch dashboard Signals tab, showing three real signal cards: an NVDA level break, an SPY range expansion, and an AMD volume spike, each with a tier badge and plain-English headline"
+            alt="The Perch dashboard Signals tab, showing three real signal cards: a HIGH-tier USO relative-strength signal with level-break and VWAP-break tags, an AMZN range expansion, and an SPY range expansion, each with a tier badge and a plain-English headline carrying the signal's own numbers"
             loading="lazy"
             width="1280"
             height="815"
