@@ -394,3 +394,21 @@ habit.
 Push to the branch its GitHub build watches, then **manually promote**
 the resulting build in the Cloudflare dashboard (Workers & Pages →
 `watchtower` → Deployments) — a merge alone does not make it live.
+
+## Google Search Console (perchmarkets.com)
+
+One-time setup (already done, recorded here so it isn't chat-only):
+
+1. Go to search.google.com/search-console → **Add property**.
+2. Choose the **Domain** property type and enter `perchmarkets.com` —
+   a Domain property covers every subdomain, so `app.perchmarkets.com`
+   is included automatically.
+3. Google gives you a TXT record. Add it in **Cloudflare DNS** for the
+   `perchmarkets.com` zone (Type: TXT, Name: `@`, Content: the
+   `google-site-verification=...` string).
+4. Back in Search Console, click **Verify**. DNS propagation can take
+   a few minutes; retry if it fails on the first attempt.
+
+After any landing deploy: **URL Inspection** →
+`https://perchmarkets.com/` → **Request Indexing**, so Google picks up
+the new build promptly rather than on its own crawl schedule.
