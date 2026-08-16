@@ -53,12 +53,47 @@
   --duration-hover: 0.2s;
   --duration-reveal: 0.3s;
 
+  /* The landing page's fluid type ramp (web/src/index.css), trimmed to
+     the steps a dashboard actually uses -- same clamp recipes, so a
+     heading here and a heading there are literally the same size at the
+     same viewport. The app's mono micro-sizes (0.6-0.76rem chrome,
+     labels, chips) sit deliberately below the ramp's floor and stay
+     per-component; body copy stays at its own denser 0.95rem. */
+  --step--1: clamp(0.78rem, 0.75rem + 0.15vw, 0.88rem);
+  --step-0: clamp(1rem, 0.95rem + 0.2vw, 1.1rem);
+  --step-1: clamp(1.25rem, 1.1rem + 0.6vw, 1.6rem);
+  --step-2: clamp(1.6rem, 1.35rem + 1.1vw, 2.3rem);
+
+  /* One radius for every interactive control (buttons, chips, inputs,
+     segmented controls). Surface radii (cards 8, panels 12, sheets 16,
+     pills 999) are a separate scale and stay per-component; the
+     calendar's 4px cells are part of that instrument, not controls.
+
+     The control vocabulary itself (see TradeDetail.css's .td-btn family,
+     set during the journal elevation pass) is three tiers plus danger:
+     - solid   .login-form button / .error-boundary button -- the one
+               page-level CTA: cyan fill, bg ink, mono 600 uppercase.
+               (The landing's gradient magnetic CTA at radius 2 is a
+               deliberate landing-only hero flourish on the same
+               language -- see MagneticButton.css.)
+     - tinted  affirmative in-flow actions (.jr-add, .ts-submit,
+               .td-btn-primary, .sd-retry, .sc-view): cyan 0.1 fill,
+               0.35 border, cyan mono 600.
+     - line    neutral (.td-btn, .sd-close, .jo-close, .ts-cancel,
+               .jr-add-skip, .logout-button): transparent, 1px --line,
+               ink-dim mono; hover ink-faint/ink; pressed white 0.04.
+     - danger  .td-btn-danger only, behind a confirm step. */
+  --radius-control: 6px;
+
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
-html { background: var(--bg); }
+/* On-token scrollbars where the standard property is supported; where
+   it isn't (Safari), color-scheme: dark already keeps the overlay
+   scrollbars legible on this background. */
+html { background: var(--bg); scrollbar-color: var(--line) transparent; }
 body {
   margin: 0;
   background: var(--bg);
@@ -73,6 +108,19 @@ button, input { font-family: inherit; }
 a { color: inherit; text-decoration: none; }
 ::selection { background: var(--cyan); color: var(--bg); }
 :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+/* Fields never show a browser default: on-token placeholders, and
+   autofill repainted in the app's own field colors instead of the
+   platform's yellow/blue wash (the inset shadow is the one mechanism
+   WebKit lets override its autofill background). */
+input::placeholder, textarea::placeholder { color: var(--ink-faint); opacity: 0.8; }
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--ink);
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-2) inset;
+  caret-color: var(--ink);
+  transition: background-color 9999s ease-out;
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

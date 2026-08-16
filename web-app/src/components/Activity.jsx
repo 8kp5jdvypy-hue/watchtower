@@ -60,16 +60,16 @@ export default function Activity() {
           <p>Log a trade with /took in Telegram after you act on a signal, and it'll show up here.</p>
         </div>
       ) : (
-        trades.slice(0, 20).map((trade) => (
-          <div className="card" key={trade.id}>
-            <div className="card-row">
-              <span className="symbol">{trade.symbol}</span>
-              <span className={trade.pnl_pct > 0 ? 'trend-up' : trade.pnl_pct < 0 ? 'trend-down' : ''}>
+        <div className="data-rows">
+          {trades.slice(0, 20).map((trade) => (
+            <div className="data-row" key={trade.id}>
+              <span className="data-row-symbol">{trade.symbol}</span>
+              <span className={`data-row-num${trade.pnl_pct > 0 ? ' trend-up' : trade.pnl_pct < 0 ? ' trend-down' : ''}`}>
                 {trade.pnl_pct != null ? `${trade.pnl_pct.toFixed(1)}%` : trade.status}
               </span>
             </div>
-          </div>
-        ))
+          ))}
+        </div>
       )}
     </div>
   )

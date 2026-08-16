@@ -1,3 +1,9 @@
+/* The landing-only hero flourish of the shared button vocabulary
+   (web-app/src/index.css documents the full three-tier spec): same
+   mono-uppercase primary language the app's solid CTA speaks, dialed
+   up for the marketing surface -- gradient fill, 2px machined radius,
+   magnetic hover. Deliberately NOT ported into the app; the app's
+   primaries are flat cyan at --radius-control. */
 .magnetic-btn {
   position: relative;
   display: inline-flex;

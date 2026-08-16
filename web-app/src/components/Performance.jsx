@@ -55,7 +55,7 @@ export default function Performance() {
       {kinds.length === 0 && <p className="empty-state">Not enough history yet to report performance by signal type.</p>}
       {kinds.length > 0 && (
         <>
-          <h1 style={{ marginTop: '1.75rem', fontSize: '1.1rem' }}>By signal type</h1>
+          <h2 className="view-section-title">By signal type</h2>
           <div className="stat-grid">
             {kinds.map((k) => (
               <div className="stat-tile" key={k.kind}>
@@ -79,7 +79,7 @@ export default function Performance() {
 
       {record && (
         <>
-          <h1 style={{ marginTop: '1.75rem', fontSize: '1.1rem' }}>HIGH-tier track record</h1>
+          <h2 className="view-section-title">HIGH-tier track record</h2>
           <div className="stat-grid">
             <div className="stat-tile">
               <div className="stat-tile-label">Hit rate</div>

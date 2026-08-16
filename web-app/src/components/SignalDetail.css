@@ -55,15 +55,16 @@
   background: none;
   border: 1px solid var(--line);
   color: var(--ink-dim);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   padding: 0.4rem 0.75rem;
   cursor: pointer;
   font-size: 0.76rem;
   font-family: var(--mono);
   letter-spacing: 0.03em;
-  transition: border-color 0.2s ease, color 0.2s ease;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
 .sd-close:hover { border-color: var(--ink-faint); color: var(--ink); }
+.sd-close:active { background: rgba(255, 255, 255, 0.04); }
 
 .sd-title-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -212,12 +213,13 @@
 }
 .sd-error p { margin: 0; color: var(--ink-dim); font-size: 0.88rem; }
 .sd-retry {
-  background: none; border: 1px solid rgba(52, 226, 255, 0.25); color: var(--cyan);
-  border-radius: 5px; padding: 0.45rem 0.9rem; cursor: pointer;
-  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.02em;
+  background: rgba(52, 226, 255, 0.1); border: 1px solid rgba(52, 226, 255, 0.35); color: var(--cyan);
+  border-radius: var(--radius-control); padding: 0.45rem 0.9rem; cursor: pointer;
+  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em; font-weight: 600;
   transition: background 0.2s ease, border-color 0.2s ease;
 }
-.sd-retry:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+.sd-retry:hover { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); }
+.sd-retry:active { background: rgba(52, 226, 255, 0.2); }
 
 .sd-foot {
   display: flex; align-items: center; justify-content: space-between;

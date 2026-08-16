@@ -114,7 +114,7 @@
 }
 .td-btn {
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer;
+  border-radius: var(--radius-control); padding: 0.5rem 0.9rem; cursor: pointer;
   font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em;
   transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }

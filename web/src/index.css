@@ -57,7 +57,10 @@
 }
 
 * { box-sizing: border-box; }
-html { background: var(--bg); }
+/* On-token scrollbars where the standard property is supported; where
+   it isn't (Safari), color-scheme: dark keeps the overlay scrollbars
+   legible on this background. Same rule as the app's index.css. */
+html { background: var(--bg); scrollbar-color: var(--line) transparent; }
 html, body { overscroll-behavior: none; }
 body {
   margin: 0;

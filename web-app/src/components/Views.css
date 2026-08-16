@@ -34,11 +34,24 @@
 }
 .view-eyebrow .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px 1px var(--cyan); }
 
+/* Page titles ride the shared ramp (--step-1, see index.css) -- the
+   same size the landing gives a section heading at the same viewport,
+   fluid instead of the old fixed 1.5rem. */
 .view h1 {
   font-family: var(--display); font-weight: 600; letter-spacing: -0.01em;
-  font-size: 1.5rem; margin: 0 0 0.3rem; color: var(--ink);
+  font-size: var(--step-1); margin: 0 0 0.3rem; color: var(--ink);
 }
 .view-subtitle { color: var(--ink-dim); font-size: 0.88rem; margin: 0 0 1.6rem; line-height: 1.5; }
+/* The app's one section-heading grammar: the mono uppercase label that
+   Settings, the journal (.jr-section-title) and the signal modal
+   (.sd-section-title) already speak -- Performance's improvised
+   inline-styled h1s (review M1) demote onto this instead. Ink, not
+   faint: these are page-level sections, not in-card labels. */
+.view-section-title {
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em;
+  text-transform: uppercase; font-weight: 600; color: var(--ink);
+  margin: 1.9rem 0 0.75rem;
+}
 
 /* The "beautiful when nothing is happening" quiet state -- present the
    mark, say plainly that watching-and-finding-nothing is the point, not
@@ -49,7 +62,7 @@
 }
 .quiet-state .perch-mark { opacity: 0.55; }
 .quiet-state h2 {
-  font-family: var(--display); font-weight: 600; font-size: 1.05rem;
+  font-family: var(--display); font-weight: 600; font-size: var(--step-0);
   color: var(--ink); margin: 0; letter-spacing: -0.005em;
 }
 .quiet-state p { margin: 0; font-size: 0.86rem; max-width: 34ch; line-height: 1.55; }
@@ -76,6 +89,24 @@
 .headline { color: var(--ink-dim); font-size: 0.83rem; margin-top: 0.2rem; }
 .trend-up { color: var(--up); }
 .trend-down { color: var(--down); }
+
+/* The app's one list grammar (review M3): hairline-divided flush rows,
+   the more machined of the two languages Watchlist and Activity used
+   to speak. Symbol left in the display face, figures right in tabular
+   mono. Rows that need a third slot (Watchlist's status column) widen
+   the template; see Watchlist.css. */
+.data-rows { border-top: 1px solid var(--line); }
+.data-row {
+  display: grid; grid-template-columns: 1fr max-content; align-items: center;
+  gap: 0.9rem; padding: 0.85rem 0.2rem; border-bottom: 1px solid var(--line);
+  transition: background 0.2s ease;
+}
+.data-row-symbol { font-family: var(--display); font-weight: 600; font-size: 0.98rem; color: var(--ink); }
+.data-row-num { font-family: var(--mono); font-size: 0.85rem; color: var(--ink-dim); font-variant-numeric: tabular-nums; text-align: right; }
+/* Compound, not bare .trend-*: those sit earlier in this sheet, and the
+   row-number base color above would otherwise win the cascade. */
+.data-row-num.trend-up { color: var(--up); }
+.data-row-num.trend-down { color: var(--down); }
 
 @media (max-width: 640px) {
   .view { padding: 1.5rem 1.1rem 2.5rem; }

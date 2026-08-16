@@ -60,7 +60,7 @@
   background: none;
   border: 1px solid var(--line);
   color: var(--ink-dim);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   padding: 0.4rem 0.75rem;
   cursor: pointer;
   font-size: 0.76rem;
