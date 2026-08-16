@@ -57,15 +57,17 @@ export default function Watchlist() {
       {error && <p className="empty-state">Couldn't load your watchlist.</p>}
 
       {data && (
-        <div className="wl-rows">
+        <div className="data-rows">
           {orderedSymbols.map((symbol) => {
             const sig = signaled.get(symbol)
             const quote = quotes[symbol]
             return (
-              <div className={`wl-row${sig ? ' has-signal' : ''}`} key={symbol}>
-                <span className="wl-symbol">{symbol}</span>
-                <div className="wl-row-right">
-                  {quote != null && <span className="wl-price">${quote.last.toFixed(2)}</span>}
+              <div className={`data-row wl-row${sig ? ' has-signal' : ''}`} key={symbol}>
+                <span className="data-row-symbol">{symbol}</span>
+                {/* Always rendered, even quoteless -- the row is a grid, so a
+                    missing middle cell would slide the status slot over. */}
+                <span className="data-row-num">{quote != null ? `$${quote.last.toFixed(2)}` : ''}</span>
+                <span className="wl-status">
                   {sig ? (
                     <span className={`wl-badge wl-badge-${sig.tier}`}>
                       <PerchMark size={11} state={sig.tier === 'high' ? 'alert' : 'confirmed'} accent={false} />
@@ -74,7 +76,7 @@ export default function Watchlist() {
                   ) : (
                     <span className="wl-quiet">quiet</span>
                   )}
-                </div>
+                </span>
               </div>
             )
           })}

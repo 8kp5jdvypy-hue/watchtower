@@ -96,8 +96,7 @@
   display: inline-flex; align-items: center; gap: 0.4em; width: fit-content;
 }
 .sc-trend-arrow { font-size: 0.7em; }
-.trend-up { color: var(--up); }
-.trend-down { color: var(--down); }
+/* .trend-up/.trend-down live in Views.css only (review L7 dedupe). */
 /* Real quote (SIP) against price at detection -- absent, not zero,
    whenever either side is missing (see SignalCard.jsx's changePct). */
 .sc-change { font-family: var(--mono); font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -131,18 +130,20 @@
   flex: none;
   display: inline-flex;
   align-items: center;
-  border: 1px solid rgba(52, 226, 255, 0.25);
+  background: rgba(52, 226, 255, 0.1);
+  border: 1px solid rgba(52, 226, 255, 0.35);
   color: var(--cyan);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   padding: 0.35rem 0.7rem;
   font-family: var(--mono);
   font-size: 0.7rem;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  font-weight: 600;
   transition: background var(--duration-hover) var(--ease-perch), border-color var(--duration-hover) var(--ease-perch);
 }
 .signal-card:hover .sc-view, .signal-card:focus-visible .sc-view {
-  background: rgba(52, 226, 255, 0.08);
-  border-color: rgba(52, 226, 255, 0.4);
+  background: rgba(52, 226, 255, 0.16);
+  border-color: rgba(52, 226, 255, 0.5);
 }
 .sc-view-arrow {
   display: inline-block;

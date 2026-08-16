@@ -15,8 +15,14 @@
   transition: background 0.3s ease, border-color 0.3s ease, backdrop-filter 0.3s ease;
 }
 .site-nav.is-scrolled {
-  background: rgba(5,7,10,0.75);
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  /* 0.9, not 0.75: at 0.75 + 10px blur the --step-6 pinned headlines
+     ("BE THERE", "beta.") read straight through the bar and collide
+     with the nav links -- looks like a z-index bug at the page's
+     most-photographed moments (design review H3). Enough opacity to
+     hold against near-white display type, still translucent enough to
+     keep the glass feel. Transparent-at-top state unchanged. */
+  background: rgba(5,7,10,0.9);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   border-bottom-color: var(--line);
 }
 .nav-inner { display: flex; align-items: center; justify-content: space-between; height: 68px; }

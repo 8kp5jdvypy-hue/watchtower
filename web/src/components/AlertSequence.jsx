@@ -131,13 +131,15 @@ export default function AlertSequence() {
         },
       })
 
-      // Beat 1 -- the field appears, quiet, unremarkable. The payoff layer
-      // (chart grid, stats grid) carries its own always-opaque background/
-      // border chrome, so it has to be fully hidden up front too, not just
-      // its individual text values -- otherwise that chrome sits visible,
-      // overlapping the field, for the whole first half of the sequence.
-      tl.fromTo(field, { opacity: 0 }, { opacity: 1, duration: 0.06 }, 0)
-        .set(payoff, { opacity: 0 }, 0)
+      // Beat 1 -- the field is already there, quiet, unremarkable (it's
+      // visible at rest in CSS now -- see .as-field's comment; fading it
+      // in from zero left the stage blank at the pin's opening beat,
+      // review M10). The payoff layer (chart grid, stats grid) carries
+      // its own always-opaque background/border chrome, so it has to be
+      // fully hidden up front, not just its individual text values --
+      // otherwise that chrome sits visible, overlapping the field, for
+      // the whole first half of the sequence.
+      tl.set(payoff, { opacity: 0 }, 0)
 
       // Beat 2 -- one name starts to separate from the noise. The status
       // reads SCANNING (neutral) until it doesn't. Cyan, not amber -- the

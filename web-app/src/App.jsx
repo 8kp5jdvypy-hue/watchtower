@@ -139,19 +139,23 @@ function App() {
           <button className="logout-button" onClick={handleLogout}>Sign out</button>
         </div>
       </div>
-      <div className="tabs" role="tablist">
+      {/* A nav of buttons with aria-current, not role="tablist" -- the
+          previous markup claimed the ARIA tabs pattern without its
+          contract (no aria-controls, no tabpanel, no arrow keys), which
+          promises AT behavior that never happens (review M9). This is
+          the same honest pattern the mobile nav below already uses. */}
+      <nav className="tabs" aria-label="Primary">
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            role="tab"
-            aria-selected={tab.id === activeTab}
             className={`tab-button${tab.id === activeTab ? ' active' : ''}`}
             onClick={() => setActiveTab(tab.id)}
+            aria-current={tab.id === activeTab ? 'page' : undefined}
           >
             {tab.label}
           </button>
         ))}
-      </div>
+      </nav>
       <ActiveComponent account={account} />
       <nav className="mobile-nav" aria-label="Primary">
         {TABS.map((tab) => (

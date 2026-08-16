@@ -369,7 +369,10 @@ def test_signals_feed_includes_a_context_summary_for_level_break(app, client):
     assert signal["context_summary"] == {"level_name": "prior_high", "level_value": 505.10}
 
 
-def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, client):
+def test_signals_feed_context_summary_carries_rvol_fields(app, client):
+    # rvol_spike joined _HEADLINE_CONTEXT_FIELDS with the design
+    # elevation's M5 (numbers-in-headlines) -- the summary now carries
+    # the volume ratio's ingredients, never the internal bar_index.
     now = datetime.now(timezone.utc)
     today = datetime.now(ET).date().isoformat()
     context = {"cum_volume": 1000, "baseline": 300, "bar_index": 5}
@@ -396,6 +399,39 @@ def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, 
     body = client.get("/signals/feed").get_json()
     signal = body["signals"][0]
     assert signal["primary_kind"] == "rvol_spike"
+    assert signal["context_summary"] == {"cum_volume": 1000, "baseline": 300}
+
+
+def test_signals_feed_context_summary_is_null_for_a_kind_without_a_mapping(app, client):
+    # Every real detector kind is mapped now, so the unmapped path is
+    # exercised with a kind that has no entry at all -- the same shape a
+    # future detector would have before its mapping ships.
+    now = datetime.now(timezone.utc)
+    today = datetime.now(ET).date().isoformat()
+    context = {"anything": 1}
+    write_cluster(
+        app.journal_conn,
+        session=today,
+        symbol="QQQ",
+        ts_utc=now.isoformat(),
+        kinds="future_kind",
+        headlines="QQQ did something new",
+        score=5.0,
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("QQQ", "future_kind", now, 5.0, "QQQ did something new", context)],
+        code_version_str="test",
+        primary_kind="future_kind",
+    )
+    app.journal_conn.commit()
+
+    token = _request_and_extract_token(app, client, "rvol@example.com")
+    _verify_token(client, token)
+
+    body = client.get("/signals/feed").get_json()
+    signal = body["signals"][0]
+    assert signal["primary_kind"] == "future_kind"
     assert signal["context_summary"] is None
 
 

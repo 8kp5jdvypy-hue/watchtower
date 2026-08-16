@@ -51,14 +51,19 @@ function afterDetectionRows(marks) {
 // left to say is that it's waiting on the once-daily close batch, same
 // as the close row itself -- showing the already-elapsed target time
 // there would look exactly as broken as a bare "Pending" did.
+// Returns both lengths of the label; SignalDetail renders them in two
+// spans and CSS picks one per viewport (design review M8: the full
+// sentence wraps every row of the 390px marks table onto two lines,
+// collapsing the two-column ledger into an eight-line list).
 function pendingResolutionLabel(offsetMin, tsUtc) {
-  if (offsetMin == null) return 'Resolves after session close'
-  const targetMs = new Date(tsUtc).getTime() + offsetMin * 60 * 1000
-  if (Date.now() < targetMs) {
-    const time = new Date(targetMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-    return `Resolves ~${time}`
+  if (offsetMin != null) {
+    const targetMs = new Date(tsUtc).getTime() + offsetMin * 60 * 1000
+    if (Date.now() < targetMs) {
+      const time = new Date(targetMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+      return { full: `Resolves ~${time}`, short: `Resolves ~${time}` }
+    }
   }
-  return 'Resolves after session close'
+  return { full: 'Resolves after session close', short: 'After close' }
 }
 
 // Matches .signal-detail's CSS transition duration -- see sd-panel-in/
@@ -272,7 +277,15 @@ export default function SignalDetail({ id, onClose }) {
                           ${mark.price.toFixed(2)} ({(((mark.price - data.close) / data.close) * 100).toFixed(2)}%)
                         </span>
                       ) : (
-                        <span className="sd-mark-pending">{pendingResolutionLabel(offsetMin, data.ts_utc)}</span>
+                        (() => {
+                          const pending = pendingResolutionLabel(offsetMin, data.ts_utc)
+                          return (
+                            <span className="sd-mark-pending">
+                              <span className="sd-pending-full">{pending.full}</span>
+                              <span className="sd-pending-short">{pending.short}</span>
+                            </span>
+                          )
+                        })()
                       )}
                     </li>
                   ))}
@@ -344,7 +357,9 @@ function SignalWhyExplanation({ kind, context }) {
       <p>{plain}</p>
       {technical.length > 0 && (
         <details className="sd-why-technical">
-          <summary>Technical detail</summary>
+          {/* Plural, matching the cluster-level disclosure above (review
+              L1) -- one label for the same species of control. */}
+          <summary>Technical details</summary>
           <dl>
             {technical.map(([label, value]) => (
               <div key={label} className="sd-why-technical-row">

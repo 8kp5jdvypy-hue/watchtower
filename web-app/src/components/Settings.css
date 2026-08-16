@@ -12,9 +12,11 @@
 
 .settings-section { margin-bottom: 2rem; }
 .settings-section-head { margin-bottom: 1rem; }
+/* Same recipe as Views.css's .view-section-title -- the app's one
+   section-heading grammar; only the margins differ here. */
 .settings-section-head h2 {
-  font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.12em;
-  color: var(--ink); margin: 0 0 0.3rem; font-weight: 600;
+  font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink); margin: 0 0 0.3rem; font-weight: 600;
 }
 .settings-section-sub { color: var(--ink-dim); font-size: 0.86rem; margin: 0; font-style: italic; }
 .settings-pro-note { color: var(--ink-faint); font-size: 0.78rem; margin: 0.9rem 0 0.75rem; }
@@ -63,9 +65,12 @@
 .settings-feature-list li { display: flex; align-items: center; gap: 0.55em; color: var(--ink-dim); font-size: 0.85rem; }
 .settings-check { color: var(--cyan); font-size: 0.8rem; flex: none; }
 
+/* Dashed, like .settings-coming-soon above it -- "not a live thing
+   yet" is this page's dashed-border grammar. The old solid border +
+   control radius read as a disabled button inviting a tap (review L5). */
 .settings-pricing-note {
   font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.05em; text-transform: uppercase;
-  color: var(--ink-faint); border: 1px solid var(--line); border-radius: 6px;
+  color: var(--ink-faint); border: 1px dashed var(--line); border-radius: 8px;
   display: inline-block; padding: 0.5rem 0.9rem; margin-bottom: 1rem;
 }
 .settings-trust { color: var(--ink-faint); font-size: 0.76rem; line-height: 1.55; margin: 0; max-width: 58ch; }

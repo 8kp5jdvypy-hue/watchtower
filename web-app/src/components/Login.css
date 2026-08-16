@@ -25,22 +25,27 @@
 .login-card h1 {
   margin: 0 0 0.5rem;
   font-family: var(--display); font-weight: 600; letter-spacing: -0.005em;
-  font-size: 1.3rem; color: var(--ink);
+  font-size: var(--step-1); color: var(--ink);
 }
 .login-card > p { color: var(--ink-dim); font-size: 0.9rem; line-height: 1.5; margin: 0 0 1.75rem; }
 
 .login-form { display: flex; flex-direction: column; gap: 0.75rem; }
+/* bg-2 fill, same as every field in the app (TradeSheet.css) -- one
+   field recipe, not a per-form improvisation. */
 .login-form input {
-  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-control);
   padding: 0.8rem 0.95rem; color: var(--ink); font-size: 1rem;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .login-form input:focus { outline: none; border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(52,226,255,0.12); }
 .login-form input[aria-invalid="true"] { border-color: var(--down); }
+/* The app's one solid-fill CTA (see index.css's control spec): the same
+   mono-uppercase language as the landing's SIGN UP, at the app's
+   control radius instead of the landing's hero 2px. */
 .login-form button {
-  background: var(--cyan); color: var(--bg); border: none; border-radius: 6px;
-  padding: 0.8rem; font-weight: 600; cursor: pointer; font-size: 0.95rem;
-  font-family: var(--display); letter-spacing: 0.01em;
+  background: var(--cyan); color: var(--bg); border: none; border-radius: var(--radius-control);
+  padding: 0.85rem; font-weight: 600; cursor: pointer; font-size: 0.84rem;
+  font-family: var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
   transition: opacity 0.2s ease, transform 0.15s ease;
 }
 .login-form button:hover:not(:disabled) { opacity: 0.9; }
@@ -91,10 +96,12 @@
 .login-sent-sub { color: var(--ink-dim); font-size: 0.82rem; line-height: 1.5; margin: 0 0 1.5rem; }
 .login-different-email {
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 6px; padding: 0.6rem 1rem; font-size: 0.8rem; font-family: var(--mono);
-  cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+  border-radius: var(--radius-control); padding: 0.6rem 1rem; font-size: 0.76rem;
+  font-family: var(--mono); letter-spacing: 0.03em;
+  cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
 .login-different-email:hover { border-color: var(--ink-faint); color: var(--ink); }
+.login-different-email:active { background: rgba(255, 255, 255, 0.04); }
 
 @media (max-width: 420px) {
   .login-card { padding: 2.25rem 1.5rem; }

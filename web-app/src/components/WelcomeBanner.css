@@ -25,10 +25,14 @@
 .welcome-banner-dismiss {
   flex: none;
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 6px; padding: 0.45rem 0.85rem; font-size: 0.78rem; font-family: var(--mono);
-  cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+  border-radius: var(--radius-control); padding: 0.45rem 0.85rem; font-size: 0.76rem;
+  letter-spacing: 0.03em; font-family: var(--mono);
+  cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
-.welcome-banner-dismiss:hover { border-color: var(--cyan); color: var(--ink); }
+/* Neutral hover, not cyan -- dismissing is a line-tier action (see
+   index.css's control spec); cyan is reserved for affirmatives. */
+.welcome-banner-dismiss:hover { border-color: var(--ink-faint); color: var(--ink); }
+.welcome-banner-dismiss:active { background: rgba(255, 255, 255, 0.04); }
 
 @media (max-width: 640px) {
   .welcome-banner { flex-wrap: wrap; }

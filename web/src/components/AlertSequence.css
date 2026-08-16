@@ -41,7 +41,13 @@
 }
 
 /* ---------- Beat 1-3, 5: the field ---------- */
-.as-field { position: absolute; inset: 0; opacity: 0; }
+/* Visible at rest, not faded in by the timeline: the old opacity-0
+   start left the whole stage blank for the pin's opening beat (the
+   review's M10 "near-empty beat" capture is exactly that frame). The
+   quiet field IS the resting state the story starts from; the
+   timeline only ever dims it from here. Reduced-motion still hides it
+   (display: none below) in favor of the static relayout. */
+.as-field { position: absolute; inset: 0; }
 .as-sym {
   position: absolute;
   transform: translate(-50%, -50%);

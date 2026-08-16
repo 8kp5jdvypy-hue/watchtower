@@ -26,7 +26,10 @@
   background: linear-gradient(165deg, rgba(16, 20, 27, 0.97), rgba(10, 13, 18, 0.99));
   border: 1px solid var(--line);
   border-radius: 12px;
-  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6);
+  /* Same shadow + hairline inner catchlight recipe as the journal's
+     overlay panel (JournalOverlay.css), which took it from the
+     landing's AlertReveal -- overlay surfaces read as one material. */
+  box-shadow: 0 30px 80px -30px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
   animation: sd-panel-in 0.28s cubic-bezier(.2,.8,.2,1) both;
 }
 @keyframes sd-panel-in {
@@ -55,15 +58,16 @@
   background: none;
   border: 1px solid var(--line);
   color: var(--ink-dim);
-  border-radius: 5px;
+  border-radius: var(--radius-control);
   padding: 0.4rem 0.75rem;
   cursor: pointer;
   font-size: 0.76rem;
   font-family: var(--mono);
   letter-spacing: 0.03em;
-  transition: border-color 0.2s ease, color 0.2s ease;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
 }
 .sd-close:hover { border-color: var(--ink-faint); color: var(--ink); }
+.sd-close:active { background: rgba(255, 255, 255, 0.04); }
 
 .sd-title-row {
   display: flex; align-items: center; justify-content: space-between;
@@ -101,7 +105,7 @@
 .sd-section { padding: 1.1rem 1.25rem 0; }
 .sd-section:last-of-type { padding-bottom: 1.1rem; }
 .sd-section-title {
-  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase;
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
   color: var(--ink-faint); margin: 0 0 0.7rem; font-weight: 600;
   border-top: 1px solid var(--line); padding-top: 1rem;
 }
@@ -158,10 +162,22 @@
   font-family: var(--mono); font-size: 0.8rem;
 }
 .sd-mark-label { color: var(--ink-faint); }
-.sd-mark-value { color: var(--ink); font-weight: 600; }
+/* margin-left auto + right alignment: when a long value does wrap onto
+   its own line, it lands flush right under the value column instead of
+   flush left under the label -- the row keeps reading as a two-column
+   ledger even wrapped (design review M8). */
+.sd-mark-value { color: var(--ink); font-weight: 600; margin-left: auto; text-align: right; }
 .sd-mark-value.trend-up { color: var(--up); }
 .sd-mark-value.trend-down { color: var(--down); }
-.sd-mark-pending { color: var(--ink-faint); }
+.sd-mark-pending { color: var(--ink-faint); margin-left: auto; text-align: right; }
+/* The pending copy ships in two lengths (see SignalDetail.jsx's
+   pendingResolutionLabel); phones get the short one so the marks table
+   stays one line per row at 390. */
+.sd-pending-short { display: none; }
+@media (max-width: 640px) {
+  .sd-pending-full { display: none; }
+  .sd-pending-short { display: inline; }
+}
 
 .sd-history { margin: 0; color: var(--ink-dim); font-size: 0.86rem; line-height: 1.6; }
 .sd-history b { color: var(--ink); }
@@ -212,12 +228,13 @@
 }
 .sd-error p { margin: 0; color: var(--ink-dim); font-size: 0.88rem; }
 .sd-retry {
-  background: none; border: 1px solid rgba(52, 226, 255, 0.25); color: var(--cyan);
-  border-radius: 5px; padding: 0.45rem 0.9rem; cursor: pointer;
-  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.02em;
+  background: rgba(52, 226, 255, 0.1); border: 1px solid rgba(52, 226, 255, 0.35); color: var(--cyan);
+  border-radius: var(--radius-control); padding: 0.45rem 0.9rem; cursor: pointer;
+  font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em; font-weight: 600;
   transition: background 0.2s ease, border-color 0.2s ease;
 }
-.sd-retry:hover { background: rgba(52, 226, 255, 0.08); border-color: rgba(52, 226, 255, 0.4); }
+.sd-retry:hover { background: rgba(52, 226, 255, 0.16); border-color: rgba(52, 226, 255, 0.5); }
+.sd-retry:active { background: rgba(52, 226, 255, 0.2); }
 
 .sd-foot {
   display: flex; align-items: center; justify-content: space-between;

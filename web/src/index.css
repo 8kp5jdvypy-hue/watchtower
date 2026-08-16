@@ -31,7 +31,11 @@
   /* signal is the exception, not the rule */
   --cyan: #34e2ff;
   --cyan-dim: #1a7d8f;
-  --red: #ff3b4e;
+  /* The app's own --down (web-app/src/index.css) -- was #ff3b4e, a
+     second red the dashboard never had. One red family across both
+     surfaces, same argument that dropped violet rather than
+     reconciling it (design review L2). */
+  --red: #fb7185;
   /* Matches the app's own --amber exactly (web-app/src/index.css) --
      reserved for a caveat/"worth a second look" treatment (small-sample
      tags, historically-mixed framing), never a general brand color or an
@@ -53,11 +57,20 @@
   --step-6: clamp(4rem, 2rem + 8vw, 9rem);
 
   --edge: clamp(1.25rem, 5vw, 5rem);
+
+  /* The page's deliberate second black: manifesto, pricing, final CTA
+     and footer drop below --bg for a deeper act break. Tokenized so the
+     rhythm is a decision, not four stray hex literals (review L3). */
+  --bg-deep: #000;
+
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
-html { background: var(--bg); }
+/* On-token scrollbars where the standard property is supported; where
+   it isn't (Safari), color-scheme: dark keeps the overlay scrollbars
+   legible on this background. Same rule as the app's index.css. */
+html { background: var(--bg); scrollbar-color: var(--line) transparent; }
 html, body { overscroll-behavior: none; }
 body {
   margin: 0;

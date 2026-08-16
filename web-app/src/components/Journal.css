@@ -26,7 +26,7 @@
   background: rgba(52, 226, 255, 0.1);
   border: 1px solid rgba(52, 226, 255, 0.35);
   color: var(--cyan);
-  border-radius: 6px; padding: 0.5rem 1rem; cursor: pointer;
+  border-radius: var(--radius-control); padding: 0.5rem 1rem; cursor: pointer;
   font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em; font-weight: 600;
   white-space: nowrap;
   transition: background 0.2s ease, border-color 0.2s ease;
@@ -35,7 +35,7 @@
 .jr-add:active { background: rgba(52, 226, 255, 0.2); }
 .jr-add-skip {
   background: none; border: 1px solid var(--line); color: var(--ink-dim);
-  border-radius: 6px; padding: 0.5rem 0.9rem; cursor: pointer;
+  border-radius: var(--radius-control); padding: 0.5rem 0.9rem; cursor: pointer;
   font-family: var(--mono); font-size: 0.76rem; letter-spacing: 0.03em;
   white-space: nowrap;
   transition: border-color 0.2s ease, color 0.2s ease;
@@ -191,10 +191,9 @@
 /* ----- Stats. ----- */
 .jr-stats { margin-bottom: 0.5rem; }
 .jr-stat-grid { margin-bottom: 0.4rem; }
-/* Views.css's tile value predates the journal -- its numbers here are
-   money and counts, so they take the same tabular discipline as every
-   other figure on this page. */
-.jr-stat-grid .stat-tile-value { font-variant-numeric: tabular-nums; letter-spacing: -0.015em; }
+/* Tabular figures + tracking now come from Views.css's own
+   .stat-tile-value -- this page's discipline became the app-wide rule
+   in the Phase 3 elevation pass. */
 .jr-stats-quiet {
   background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;
   padding: 1rem 1.1rem; margin-bottom: 0.4rem;

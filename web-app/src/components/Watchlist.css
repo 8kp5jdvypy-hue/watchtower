@@ -1,13 +1,11 @@
-.wl-rows { border-top: 1px solid var(--line); }
-.wl-row {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0.85rem 0.2rem; border-bottom: 1px solid var(--line);
-  transition: background 0.2s ease;
-}
+/* Watchlist rows ride the shared .data-row grammar (Views.css) with a
+   third column: a fixed-width status slot, so the price column's right
+   edge lands at the same x on every row (review M4 -- variable-width
+   SIGNAL pill vs QUIET text used to rag the figures) and the numbers
+   stack as a true column. */
+.wl-row { grid-template-columns: 1fr max-content 5.8em; }
 .wl-row.has-signal { background: rgba(52, 226, 255, 0.03); }
-.wl-symbol { font-family: var(--display); font-weight: 600; font-size: 0.98rem; color: var(--ink); }
-.wl-row-right { display: flex; align-items: center; gap: 0.9rem; }
-.wl-price { font-family: var(--mono); font-size: 0.85rem; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+.wl-status { display: inline-flex; justify-content: flex-end; align-items: center; }
 .wl-quiet { font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-faint); }
 .wl-badge {
   display: inline-flex; align-items: center; gap: 0.4em;

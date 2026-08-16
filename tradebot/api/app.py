@@ -105,7 +105,19 @@ def _to_jsonable(obj):
 # level_break's raw context field is "level" (see detectors.py); renamed
 # to level_value here so it isn't ambiguous next to level_name.
 _HEADLINE_CONTEXT_FIELDS = {
+    # (out_key, src_key) pairs per kind, src_key naming the field in the
+    # detector's own context dict (tradebot/detectors.py). Every kind is
+    # listed so card headlines can carry the card's own numbers instead
+    # of one templated sentence per kind (design review M5) -- the
+    # frontend's signalHeadlines.js builders degrade to the raw engine
+    # sentence whenever these fields are missing (pre-migration rows).
     "level_break": (("level_name", "level_name"), ("level_value", "level")),
+    "range_expansion": (("bar_range", "bar_range"), ("atr", "atr14")),
+    "rvol_spike": (("cum_volume", "cum_volume"), ("baseline", "baseline")),
+    "vwap_break": (("vwap", "vwap"),),
+    "round_number_break": (("level", "level"),),
+    "gap": (("gap_size", "gap_size"), ("prior_close", "prior_close")),
+    "relative_strength_break": (("market_proxy", "market_proxy"), ("divergence", "divergence"), ("atr", "atr14")),
 }
 
 
