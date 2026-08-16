@@ -5,6 +5,7 @@ import { DEFAULT_POLL_INTERVAL_MS, usePolling } from '../hooks/usePolling'
 import { useLiveStatus } from '../hooks/useLiveStatus'
 import { useMarketClock } from '../hooks/useMarketClock'
 import { bySeverity } from '../signalOrder'
+import { collapseDuplicates } from '../signalGrouping'
 import LiveStatus from './LiveStatus'
 import PerchMark from './PerchMark'
 import SignalCard from './SignalCard'
@@ -38,7 +39,7 @@ export default function Feed() {
           <p>Perch is watching. Nothing has crossed the threshold since it started tracking.</p>
         </div>
       )}
-      {data && bySeverity(data.signals).map((signal) => (
+      {data && bySeverity(collapseDuplicates(data.signals)).map((signal) => (
         <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
