@@ -48,7 +48,7 @@ from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind
 from tradebot.marketdata import fetch_quotes
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
-from tradebot.telegram_bot.performance import track_record
+from tradebot.telegram_bot.performance import public_alert_history, track_record
 
 DEFAULT_FRONTEND_URL = "https://app.perchmarkets.com"
 # The itsdangerous-signed session cookie has no server-side revocation —
@@ -189,6 +189,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     )
     app.email_sender = build_email_sender()
     app._performance_cache: dict = {"data": None, "computed_at": None}
+    app._public_record_cache: dict = {"data": None, "computed_at": None}
     app._quote_cache: dict = {}
 
     # Trusts app.frontend_url only, plus whatever a developer's own local
@@ -205,6 +206,18 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
 
     @app.after_request
     def add_cors_headers(response):
+        # /public/* is unauthenticated, read-only, and never reads a
+        # cookie for authorization — deliberately open to any origin
+        # rather than folded into the credentialed allowlist below,
+        # which exists to answer a different question (who gets a
+        # session cookie honored). Keeping the two separate means
+        # allowed_origins keeps meaning exactly one thing, and this
+        # wildcard can never leak onto a route that does read the
+        # session. Scoped to this one prefix, not app-wide.
+        if request.path.startswith("/public/"):
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+            return response
         origin = request.headers.get("Origin")
         if origin in allowed_origins:
             response.headers["Access-Control-Allow-Origin"] = origin
@@ -572,6 +585,30 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "by_tier": _to_jsonable(by_tier),
                 "by_kind": _to_jsonable(by_kind),
                 "track_record": _to_jsonable(record),
+            }
+            cache["computed_at"] = now
+        return jsonify(cache["data"])
+
+    @app.route("/public/track-record")
+    def public_track_record():
+        # No @login_required — this is the whole point (see
+        # docs/phase4-proof-engine-proposal.md, Part A). No cookie is
+        # ever read here, matching the CORS wildcard above.
+        #
+        # alerted_only=True everywhere below: the public record is the
+        # ALERTED population, binding (owner decision, 2026-08-18) — see
+        # track_record()'s own docstring for why the default (every
+        # HIGH-tier detection, alerted or not) would be wrong here.
+        cache = app._public_record_cache
+        now = datetime.now(timezone.utc)
+        stale = cache["computed_at"] is None or (now - cache["computed_at"]).total_seconds() > PERFORMANCE_CACHE_TTL_SECONDS
+        if stale:
+            limit = min(max(int(request.args.get("limit", 1000)), 1), 5000)
+            record = track_record(app.journal_conn, alerted_only=True)
+            alerts = public_alert_history(app.journal_conn, app.users_conn, limit=limit)
+            cache["data"] = {
+                "track_record": _to_jsonable(record),
+                "alerts": _to_jsonable(alerts),
             }
             cache["computed_at"] = now
         return jsonify(cache["data"])

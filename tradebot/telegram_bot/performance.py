@@ -114,9 +114,34 @@ class TrackRecord:
     significance: SignificanceCheck
 
 
+def _signed_return_pct(close: float, price: float, trend: str) -> float:
+    """The one sign convention every continuation/return stat in this
+    module shares — see the historical_performance() avg_return_pct sign
+    bug (b813185) this project already got burned by once. `trend` is
+    which direction the alert favored ('up' or 'down'); a positive
+    result always means "the alert's own direction played out," never a
+    literal price-went-up reading."""
+    raw = (price - close) / close * 100
+    return raw if trend == "up" else -raw
+
+
 def _signed_returns(
-    conn: sqlite3.Connection, tier: str, offset_min: int, since: str | None = None, until: str | None = None
+    conn: sqlite3.Connection,
+    tier: str,
+    offset_min: int,
+    since: str | None = None,
+    until: str | None = None,
+    alerted_only: bool = False,
 ) -> list[dict]:
+    """alerted_only=False (default, every existing caller) measures every
+    HIGH-tier detection the journal ever recorded, alerted or not — the
+    right population for "is our detection edge real." alerted_only=True
+    restricts to detections that were actually sent (d.alerted = 1) —
+    the right, and only correct, population for anything shown to the
+    public as a record of what subscribers received (see
+    docs/phase4-proof-engine-proposal.md's "finding that changes the
+    design"). Same query, same sign convention, two different
+    populations answering two different questions — never blend them."""
     query = """
         SELECT d.ts_utc, d.close, d.trend, d.news_driven, m.price
         FROM detections d
@@ -124,6 +149,8 @@ def _signed_returns(
         WHERE d.tier = ?
     """
     params: list = [offset_min, tier]
+    if alerted_only:
+        query += " AND d.alerted = 1"
     if since is not None:
         query += " AND d.ts_utc >= ?"
         params.append(since)
@@ -134,8 +161,7 @@ def _signed_returns(
     rows = conn.execute(query, params).fetchall()
     out = []
     for ts_utc, close, trend, news_driven, price in rows:
-        r = (price - close) / close * 100
-        signed = r if trend == "up" else -r
+        signed = _signed_return_pct(close, price, trend)
         out.append({"ts_utc": ts_utc, "return_pct": signed, "news_driven": bool(news_driven)})
     return out
 
@@ -179,8 +205,10 @@ def _longest_losing_streak(returns: list[dict]) -> int:
     return longest
 
 
-def track_record(conn: sqlite3.Connection, tier: str = "high", offset_min: int = 30) -> TrackRecord | None:
-    returns = _signed_returns(conn, tier, offset_min)
+def track_record(
+    conn: sqlite3.Connection, tier: str = "high", offset_min: int = 30, alerted_only: bool = False
+) -> TrackRecord | None:
+    returns = _signed_returns(conn, tier, offset_min, alerted_only=alerted_only)
     if len(returns) < MIN_HISTORY_SAMPLE:
         return None
 
@@ -244,11 +272,16 @@ class WeeklyRecap:
 
 
 def weekly_recap(
-    conn: sqlite3.Connection, week_start: str, week_end: str, tier: str = "high", offset_min: int = 30
+    conn: sqlite3.Connection,
+    week_start: str,
+    week_end: str,
+    tier: str = "high",
+    offset_min: int = 30,
+    alerted_only: bool = False,
 ) -> WeeklyRecap:
     """[week_start, week_end) — week_end is exclusive, so callers pass
     the next week's start date, not the last included day."""
-    returns = _signed_returns(conn, tier, offset_min, since=week_start, until=week_end)
+    returns = _signed_returns(conn, tier, offset_min, since=week_start, until=week_end, alerted_only=alerted_only)
 
     total_alerts = conn.execute(
         "SELECT COUNT(*) FROM detections WHERE tier = ? AND alerted = 1 AND ts_utc >= ? AND ts_utc < ?",
@@ -283,6 +316,120 @@ def weekly_recap(
         total_no_trade=no_trade_count,
         no_trade_tracked_count=tracked_count,
     )
+
+
+# --------------------------------------------------------------------------
+# Public record row listing (docs/phase4-proof-engine-proposal.md, Part A
+# and Part B). Unlike track_record()/weekly_recap(), always alerted-only
+# by construction — there is no "everything" mode here, because a row
+# with nothing to verify a real send against has no business appearing
+# on a page whose whole premise is "this was really sent." Reads two
+# databases (journal.db's detections/marks, users.db's outbox) because
+# the verifiable send time lives in the outbox, not in detections.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PublicAlertRow:
+    detection_id: str
+    symbol: str
+    headline: str
+    trend: str  # "up" | "down"
+    origin: str  # "watchlist" | "screening" -- a visible column, never a default filter
+    sent_at: str  # real outbox.delivered_at, ISO -- the verifiable timestamp
+    offset_min: int
+    return_pct: float | None  # None until graded
+    tracked: bool  # whether a mark exists yet at offset_min
+
+
+def public_alert_history(
+    journal_conn: sqlite3.Connection,
+    users_conn: sqlite3.Connection,
+    *,
+    tier: str = "high",
+    offset_min: int = 30,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+) -> list[PublicAlertRow]:
+    """Every real alert, sent-timestamp verified, newest first.
+
+    A HIGH detection appears here the moment it's actually delivered
+    (outbox.status = 'delivered'), not the moment it's detected or
+    marked alerted=1 in journal.db (that flag means "send was
+    initiated," not "confirmed delivered" -- see runner.process_new_bar).
+    A detection with no matching delivered outbox row -- in flight, or
+    never actually sent live (a replay/dev run) -- does not appear at
+    all, rather than with a fabricated or missing timestamp. This is
+    what makes the record append-only in practice, not just in
+    intent: a row can only ever go from "not here yet" to "here, with
+    a real time," never the reverse and never edited in place.
+
+    A row still appears before it's graded (return_pct=None,
+    tracked=False) -- the same "pending, never hidden" rule the
+    dashboard's own Signals view already uses; excluding ungraded
+    rows would just be cherry-picking on a delay.
+
+    since/until bound d.ts_utc (detection time, indexed and always
+    within seconds of the real send) for the SQL scan; the returned
+    list is then sorted by the real sent_at, since that (not
+    detection time) is the property "append-only sequence" refers to.
+
+    tier/offset_min: see track_record()'s docstring for why 30m is the
+    canonical horizon this project already treats as the answer to
+    "did it work" everywhere else the question comes up."""
+    query = "SELECT id, symbol, headlines, trend, origin, close, ts_utc FROM detections WHERE tier = ? AND alerted = 1"
+    params: list = [tier]
+    if since is not None:
+        query += " AND ts_utc >= ?"
+        params.append(since)
+    if until is not None:
+        query += " AND ts_utc < ?"
+        params.append(until)
+    rows = journal_conn.execute(query, params).fetchall()
+    if not rows:
+        return []
+
+    ids = [r[0] for r in rows]
+    placeholders = ",".join("?" * len(ids))
+
+    marks_by_id = dict(
+        journal_conn.execute(
+            f"SELECT detection_id, price FROM marks WHERE offset_min = ? AND detection_id IN ({placeholders})",
+            [offset_min, *ids],
+        ).fetchall()
+    )
+    sent_by_id = dict(
+        users_conn.execute(
+            f"SELECT alert_id, MIN(delivered_at) FROM outbox "
+            f"WHERE status = 'delivered' AND alert_id IN ({placeholders}) GROUP BY alert_id",
+            ids,
+        ).fetchall()
+    )
+
+    result = []
+    for id_, symbol, headlines, trend, origin, close, _ts_utc in rows:
+        sent_at = sent_by_id.get(id_)
+        if sent_at is None:
+            continue
+        price = marks_by_id.get(id_)
+        result.append(
+            PublicAlertRow(
+                detection_id=id_,
+                symbol=symbol,
+                headline=headlines,
+                trend=trend,
+                origin=origin or "watchlist",
+                sent_at=sent_at,
+                offset_min=offset_min,
+                return_pct=_signed_return_pct(close, price, trend) if price is not None else None,
+                tracked=price is not None,
+            )
+        )
+    result.sort(key=lambda r: r.sent_at, reverse=True)
+    if limit is not None:
+        result = result[:limit]
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -347,8 +494,7 @@ def random_real_win(
     ).fetchall()
     wins = []
     for detection_id, symbol, kinds, headlines, trend, close, price, ts_utc in rows:
-        raw = (price - close) / close * 100
-        signed = raw if trend == "up" else -raw
+        signed = _signed_return_pct(close, price, trend)
         if signed > 0:
             wins.append(
                 RealWin(
@@ -393,8 +539,7 @@ def random_real_day_hit_rate(
     ).fetchall()
     by_session: dict[str, list[bool]] = {}
     for session, close, trend, price in rows:
-        raw = (price - close) / close * 100
-        signed = raw if trend == "up" else -raw
+        signed = _signed_return_pct(close, price, trend)
         by_session.setdefault(session, []).append(signed > 0)
 
     candidates = [
