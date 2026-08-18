@@ -225,7 +225,7 @@ replay; zero double-pushes in replay; confirmed-cohort close-continuation
 
 ---
 
-## Proposal 3 — Extreme-mover persistence check (cause 7) — READY TO BUILD, 1 owner decision
+## Proposal 3 — Extreme-mover persistence check (cause 7) — SHIPPED 2026-08-17
 
 Replace the 25% hard silence (guard.py:127–131) with evidence-of-reality:
 past 25%, the alert goes out if the move **persists across two consecutive
@@ -332,7 +332,7 @@ loudly. Build size: S.
 
 ---
 
-## Proposal 5 — Off-watchlist reach + cache hygiene (cause 5 + hygiene) — HYGIENE READY, screening partly deferred
+## Proposal 5 — Off-watchlist reach + cache hygiene (cause 5 + hygiene) — 5b/5c SHIPPED 2026-08-17, 5a screening partly deferred
 
 ### 5a — Pre-open gap promotion (feasible now)
 
@@ -443,8 +443,8 @@ before the next.
 | # | Ship | Why this position | Status |
 |---|---|---|---|
 | 1 | **P5b+5c** — hygiene: floor, runt purge, 20-session SIP backfill | The substrate. P1's profiles and P2's volume gate need clean SIP history; smallest risk; pure win. | **SHIPPED 2026-08-17** (PR #49 code, PR #50 DEPLOYMENT.md follow-up). See Ship log below. |
-| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). | **Next up.** Owner decision (spread guard Option B) and VPS validation command are both already resolved/specified above — ready to build. |
-| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. | Queued behind #2. |
+| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). | **SHIPPED 2026-08-17** (PR #52). See Ship log below. |
+| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. | **Next up.** SIP-clean revalidation window confirmed (see Ship #1's log entry) — ready to build. |
 | 4 | **P1** — time-of-day profiles | Biggest surface area; profiles ready from ship 1's backfill; full recalibration ritual included. | Queued behind #3. |
 | 5 | **P4** — earnings wiring | Pairs naturally once P2's cards can carry the earnings tag. | Queued behind #4. |
 | 6 | **P6 phase 1** — cohort lines | After P1/P2 settle, so cohort definitions are stable before annotating with them. | Queued behind #5. |
@@ -487,14 +487,46 @@ before the next.
   ~2–3% share of consolidated tape for a ~40M-share day — i.e. the
   "runt" numbers are the right *order of magnitude* for an IEX-only
   read, not an arbitrary low number.
-- P1/P2 revalidation window's SIP-cleanliness (are the ~17-18
-  "skipped (exists)" files per symbol genuinely from the 08-12 01:19
-  SIP backfill, not stale pre-flip IEX remnants) is a file-mtime check
-  **run on the VPS, not yet executed as of this write-up** — see the
-  one-command verification in the HANDOFF section below. This gates
-  ships #3 (P2) and #4 (P1), which actually consume that window; it
-  does not block ship #2 (P3), which per the table above is independent
-  of it.
+- P1/P2 revalidation window's SIP-cleanliness: **confirmed 2026-08-17**
+  — the file-mtime check (HANDOFF section) came back **empty**. Every
+  cached intraday file across the whole watchlist postdates the 08-12
+  01:19 SIP backfill; zero pre-flip IEX remnants in the trailing
+  20-session window. Ships #3 (P2) and #4 (P1) are clear to consume it.
+
+**Ship #2 (P3), 2026-08-17 — merged, deployed, VPS-verified.**
+
+- Code: PR #52. `tradebot/guard.py`'s `extreme_mover_evidence()` (past
+  25%, verified by two consecutive real-volume bars closing within 10%
+  of each other) replaces the flat suppression; Option B's widened 15%
+  spread ceiling for a verified mover only, silent above it; sub-25%
+  behavior structurally can't change (the carve-out is gated on
+  evidence that can't exist below the line). `spread_pct_of_mid()`
+  shared between the guard check and the rendered card so the two can
+  never disagree. `extreme_mover`/`extreme_mover_gap_pct`/
+  `extreme_mover_volume` journal columns, NULL unless verified. 24 new
+  tests incl. all three synthetic bad-print shapes (single spike, zero
+  volume, crossed quotes) still suppressing; full suite 828 passed.
+  `run_replay` before/after on 2026-08-04: identical tier counts (no
+  extreme movers in local cache — the expected null result).
+- VPS acceptance run, 2026-08-17: `scripts/verify_extreme_mover_evidence.py`
+  (no args — swept the full cache tree, not narrowed to the two
+  originally-named incident movers, which were never identified by
+  symbol) found **43 real `>25%` sessions** across the broad-scan/
+  screening universe, 2026-08-12 through 08-17 (none on WATCHLIST).
+  **42 of 43 verify; 1 (DFSC, 08-13) correctly doesn't** — a real
+  single-bar spike (38.4%) reverting to 0.8% one bar later, exactly
+  the shape the persistence check exists to reject. Independently
+  re-checked against the saved output (not just re-trusting the live
+  run): zero `VERIFIED` bars at zero volume; the two boundary lines
+  printing `gap=25.0%` are both genuinely `>25%` in real float math
+  (one a float-rounding hair above the line, one a real 25.04% move) —
+  no false positives found. Caveat carried forward honestly: this
+  proves the shipped predicate's correctness at real production scale,
+  not a literal identification of the two historically-suppressed
+  rows named in the investigation (that would need a `journal.db`
+  cross-reference on `suppress_reason LIKE
+  'data_integrity_failed: extreme_prior_close_gap%'`, offered but not
+  run — the owner accepted the broader evidence as sufficient).
 
 ---
 
