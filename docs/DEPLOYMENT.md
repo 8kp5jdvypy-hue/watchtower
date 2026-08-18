@@ -19,6 +19,7 @@ backup.
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |
 | `scripts/backup.sh` | `.backup`-based dump of `journal.db`/`users.db`/`universe.db`, gzipped, rotated after 14 days by default. Also ships `journal.db`/`users.db`/`.env` off-box, GPG-encrypted, once `/opt/perch/.backup-env` is configured — see Backups below |
+| `scripts/fetch_cache.py`, `scripts/purge_and_backfill_runts.py`, and other `scripts/*.py` tools | Not in the image (see Dockerfile) and need the app's real deps — see "Running `scripts/` tools in-container" below for the one correct invocation |
 
 ## First-time VPS setup
 
@@ -277,6 +278,85 @@ silently reverts to that same `"unknown"`.
 `restart: unless-stopped` plus `depends_on` means `bot`/`runner` don't
 need to be stopped by hand — Compose recreates whichever service's
 image actually changed.
+
+## Running `scripts/` tools in-container
+
+Neither of the two obvious ways to run a `scripts/*.py` tool on this box
+works out of the box:
+
+- **Bare host `python3`** doesn't have the app's dependencies —
+  `requirements.txt` is only ever `pip install`ed inside the Docker
+  build (see `Dockerfile`), never on the host itself. This is why a
+  script fails with `ModuleNotFoundError: exchange_calendars` (or any
+  other dependency) when run directly on the VPS.
+- **`docker compose exec runner python3 scripts/foo.py`** fails
+  differently — the image only `COPY`s `tradebot/` (see `Dockerfile`);
+  `scripts/`, `docs/`, and `.git` are deliberately not in it. `exec`
+  also can't fix this even with `-v`: it attaches to the *existing*,
+  already-running container, whose mounts were fixed at `docker compose
+  up` time — you cannot add a new bind mount to a container that's
+  already running.
+
+**The one correct invocation** — a fresh, one-off container built from
+the same image/config as the `runner` service (so it has the real deps
+and `.env`), with the host's `scripts/` bind-mounted in just for this
+run:
+
+```bash
+cd /opt/perch
+docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
+  python3 scripts/<name>.py [args...]
+```
+
+`run` (not `exec`) is what makes the extra `-v` possible — it creates a
+new container rather than attaching to the long-running restart-always
+one, so `--rm` afterward leaves nothing behind and the live `runner`
+process is never touched. Add `-e SOME_VAR=value` before `runner` to
+override or add an env var for just that one run (`.env` still loads
+normally via the service's own `env_file:`).
+
+This is also how the July SIP backfill was originally done — the
+invocation just wasn't written down anywhere until now (`docs/BACKLOG.md`
+tracked that as a known gap since 2026-08-12). The same pattern works
+for any current or future `scripts/` tool, not just the two below. Use
+it as the one invocation path, not a per-script special case.
+
+### Ship #1 (P5b) example: runt purge + SIP backfill
+
+```bash
+cd /opt/perch
+
+# 1. Report which cached sessions actually fail the plausibility floor
+#    (docs/open-awareness-proposals-2026-08.md, Proposal 5c) -- no files
+#    touched yet.
+docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
+  python3 scripts/purge_and_backfill_runts.py
+
+# 2. Delete exactly the files the report named.
+docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
+  python3 scripts/purge_and_backfill_runts.py --apply
+
+# 3. Refetch under SIP -- also backfills each symbol up to 20 SIP
+#    sessions total (fetch_cache.py's default --sessions-n), which is
+#    what Proposal 1/2's baselines need.
+docker compose run --rm -v /opt/perch/scripts:/app/scripts \
+  -e DETECTOR_DATA_FEED=sip runner \
+  python3 scripts/fetch_cache.py --sessions-n 20
+```
+
+Two standing warnings for any manual cache operation on this box
+(the mechanism behind the 2026-08-12 incident is now fixed at the code
+level, but these are still true operationally):
+
+- **Never delete a current trading day's own intraday cache file before
+  that day's `backfill_marks()` has run** at session close — it's the
+  only source `backfill_marks()` reads to compute AFTER DETECTION
+  outcomes for that session's detections.
+- **`fetch_cache.py` cannot refetch the current day at all** — its
+  session walk-back deliberately starts at `date.today() - 1` (today's
+  cache is instead written by the live pipeline's own close-time
+  fetch, `runner._cache_todays_intraday_bars`). Don't expect step 3
+  above to touch today's file, on today or any day.
 
 ## Frontend deploys (Cloudflare Workers) — two separate Workers, easy to conflate
 
