@@ -178,6 +178,39 @@ def test_set_news_driven_records_kind_and_severity(tmp_path):
     assert row == (1, "earnings", "suppress")
 
 
+def test_set_extreme_mover_records_gap_pct_and_verified_volume(tmp_path):
+    from tradebot.journal import set_extreme_mover
+
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+    )
+    conn.commit()
+    set_extreme_mover(conn, detection_id, gap_pct=0.488, verified_volume=412_345)
+    row = conn.execute(
+        "SELECT extreme_mover, extreme_mover_gap_pct, extreme_mover_volume FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (1, 0.488, 412_345)
+
+
+def test_extreme_mover_stays_null_when_never_set(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc", primary_kind="gap",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT extreme_mover, extreme_mover_gap_pct, extreme_mover_volume FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (None, None, None)
+
+
 def test_cluster_id_is_deterministic():
     a = cluster_id("SPY", "2026-06-15", "2026-06-15T14:00:00+00:00", "gap")
     b = cluster_id("SPY", "2026-06-15", "2026-06-15T14:00:00+00:00", "gap")

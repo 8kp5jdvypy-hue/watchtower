@@ -47,7 +47,7 @@ from tradebot.costs import select_contract
 from tradebot import dedup
 from tradebot.events import active_event_window, events_for_date, has_earnings_before
 from tradebot.rendering import templates
-from tradebot.guard import validate_alert_data
+from tradebot.guard import extreme_mover_evidence, validate_alert_data
 from tradebot import metrics
 from tradebot.telegram_bot import heartbeat as bot_liveness
 from tradebot.telegram_bot import outbox
@@ -79,6 +79,7 @@ from tradebot.journal import (
     record_contract_forward_mid,
     record_contract_selection,
     record_iv_sample,
+    set_extreme_mover,
     set_news_driven,
     set_no_trade,
     tier_performance,
@@ -499,6 +500,16 @@ def process_new_bar(
             cluster, anchors, quote, bars=bars, now=now, primary_detection=result["primary_detection"],
         )
         if guard_reason is None:
+            # Proposal 3: re-derive the same evidence validate_alert_data
+            # just used internally to decide whether to suppress -- guard.py
+            # keeps its str|None contract unchanged (see its module
+            # docstring), so tagging a PASS is the caller's job, using the
+            # same pure inputs it already has at this exact call site.
+            mover = extreme_mover_evidence(bars, anchors, quote)
+            if mover is not None:
+                set_extreme_mover(conn, detection_id, gap_pct=mover.gap_pct, verified_volume=mover.verified_volume)
+                metrics.increment("extreme_mover_verified", symbol=symbol)
+
             similar_setups = historical_performance(
                 conn, kind=result["primary_kind"], trend=result["trend"], exclude_id=detection_id,
                 lookback=SIMILAR_SETUPS_LOOKBACK,
@@ -551,7 +562,9 @@ def process_new_bar(
                     selection.no_trade.detail if selection.no_trade else "", selection.expiry,
                 )
 
-            text = templates.render_high_alert(cluster, anchors, quote, selection, similar_setups, news_driven=news_driven)
+            text = templates.render_high_alert(
+                cluster, anchors, quote, selection, similar_setups, news_driven=news_driven, extreme_mover=mover,
+            )
             # Commits the detection (and everything enriched onto it
             # above: news_driven, lifecycle_state, no_trade) before the
             # alert referencing it can exist. See _commit_then_send.

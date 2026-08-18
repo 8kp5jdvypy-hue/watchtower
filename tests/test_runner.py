@@ -835,6 +835,65 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     }
 
 
+def test_process_new_bar_tags_and_renders_a_verified_extreme_mover(monkeypatch, tmp_path):
+    """End-to-end Proposal 3: a >25% move persisting across two
+    consecutive real-volume bars clears guard.py, gets journaled via
+    set_extreme_mover, emits the metric, and the rendered card carries
+    the EXTREME MOVER prefix -- not just the guard predicate in
+    isolation (see test_guard.py for that)."""
+    from tradebot import metrics as metrics_mod
+
+    metrics_path = tmp_path / "metrics.json"
+    monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", metrics_path)
+
+    anchors = DailyAnchors(
+        symbol="TSLA", session_date=date(2026, 7, 23), prior_close=100.0, prior_high=101.0, prior_low=99.0,
+        opening_range_high=100.5, opening_range_low=99.5, opening_range_volume=1000,
+        swing_high=102.0, swing_low=98.0, avg_cum_volume_by_bar={},
+    )
+    base = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    bars = [
+        Bar("TSLA", base, 100.0, 100.5, 99.5, 100.0, volume=10_000),
+        Bar("TSLA", base + timedelta(minutes=5), 100.0, 141.0, 139.0, 140.0, volume=50_000),
+        Bar("TSLA", base + timedelta(minutes=10), 140.0, 141.0, 137.0, 138.0, volume=60_000),
+    ]
+    primary_detection = Detection("TSLA", "gap", bars[-1].ts, 10.0, "a gap", {})
+    result = {
+        "ts": datetime(2026, 7, 23, 13, 40, tzinfo=timezone.utc), "close": 138.0, "atr14": 1.0,
+        "kinds": "gap", "primary_kind": "gap", "primary_headline": "a gap", "headlines": "a gap",
+        "primary_detection": primary_detection,
+        "score": 10.0, "trend": "up", "detections": [primary_detection],
+    }
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, b, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bars[-1].ts)
+    stats = HeartbeatStats(start_time=bars[-1].ts, session_date=date(2026, 7, 23))
+    alerter = _SpyAlerter()
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bars[-1].ts, bid=137.9, ask=138.1, last=138.0)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, alerter, "v1", "TSLA", date(2026, 7, 23), bars, anchors, quote_fn, chain_fn, stats)
+
+    detection_id = conn.execute("SELECT id FROM detections").fetchone()[0]
+    row = conn.execute(
+        "SELECT extreme_mover, extreme_mover_gap_pct, extreme_mover_volume FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row[0] == 1
+    assert row[1] == pytest.approx(0.38)
+    assert row[2] == 110_000
+
+    assert len(alerter.sent) == 1
+    assert "EXTREME MOVER" in alerter.sent[0][0]
+
+    assert metrics_mod.read_all(metrics_path) == {"extreme_mover_verified{symbol=TSLA}": 1}
+
+
 def test_process_new_bar_selects_a_contract_and_journals_it(monkeypatch):
     """End-to-end: a real chain_fn produces a real ContractSelection that
     reaches templates.render_high_alert and gets journaled — not a

@@ -9,9 +9,11 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from tradebot.alerts import Cluster
 from tradebot.detectors import DailyAnchors, Detection
-from tradebot.guard import validate_alert_data
+from tradebot.guard import extreme_mover_evidence, spread_pct_of_mid, validate_alert_data
 from tradebot.marketdata import Bar, Quote
 
 
@@ -245,3 +247,135 @@ def test_allows_a_large_but_plausible_gap():
     reason = validate_alert_data(_cluster(close=320.0), _anchors(), _quote(last=320.0, bid=319.98, ask=320.02),
                                   bars=_bars(last_low=319, last_high=380.5))
     assert reason is None
+
+
+# ---------------------------------------------------------------------- #
+# Proposal 3: extreme-mover persistence check
+# (docs/open-awareness-proposals-2026-08.md)
+# ---------------------------------------------------------------------- #
+
+
+def _extreme_mover_bars(prior_close=100.0, close1=140.0, close2=138.0, volume=50_000, symbol="GOOGL"):
+    """Prior bar at prior_close, then two consecutive bars closing beyond
+    it -- the shape extreme_mover_evidence looks for. close1/close2
+    default within 10% of each other so the happy path is the default."""
+    base = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    lo = min(prior_close, close1, close2) - 1
+    hi = max(prior_close, close1, close2) + 1
+    return [
+        Bar(symbol, base, prior_close, prior_close + 0.5, prior_close - 0.5, prior_close, volume=10_000),
+        Bar(symbol, base + timedelta(minutes=5), prior_close, hi, lo, close1, volume=volume),
+        Bar(symbol, base + timedelta(minutes=10), close1, hi, lo, close2, volume=volume),
+    ]
+
+
+def _quote_for_spread(last: float, spread_pct: float, ts=datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc)) -> Quote:
+    half = last * spread_pct / 2
+    return _quote(last=last, bid=last - half, ask=last + half, ts=ts)
+
+
+def test_extreme_mover_evidence_none_within_the_25pct_ceiling():
+    quote = _quote(last=110.0)  # 10% from prior_close=100 -- not extreme at all
+    reason = extreme_mover_evidence(_extreme_mover_bars(close1=110.0, close2=109.0), _anchors(prior_close=100.0), quote)
+    assert reason is None
+
+
+def test_extreme_mover_evidence_none_without_two_bars():
+    quote = _quote(last=140.0)
+    assert extreme_mover_evidence(None, _anchors(prior_close=100.0), quote) is None
+    assert extreme_mover_evidence([], _anchors(prior_close=100.0), quote) is None
+    one_bar = _extreme_mover_bars()[-1:]
+    assert extreme_mover_evidence(one_bar, _anchors(prior_close=100.0), quote) is None
+
+
+def test_extreme_mover_evidence_none_when_a_persistence_bar_has_zero_volume():
+    bars = _extreme_mover_bars(volume=0)
+    quote = _quote(last=138.0)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote) is None
+
+
+def test_extreme_mover_evidence_none_when_only_one_bar_crosses_the_line():
+    # bars[-2] close (110 -- 10% from prior_close) never crosses 25%, even
+    # though bars[-1] (140 -- 40%) does
+    bars = _extreme_mover_bars(close1=110.0, close2=140.0)
+    quote = _quote(last=140.0)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote) is None
+
+
+def test_extreme_mover_evidence_none_when_the_two_closes_diverge_too_much():
+    # both bars are well past 25%, but 60 apart on a ~170 base (~35%) --
+    # a real level shouldn't be moving that fast bar-to-bar
+    bars = _extreme_mover_bars(close1=140.0, close2=200.0)
+    quote = _quote(last=200.0)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote) is None
+
+
+def test_extreme_mover_evidence_none_when_bars_disagree_on_direction_with_the_quote():
+    # quote says +40% (140), but the persistence bars actually show a
+    # -40% move (60) -- not evidence FOR the quote's own claimed move
+    bars = _extreme_mover_bars(close1=60.0, close2=62.0)
+    quote = _quote(last=140.0)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote) is None
+
+
+def test_extreme_mover_evidence_verified_carries_gap_pct_and_summed_volume():
+    bars = _extreme_mover_bars(close1=140.0, close2=138.0, volume=50_000)
+    quote = _quote(last=138.0)
+    evidence = extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote)
+    assert evidence is not None
+    assert evidence.gap_pct == pytest.approx(0.38)
+    assert evidence.verified_volume == 100_000
+
+
+def test_spread_pct_of_mid_matches_the_guards_own_formula():
+    quote = _quote(bid=95.0, ask=105.0)
+    assert spread_pct_of_mid(quote) == pytest.approx(0.10, abs=1e-9)
+
+
+def test_spread_pct_of_mid_none_on_non_positive_mid():
+    quote = _quote(bid=-5.0, ask=5.0)  # mid == 0
+    assert spread_pct_of_mid(quote) is None
+
+
+def test_verified_extreme_mover_bypasses_the_gap_suppression():
+    bars = _extreme_mover_bars(close1=140.0, close2=138.0)
+    reason = validate_alert_data(
+        _cluster(close=138.0), _anchors(prior_close=100.0), _quote_for_spread(138.0, 0.01), bars=bars,
+    )
+    assert reason is None
+
+
+def test_verified_extreme_mover_gets_the_widened_15pct_spread_ceiling():
+    # 11% spread -- would fail the normal 5% ceiling, passes the 15% one
+    bars = _extreme_mover_bars(close1=140.0, close2=138.0)
+    reason = validate_alert_data(
+        _cluster(close=138.0), _anchors(prior_close=100.0), _quote_for_spread(138.0, 0.11), bars=bars,
+    )
+    assert reason is None
+
+
+def test_verified_extreme_mover_still_suppressed_above_the_15pct_spread_ceiling():
+    # Option B is explicit: silent above 15%, even with verified persistence
+    bars = _extreme_mover_bars(close1=140.0, close2=138.0)
+    reason = validate_alert_data(
+        _cluster(close=138.0), _anchors(prior_close=100.0), _quote_for_spread(138.0, 0.20), bars=bars,
+    )
+    assert reason is not None and reason.startswith("spread_too_wide") and "15%" in reason
+
+
+def test_unverified_extreme_mover_keeps_only_the_normal_5pct_spread_ceiling():
+    # gap is real (40%) but persistence fails (only one bar crosses) --
+    # must NOT get the widened ceiling just because the quote is extreme
+    bars = _extreme_mover_bars(close1=110.0, close2=140.0)
+    reason = validate_alert_data(
+        _cluster(close=140.0), _anchors(prior_close=100.0), _quote_for_spread(140.0, 0.11), bars=bars,
+    )
+    assert reason is not None and reason.startswith("spread_too_wide") and "5%" in reason
+
+
+def test_sub_25pct_move_is_unaffected_by_the_extreme_mover_carve_out():
+    # a normal ~10% move must still use the normal 5% spread ceiling --
+    # regression guard: no change to sub-25% behavior
+    bars = _bars()
+    reason = validate_alert_data(_cluster(), _anchors(), _quote_for_spread(366.0, 0.11), bars=bars)
+    assert reason is not None and reason.startswith("spread_too_wide") and "5%" in reason

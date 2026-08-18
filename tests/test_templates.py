@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 from tradebot.alerts import Cluster
 from tradebot.costs import Breakeven, ContractSelection, Leg
 from tradebot.detectors import DailyAnchors
+from tradebot.guard import ExtremeMoverEvidence
 from tradebot.rendering import templates
 from tradebot.journal import HistoricalPerformance, TierPerformance
 from tradebot.marketdata import OptionContract, Quote
@@ -185,6 +186,32 @@ def test_render_high_alert_tags_a_screening_origin_cluster_in_plain_text():
 def test_render_high_alert_omits_the_radar_tag_for_a_watchlist_cluster():
     text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
     assert "RADAR" not in text
+
+
+def test_render_high_alert_shows_the_extreme_mover_prefix_with_evidence_and_spread():
+    """Proposal 3 (docs/open-awareness-proposals-2026-08.md): the card
+    states the evidence (bar count, real volume) and the spread as
+    context, not a gate — Option B."""
+    wide_quote = Quote(symbol="GOOGL", ts=datetime(2026, 7, 23, 16, 5, tzinfo=timezone.utc), bid=340.0, ask=392.0, last=366.00)
+    evidence = ExtremeMoverEvidence(gap_pct=0.488, verified_volume=412_345)
+    text = templates.render_high_alert(_cluster(), _anchors(), wide_quote, None, _history(), extreme_mover=evidence)
+    assert "<b>EXTREME MOVER</b> 48.80% vs prior close — verified across 2 bars, 412,345 shares" in text
+    assert "spread " in text and "wide market" in text
+
+
+def test_render_high_alert_extreme_mover_prefix_still_exactly_one_emoji():
+    """The one-emoji-per-message rule (see test_render_high_alert_has_
+    exactly_one_emoji_the_tier_marker) still applies with the
+    extreme-mover prefix present — no rocket, no warning emoji."""
+    evidence = ExtremeMoverEvidence(gap_pct=0.488, verified_volume=412_345)
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history(), extreme_mover=evidence)
+    tier_emojis = {"🔴", "🟡", "⚪"}
+    assert [ch for ch in text if ch in tier_emojis] == ["🔴"]
+
+
+def test_render_high_alert_omits_the_extreme_mover_prefix_by_default():
+    text = templates.render_high_alert(_cluster(), _anchors(), _quote(), None, _history())
+    assert "EXTREME MOVER" not in text
 
 
 def test_render_digest_golden():
