@@ -10,12 +10,32 @@ import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 from tradebot.detectors import Bar
 
 ET = ZoneInfo("America/New_York")
+
+# Proposal 5c (docs/open-awareness-proposals-2026-08.md): a cached
+# session is implausible -- and must never join a baseline (rvol,
+# P1's future TR profile) or be written to disk at close -- when its
+# RTH volume or bar count is a fraction of what a healthy session
+# looks like. Re-verified 2026-08-17 by running this shipped code (not
+# the doc's own scratch script) against all 2,448 local cache files:
+# the volume floor trips 3 files (0.12%; the doc's own scratch
+# calibration found 4 -- the gap is this implementation computing each
+# session's reference from the trailing window of already-ACCEPTED
+# sessions rather than raw surrounding history, a deliberate choice --
+# see filter_plausible_sessions), all genuinely degenerate IEX-thin USO
+# days. The bar-count floor at 50% (not a tighter 75%) trips zero of
+# those same files: the thinnest local session is exactly 39 of 78
+# expected bars (50% on the nose), and real IEX-thin USO sessions have
+# been observed as low as 38 bars without being early closes -- 75%
+# would have false-tripped on the whole cluster.
+VOLUME_FLOOR_PCT = 0.20
+BAR_COUNT_FLOOR_PCT = 0.50
+PLAUSIBILITY_WINDOW_SESSIONS = 20  # trailing sessions the volume median is computed over
 
 
 @dataclass(frozen=True)
@@ -144,6 +164,93 @@ def _is_rth(bar: Bar) -> bool:
 def _is_premarket(bar: Bar) -> bool:
     local = bar.ts.astimezone(ET)
     return (4, 0) <= (local.hour, local.minute) < (9, 30)
+
+
+def median_session_volume(session_totals: Sequence[float]) -> float | None:
+    """Median of a symbol's per-session RTH volume totals -- the
+    plausibility floor's volume reference. None (not 0) if there is
+    nothing to compare against yet, since "no history" is not the same
+    claim as "history says zero volume is normal"."""
+    if not session_totals:
+        return None
+    ordered = sorted(session_totals)
+    n = len(ordered)
+    mid = n // 2
+    return float(ordered[mid]) if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def implausible_session_reason(
+    bars: Sequence[Bar], *, median_volume: float | None, expected_bar_count: int
+) -> str | None:
+    """Proposal 5c's plausibility floor. `bars` must already be RTH-only
+    (see _is_rth) -- this makes no attempt to filter premarket bars out
+    itself, so a caller handing it a mixed session would silently pollute
+    both checks.
+
+    median_volume: the symbol's trailing-window median RTH session
+    volume (see median_session_volume) -- None skips the volume check
+    entirely (nothing plausible/implausible to compare against for a
+    symbol's first cached sessions).
+
+    expected_bar_count: the calendar-expected RTH bar count for this
+    exact session date (see runner.expected_rth_bar_count) -- computed
+    per-session so an early close is never mistaken for a runt.
+
+    Returns a rejection reason (stable, short rule-name prefix, mirroring
+    tradebot.guard's convention) or None if the session passes."""
+    total_volume = sum(b.volume for b in bars)
+    if median_volume is not None and median_volume > 0:
+        floor = VOLUME_FLOOR_PCT * median_volume
+        if total_volume < floor:
+            return (
+                f"implausible_volume: {total_volume:,} RTH volume is below "
+                f"{VOLUME_FLOOR_PCT * 100:.0f}% of the {median_volume:,.0f} trailing "
+                f"{PLAUSIBILITY_WINDOW_SESSIONS}-session median ({floor:,.0f})"
+            )
+
+    bar_floor = BAR_COUNT_FLOOR_PCT * expected_bar_count
+    if len(bars) < bar_floor:
+        return (
+            f"implausible_bar_count: {len(bars)} RTH bars is below "
+            f"{BAR_COUNT_FLOOR_PCT * 100:.0f}% of the {expected_bar_count} calendar-expected "
+            f"({bar_floor:.0f})"
+        )
+    return None
+
+
+def filter_plausible_sessions(
+    sessions: Sequence[tuple[date, Sequence[Bar]]],
+    expected_bar_count_fn: Callable[[date], int],
+    *,
+    window: int = PLAUSIBILITY_WINDOW_SESSIONS,
+) -> tuple[list[Sequence[Bar]], list[tuple[date, str]]]:
+    """Applies the plausibility floor to an ordered (oldest first)
+    sequence of one symbol's cached sessions, e.g. before they can join
+    the rvol baseline (avg_cum_volume_by_bar) or a future TR profile.
+
+    Each session's volume is judged against the median of the `window`
+    sessions immediately preceding it THAT ALREADY PASSED the floor --
+    not the raw surrounding history -- so a run of runt files can't drag
+    the reference down for the sessions after them. A session with fewer
+    than one prior accepted session only faces the bar-count check (see
+    implausible_session_reason).
+
+    Returns (accepted RTH bar sequences, [(date, reason), ...]
+    rejections), both oldest-first."""
+    accepted: list[Sequence[Bar]] = []
+    accepted_totals: list[float] = []
+    rejections: list[tuple[date, str]] = []
+    for session_date, bars in sessions:
+        median_volume = median_session_volume(accepted_totals[-window:])
+        reason = implausible_session_reason(
+            bars, median_volume=median_volume, expected_bar_count=expected_bar_count_fn(session_date)
+        )
+        if reason is not None:
+            rejections.append((session_date, reason))
+            continue
+        accepted.append(bars)
+        accepted_totals.append(sum(b.volume for b in bars))
+    return accepted, rejections
 
 
 class ReplayMarketData:

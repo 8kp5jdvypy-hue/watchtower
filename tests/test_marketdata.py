@@ -12,7 +12,13 @@ from pathlib import Path
 import pytest
 
 from tradebot.detectors import Bar
-from tradebot.marketdata import ReplayMarketData, write_bars_csv
+from tradebot.marketdata import (
+    ReplayMarketData,
+    filter_plausible_sessions,
+    implausible_session_reason,
+    median_session_volume,
+    write_bars_csv,
+)
 
 SYMBOL = "TEST"
 SESSION = date(2026, 6, 15)
@@ -209,3 +215,105 @@ def test_write_bars_csv_creates_parent_directories(tmp_path):
     write_bars_csv(path, [Bar(symbol="NEWSYMBOL", ts=datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1)])
 
     assert path.exists()
+
+
+# --------------------------------------------------------------------------
+# Proposal 5c — plausibility floor (docs/open-awareness-proposals-2026-08.md)
+# --------------------------------------------------------------------------
+
+
+def _rth_bars(n: int, volume: int = 1000, symbol: str = SYMBOL) -> list[Bar]:
+    rth_open = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    return [
+        Bar(symbol=symbol, ts=rth_open + timedelta(minutes=BAR_MINUTES * i), open=100, high=100.5, low=99.5, close=100.1, volume=volume)
+        for i in range(n)
+    ]
+
+
+def test_median_session_volume_none_with_no_history():
+    assert median_session_volume([]) is None
+
+
+def test_median_session_volume_odd_count_is_the_middle_value():
+    assert median_session_volume([10.0, 30.0, 20.0]) == 20.0
+
+
+def test_median_session_volume_even_count_averages_the_middle_two():
+    assert median_session_volume([10.0, 20.0, 30.0, 40.0]) == 25.0
+
+
+def test_implausible_session_reason_passes_a_healthy_session():
+    bars = _rth_bars(78, volume=1000)  # 78,000 total, 78/78 expected bars
+    assert implausible_session_reason(bars, median_volume=100_000.0, expected_bar_count=78) is None
+
+
+def test_implausible_session_reason_skips_volume_check_with_no_reference():
+    # 1 bar is still below the 50% bar-count floor even with n=1's tiny
+    # expected count, so use an expected count this single bar satisfies.
+    bars = _rth_bars(1, volume=1)
+    assert implausible_session_reason(bars, median_volume=None, expected_bar_count=1) is None
+
+
+def test_implausible_session_reason_rejects_below_the_volume_floor():
+    # 78 bars * 100 volume = 7,800 total -- below 20% of a 100,000 median (20,000).
+    bars = _rth_bars(78, volume=100)
+    reason = implausible_session_reason(bars, median_volume=100_000.0, expected_bar_count=78)
+    assert reason is not None and reason.startswith("implausible_volume:")
+
+
+def test_implausible_session_reason_rejects_below_the_bar_count_floor():
+    # 38 of 78 expected bars (~49%) -- the real IEX-thin-USO shape the
+    # 50% threshold was calibrated against (docs/open-awareness-proposals-2026-08.md).
+    bars = _rth_bars(38, volume=1_000_000)  # plenty of volume -- only bar count should trip
+    reason = implausible_session_reason(bars, median_volume=100.0, expected_bar_count=78)
+    assert reason is not None and reason.startswith("implausible_bar_count:")
+
+
+def test_implausible_session_reason_calendar_aware_early_close_not_flagged():
+    # A 13:00 ET early close (39 expected bars) with all 39 present must
+    # never be flagged just because 39 < a regular day's 78.
+    bars = _rth_bars(39, volume=1000)
+    assert implausible_session_reason(bars, median_volume=None, expected_bar_count=39) is None
+
+
+def test_filter_plausible_sessions_accepts_a_uniformly_healthy_run():
+    sessions = [(date(2026, 6, d), _rth_bars(78, volume=1000)) for d in range(1, 6)]
+    accepted, rejections = filter_plausible_sessions(sessions, lambda d: 78)
+    assert len(accepted) == 5
+    assert rejections == []
+
+
+def test_filter_plausible_sessions_rejects_a_runt_without_dropping_the_others():
+    healthy = [(date(2026, 6, d), _rth_bars(78, volume=1000)) for d in range(1, 5)]
+    runt = (date(2026, 6, 5), _rth_bars(5, volume=5000))  # ample volume, far below the bar-count floor
+    sessions = healthy + [runt]
+    accepted, rejections = filter_plausible_sessions(sessions, lambda d: 78)
+    assert len(accepted) == 4
+    assert rejections == [(date(2026, 6, 5), rejections[0][1])]
+    assert rejections[0][1].startswith("implausible_bar_count:")
+
+
+def test_filter_plausible_sessions_median_excludes_a_prior_rejection():
+    """A runt session must not drag the volume reference down for the
+    sessions after it -- the median is computed from ACCEPTED sessions
+    only, per filter_plausible_sessions' docstring."""
+    healthy = [(date(2026, 6, d), _rth_bars(78, volume=100_000)) for d in range(1, 4)]
+    runt = (date(2026, 6, 4), _rth_bars(78, volume=1))  # passes bar count, fails volume once a median exists
+    candidate = (date(2026, 6, 5), _rth_bars(78, volume=25_000))  # 25% of the healthy median -- should PASS
+    sessions = healthy + [runt, candidate]
+    accepted, rejections = filter_plausible_sessions(sessions, lambda d: 78)
+    assert len(accepted) == 4  # 3 healthy + candidate; runt rejected
+    assert [d for d, _ in rejections] == [date(2026, 6, 4)]
+
+
+def test_filter_plausible_sessions_window_caps_the_trailing_reference():
+    """Only the trailing `window` accepted sessions feed the median -- a
+    thin symbol's history from beyond that window can't keep a stale,
+    unrepresentative reference alive forever."""
+    old_thin = [(date(2026, 1, d), _rth_bars(78, volume=100)) for d in range(1, 4)]
+    recent_healthy = [(date(2026, 6, d), _rth_bars(78, volume=100_000)) for d in range(1, 4)]
+    candidate = (date(2026, 6, 10), _rth_bars(78, volume=25_000))  # implausible vs. old_thin, plausible vs. recent_healthy
+    sessions = old_thin + recent_healthy + [candidate]
+    accepted, rejections = filter_plausible_sessions(sessions, lambda d: 78, window=3)
+    assert candidate[0] not in [d for d, _ in rejections]
+    assert candidate[1] in accepted

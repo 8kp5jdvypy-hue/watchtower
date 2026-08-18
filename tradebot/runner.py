@@ -84,7 +84,17 @@ from tradebot.journal import (
     tier_performance,
 )
 from tradebot.journal import write_cluster as journal_write_cluster
-from tradebot.marketdata import LiveMarketData, Quote, ReplayMarketData, write_bars_csv
+from tradebot.marketdata import (
+    PLAUSIBILITY_WINDOW_SESSIONS,
+    LiveMarketData,
+    Quote,
+    ReplayMarketData,
+    _is_rth,
+    filter_plausible_sessions,
+    implausible_session_reason,
+    median_session_volume,
+    write_bars_csv,
+)
 
 SIMILAR_SETUPS_LOOKBACK = 200  # deep enough to realistically reach costs.MIN_SIMILAR_SETUPS_SAMPLE (50)
 
@@ -168,6 +178,39 @@ def full_session_rth_bars(symbol: str, session_date: date, cache_dir: Path = CAC
     while md.advance():
         pass
     return list(md.session_bars(symbol, session_date))
+
+
+def expected_rth_bar_count(session_date: date, calendar=CALENDAR, bar_minutes: int = BAR_MINUTES) -> int:
+    """The calendar-expected number of RTH bars for session_date, honoring
+    early closes -- the plausibility floor's (Proposal 5c) bar-count
+    reference, so a 13:00 ET early close is never mistaken for a runt."""
+    open_ts, close_ts = session_bounds(session_date, calendar)
+    return int((close_ts - open_ts).total_seconds() // (bar_minutes * 60))
+
+
+def _build_history_by_symbol(
+    cache_dir: Path, symbols: list[str], session_date: date, stats: "HeartbeatStats | None" = None,
+) -> dict[str, list[list[Bar]]]:
+    """The baseline-building half of Proposal 5c's plausibility floor:
+    every cached session that feeds a symbol's avg_cum_volume_by_bar (and
+    any future TR profile) is run through filter_plausible_sessions
+    first, so a runt file can never join a baseline. A rejection is never
+    silent -- ERROR log, a metrics counter, and (when stats is given, as
+    both run_live and run_replay do) a heartbeat data_gaps line."""
+    historical_sessions = [s for s in cached_session_dates(cache_dir, symbols) if s < session_date]
+    history_by_symbol: dict[str, list[list[Bar]]] = {}
+    for symbol in symbols:
+        sessions = [(d, full_session_rth_bars(symbol, d, cache_dir)) for d in historical_sessions]
+        accepted, rejections = filter_plausible_sessions(sessions, expected_rth_bar_count)
+        history_by_symbol[symbol] = accepted
+        for rejected_date, reason in rejections:
+            logger.error(
+                "plausibility floor rejected %s %s from the baseline: %s", symbol, rejected_date.isoformat(), reason,
+            )
+            metrics.increment("plausibility_floor_rejection", stage="baseline", symbol=symbol, rule=reason.split(":")[0])
+            if stats is not None:
+                stats.data_gaps.append(f"{symbol} {rejected_date.isoformat()}: {reason}")
+    return history_by_symbol
 
 
 @dataclass
@@ -696,6 +739,33 @@ def _cache_todays_intraday_bars(
             logger.error("fetch_intraday_bars returned no bars for %s on %s despite a detection firing today", symbol, session_date.isoformat())
             failed.append(symbol)
             continue
+
+        # Proposal 5c's plausibility floor, close-time-write half: the
+        # 2026-08-11/12 runts (~1M vs ~40M normal SPY volume) reached the
+        # cache this exact way, with nothing to catch them. A rejection
+        # here means the fetch itself is untrustworthy -- treated the same
+        # as a fetch failure (no file written, symbol counted `failed`),
+        # never silently cached as if it were a real session.
+        reference_sessions = [
+            d for d in cached_session_dates(cache_dir, [symbol]) if d < session_date
+        ][-PLAUSIBILITY_WINDOW_SESSIONS:]
+        median_volume = median_session_volume(
+            [sum(b.volume for b in full_session_rth_bars(symbol, d, cache_dir)) for d in reference_sessions]
+        )
+        reason = implausible_session_reason(
+            [b for b in bars if _is_rth(b)],
+            median_volume=median_volume,
+            expected_bar_count=expected_rth_bar_count(session_date),
+        )
+        if reason is not None:
+            logger.error(
+                "plausibility floor rejected close-time cache write for %s on %s: %s",
+                symbol, session_date.isoformat(), reason,
+            )
+            metrics.increment("plausibility_floor_rejection", stage="close_write", symbol=symbol, rule=reason.split(":")[0])
+            failed.append(symbol)
+            continue
+
         write_bars_csv(cache_dir / symbol / f"intraday_{session_date.isoformat()}.csv", bars)
         succeeded.append(symbol)
     return succeeded, failed
@@ -977,10 +1047,7 @@ def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None
     except Exception:
         stats.errors.append(traceback.format_exc())
 
-    historical_sessions = [s for s in cached_session_dates(cache_dir, WATCHLIST) if s < session_date]
-    history_by_symbol = {
-        symbol: [full_session_rth_bars(symbol, s, cache_dir) for s in historical_sessions] for symbol in WATCHLIST
-    }
+    history_by_symbol = _build_history_by_symbol(cache_dir, WATCHLIST, session_date, stats)
 
     md = {symbol: ReplayMarketData(cache_dir, symbol, session_date) for symbol in WATCHLIST}
     anchors: dict[str, DailyAnchors] = {}
@@ -1223,10 +1290,7 @@ def run_live(
     except Exception:
         stats.errors.append(traceback.format_exc())
 
-    historical_sessions = [s for s in cached_session_dates(CACHE_DIR, WATCHLIST) if s < session_date]
-    history_by_symbol = {
-        symbol: [full_session_rth_bars(symbol, s) for s in historical_sessions] for symbol in WATCHLIST
-    }
+    history_by_symbol = _build_history_by_symbol(CACHE_DIR, WATCHLIST, session_date, stats)
 
     md = {symbol: LiveMarketData(symbol, session_date) for symbol in WATCHLIST}
     anchors: dict[str, DailyAnchors] = {}
