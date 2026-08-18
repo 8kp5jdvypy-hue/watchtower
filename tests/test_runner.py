@@ -18,7 +18,7 @@ import pytest
 from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
 from tradebot.detectors import DailyAnchors, Detection
 from tradebot.events import add_event_window
-from tradebot.marketdata import Bar, Quote, ReplayMarketData
+from tradebot.marketdata import Bar, Quote, ReplayMarketData, write_bars_csv
 from tradebot.journal import backfill_marks
 from tradebot.journal import connect as journal_connect
 from tradebot.journal import write_cluster
@@ -29,8 +29,10 @@ from tradebot.runner import (
     HeartbeatStats,
     _alert_if_backfill_implausible,
     _alert_if_cache_fetch_failed,
+    _build_history_by_symbol,
     bar_gap_minutes,
     evaluate_bar,
+    expected_rth_bar_count,
     full_session_rth_bars,
     is_bar_gap,
     is_halted_bar,
@@ -118,6 +120,15 @@ def test_session_bounds_rejects_non_trading_day():
         session_bounds(date(2026, 7, 25))  # a Saturday
 
 
+def test_expected_rth_bar_count_regular_day():
+    assert expected_rth_bar_count(date(2026, 7, 23)) == 78  # 6.5 hours of 5-min bars
+
+
+def test_expected_rth_bar_count_honors_early_close():
+    # day after Thanksgiving 2026 -- a known 13:00 ET early close (3.5h)
+    assert expected_rth_bar_count(date(2026, 11, 27)) == 42
+
+
 def test_run_live_idles_cleanly_on_a_non_trading_day_instead_of_crashing(monkeypatch):
     """Regression test: run_live() used to call session_bounds() (which
     raises ValueError for a non-trading day) before any other check, so a
@@ -200,6 +211,19 @@ def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
     assert "send" not in stats.suppression_counts
 
 
+def _plausible_session_bars(symbol: str, session_date: date, *, n: int = 78, volume: int = 1000) -> list[Bar]:
+    """A full regular-day's worth of RTH bars (78 == 6.5 hours of 5-min
+    bars) starting at 09:30 ET -- passes Proposal 5c's plausibility floor
+    at both checks, so tests of _cache_todays_intraday_bars that aren't
+    themselves about the floor don't trip it with an unrealistically
+    tiny fake fetch."""
+    rth_open = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(hours=13, minutes=30)
+    return [
+        Bar(symbol=symbol, ts=rth_open + timedelta(minutes=5 * i), open=100, high=100.5, low=99.5, close=100.1, volume=volume)
+        for i in range(n)
+    ]
+
+
 class _SpyAlerter:
     def __init__(self):
         self.sent = []
@@ -272,11 +296,11 @@ def test_cache_todays_intraday_bars_writes_a_readable_file_per_symbol(tmp_path, 
     a real, readable cache file at the exact path backfill_marks() looks
     for."""
     session = date(2026, 8, 12)
-    bar = Bar(symbol="TSLA", ts=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), open=100, high=101, low=99, close=100.5, volume=1000)
+    bars = _plausible_session_bars("TSLA", session)
 
     def fake_fetch(symbol, d):
         assert d == session
-        return [bar]
+        return bars
 
     with caplog.at_level("ERROR"):
         succeeded, failed = runner_mod._cache_todays_intraday_bars(tmp_path, ["TSLA"], session, fetch_fn=fake_fetch)
@@ -289,16 +313,16 @@ def test_cache_todays_intraday_bars_writes_a_readable_file_per_symbol(tmp_path, 
     md = ReplayMarketData(tmp_path, "TSLA", session)
     while md.advance():
         pass
-    assert len(list(md.session_bars("TSLA", session))) == 1
+    assert len(list(md.session_bars("TSLA", session))) == len(bars)
 
 
 def test_cache_todays_intraday_bars_one_symbols_exception_does_not_block_the_rest(caplog, tmp_path):
-    bar = Bar(symbol="AAPL", ts=datetime(2026, 8, 12, 13, 30, tzinfo=timezone.utc), open=1, high=1, low=1, close=1, volume=1)
+    aapl_bars = _plausible_session_bars("AAPL", date(2026, 8, 12))
 
     def flaky_fetch(symbol, d):
         if symbol == "TSLA":
             raise RuntimeError("vendor is down")
-        return [bar]
+        return aapl_bars
 
     with caplog.at_level("ERROR"):
         succeeded, failed = runner_mod._cache_todays_intraday_bars(tmp_path, ["TSLA", "AAPL"], date(2026, 8, 12), fetch_fn=flaky_fetch)
@@ -320,6 +344,79 @@ def test_cache_todays_intraday_bars_empty_result_is_always_a_failure_no_holiday_
     assert succeeded == []
     assert failed == ["TSLA"]
     assert len(caplog.records) == 1
+
+
+def test_cache_todays_intraday_bars_rejects_a_runt_fetch_below_the_plausibility_floor(caplog, tmp_path, monkeypatch):
+    """Proposal 5c, close-time-write half: the exact shape of the
+    2026-08-11/12 incident -- a fetch that returns real bars, but far too
+    few of them for a regular trading day -- must be rejected rather than
+    silently cached as if it were a normal session."""
+    from tradebot import metrics as metrics_mod
+
+    metrics_path = tmp_path / "metrics.json"
+    monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", metrics_path)
+
+    session = date(2026, 8, 12)
+    runt_bars = _plausible_session_bars("TSLA", session, n=5)  # 5 of 78 expected
+
+    with caplog.at_level("ERROR"):
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(
+            tmp_path, ["TSLA"], session, fetch_fn=lambda s, d: runt_bars,
+        )
+
+    assert succeeded == []
+    assert failed == ["TSLA"]
+    assert any("plausibility floor rejected" in r.message for r in caplog.records)
+    assert not (tmp_path / "TSLA" / "intraday_2026-08-12.csv").exists()
+    assert metrics_mod.read_all(metrics_path) == {
+        "plausibility_floor_rejection{rule=implausible_bar_count,stage=close_write,symbol=TSLA}": 1,
+    }
+
+
+def test_cache_todays_intraday_bars_rejects_below_the_volume_floor_against_cached_history(tmp_path, caplog):
+    """Same floor, the other rule: a full bar count on a fraction of the
+    symbol's normal volume (the actual 2026-08-11/12 shape -- ~1M vs
+    ~40M SPY volume) must also be rejected, judged against real cached
+    history."""
+    session = date(2026, 8, 12)
+    for i in range(3):
+        write_bars_csv(
+            tmp_path / "TSLA" / f"intraday_2026-08-{9 + i:02d}.csv",
+            _plausible_session_bars("TSLA", date(2026, 8, 9 + i), volume=1_000_000),
+        )
+    thin_bars = _plausible_session_bars("TSLA", session, volume=1000)  # << 20% of the 1M median
+
+    with caplog.at_level("ERROR"):
+        succeeded, failed = runner_mod._cache_todays_intraday_bars(
+            tmp_path, ["TSLA"], session, fetch_fn=lambda s, d: thin_bars,
+        )
+
+    assert succeeded == []
+    assert failed == ["TSLA"]
+    assert any("implausible_volume" in r.message for r in caplog.records)
+
+
+def test_build_history_by_symbol_excludes_a_runt_session_and_reports_it(tmp_path, caplog):
+    """Proposal 5c, baseline-building half: a runt cached session must
+    never join the rvol baseline (or a future TR profile) -- it's
+    dropped from the accepted history, logged loudly, and surfaced on
+    the heartbeat's data_gaps line, never silent."""
+    from tradebot import metrics as metrics_mod
+
+    healthy_dates = [date(2026, 8, d) for d in (3, 4, 5, 6, 7)]
+    for d in healthy_dates:
+        write_bars_csv(tmp_path / "TSLA" / f"intraday_{d.isoformat()}.csv", _plausible_session_bars("TSLA", d))
+    runt_date = date(2026, 8, 10)
+    write_bars_csv(tmp_path / "TSLA" / f"intraday_{runt_date.isoformat()}.csv", _plausible_session_bars("TSLA", runt_date, n=5))
+
+    stats = HeartbeatStats(start_time=datetime(2026, 8, 11, 13, 30, tzinfo=timezone.utc), session_date=date(2026, 8, 11))
+
+    with caplog.at_level("ERROR"):
+        history_by_symbol = _build_history_by_symbol(tmp_path, ["TSLA"], date(2026, 8, 11), stats)
+
+    assert len(history_by_symbol["TSLA"]) == len(healthy_dates)  # the runt never joined
+    assert any("plausibility floor rejected" in r.message and "TSLA" in r.message for r in caplog.records)
+    assert any(runt_date.isoformat() in gap for gap in stats.data_gaps)
 
 
 def test_alert_if_cache_fetch_failed_pages_on_total_failure():
@@ -469,7 +566,7 @@ def test_close_time_cache_fetch_prevents_the_2026_08_12_incident_end_to_end(tmp_
     end_time = datetime(2026, 8, 12, 20, 5, tzinfo=timezone.utc)
 
     def fake_fetch(symbol, d):
-        return [Bar(symbol=symbol, ts=rth_open, open=100, high=101, low=99, close=101.5, volume=1000)]
+        return _plausible_session_bars(symbol, d)
 
     with caplog.at_level("ERROR"):
         # Same order as run_live(): fetch+cache today's bars, THEN backfill.
