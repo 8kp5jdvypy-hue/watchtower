@@ -93,7 +93,10 @@ CREATE TABLE IF NOT EXISTS detections (
     lifecycle_state TEXT,
     related_detection_id TEXT,
     data_feed TEXT,
-    origin TEXT
+    origin TEXT,
+    extreme_mover INTEGER,
+    extreme_mover_gap_pct REAL,
+    extreme_mover_volume INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -198,6 +201,14 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     # performance-stats functions.
     _add_column_if_missing(conn, "detections", "data_feed", "TEXT")
     _add_column_if_missing(conn, "detections", "origin", "TEXT")
+    # NULL on every row before Proposal 3 (docs/open-awareness-proposals-
+    # 2026-08.md) and on every row since where the move never persisted
+    # the guard's 25% line -- never back-filled, never set to 0, same
+    # NULL-means-not-applicable discipline as no_trade/data_feed above.
+    # See tradebot.guard.extreme_mover_evidence and set_extreme_mover().
+    _add_column_if_missing(conn, "detections", "extreme_mover", "INTEGER")
+    _add_column_if_missing(conn, "detections", "extreme_mover_gap_pct", "REAL")
+    _add_column_if_missing(conn, "detections", "extreme_mover_volume", "INTEGER")
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
@@ -337,6 +348,22 @@ def set_news_driven(
     conn.execute(
         "UPDATE detections SET news_driven = ?, event_kind = ?, event_severity = ? WHERE id = ?",
         (int(news_driven), kind, severity, detection_id),
+    )
+
+
+def set_extreme_mover(conn: sqlite3.Connection, detection_id: str, gap_pct: float, verified_volume: int) -> None:
+    """Records that this cluster's alert cleared guard.py's extreme-mover
+    persistence check (Proposal 3) -- set by runner.py right after a HIGH
+    alert with tradebot.guard.ExtremeMoverEvidence actually sends, never
+    called otherwise, so the column stays NULL (not 0) on every other
+    row -- same discipline as set_news_driven's caller only invoking it
+    from inside `if news_driven:`. gap_pct/verified_volume are the exact
+    numbers the alert's own card showed, frozen at decision time rather
+    than recomputed later, so a query against this table can never
+    disagree with what a subscriber actually read."""
+    conn.execute(
+        "UPDATE detections SET extreme_mover = 1, extreme_mover_gap_pct = ?, extreme_mover_volume = ? WHERE id = ?",
+        (gap_pct, verified_volume, detection_id),
     )
 
 

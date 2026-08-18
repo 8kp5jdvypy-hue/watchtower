@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 from datetime import date, datetime
 
+from tradebot.guard import spread_pct_of_mid
 from tradebot.rendering.fields import atr, dash, money, pct, qty, rate, ts
 
 TIER_EMOJI = {"high": "🔴", "medium": "🟡", "log": "⚪"}
@@ -145,13 +146,30 @@ def _history_rows(history, news_driven: bool) -> list[tuple[str, str]]:
     ]
 
 
-def render_high_alert(cluster, anchors, quote, selection, history, news_driven: bool = False) -> str:
+def _extreme_mover_line(extreme_mover, quote) -> str:
+    """Proposal 3's card prefix (docs/open-awareness-proposals-2026-08.md):
+    states the evidence, not just the claim -- bar count and real volume,
+    same as the guard actually checked. Spread is context, not a gate
+    (Option B) -- always shown for a verified extreme mover so the
+    reader sees exactly what the widened 15% ceiling let through, using
+    spread_pct_of_mid so this can never disagree with what the guard
+    itself computed."""
+    spread = spread_pct_of_mid(quote)
+    spread_note = f" · spread {rate(spread * 100)} — wide market" if spread is not None else ""
+    return (
+        f"<b>EXTREME MOVER</b> {rate(extreme_mover.gap_pct * 100)} vs prior close — "
+        f"verified across 2 bars, {qty(extreme_mover.verified_volume)} shares{spread_note}"
+    )
+
+
+def render_high_alert(cluster, anchors, quote, selection, history, news_driven: bool = False, extreme_mover=None) -> str:
     """The single-ticker, full-detail HIGH alert. Fixed field order,
-    every time: headline -> rationale -> stats block (signal strength,
-    price context, real ATR, similar-setups follow-through, contract
-    idea) -> tag line -> footer. Never tells the reader to trade — the
-    contract row is an idea with a real breakeven or an explicit,
-    reasoned NO TRADE, and the footer's "Not advice." is unconditional.
+    every time: headline -> (extreme-mover prefix, if any) -> rationale ->
+    stats block (signal strength, price context, real ATR, similar-setups
+    follow-through, contract idea) -> tag line -> footer. Never tells the
+    reader to trade — the contract row is an idea with a real breakeven
+    or an explicit, reasoned NO TRADE, and the footer's "Not advice." is
+    unconditional.
 
     `cluster.primary_headline` is the highest-scoring constituent
     detection's own headline — the rationale is that one sentence, not
@@ -163,13 +181,18 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
     an EDGAR filing, a macro print) — see tradebot.events. Replaces the
     Similar Setups / follow-through rows rather than showing a technical
     base rate that doesn't apply.
+    `extreme_mover`: a tradebot.guard.ExtremeMoverEvidence when this HIGH
+    alert cleared guard.py's >25%-persistence check (Proposal 3) — None
+    (default) for every ordinary alert, which renders identically to
+    before this parameter existed.
 
     `cluster.origin == "screening"` (broad_scan promoted this symbol in
     for the session, it isn't on the subscriber's watchlist) gets a plain
     text "· RADAR" tag on the headline, not an emoji — SCANNER_PLAN.md's
     Alert format section is explicit that the tier marker is the only
     emoji this message ever carries. See
-    docs/broad-scan-honesty-proposal.md's finding (a).
+    docs/broad-scan-honesty-proposal.md's finding (a). The extreme-mover
+    prefix follows the same rule — bold text, no emoji of its own.
     """
     tier_emoji = TIER_EMOJI.get(cluster.tier, "⚪")
     bias = BIAS_LABEL.get(cluster.trend, "NEUTRAL")
@@ -190,7 +213,10 @@ def render_high_alert(cluster, anchors, quote, selection, history, news_driven: 
         ("Contract", _render_contract(selection)),
     ]
 
-    body = [headline, "", rationale]
+    body = [headline]
+    if extreme_mover is not None:
+        body += ["", _extreme_mover_line(extreme_mover, quote)]
+    body += ["", rationale]
     if is_screening:
         body += ["", "<i>RADAR: not on your watchlist — Perch's daily screen flagged it as active today.</i>"]
     body += ["", _stats_block(rows), "", _kind_tag(cluster.kinds)]
