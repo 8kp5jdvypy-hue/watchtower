@@ -26,6 +26,33 @@ non-structural (healthy baseline, no 3× volume day yet).
 
 ---
 
+## DECISIONS — 2026-08-17, owner
+
+The three open decisions are made. Where this section differs from the
+proposal text below, **this section binds**.
+
+1. **Sequencing: APPROVED as recommended.** Hygiene first — build order is
+   the Sequencing table exactly as written (P5b+5c → P3 → P2 → P1 → P4 →
+   P6 phase 1 → P5a).
+2. **P3 spread guard: OPTION B.** Extreme-mover carve-out up to a **15%**
+   spread, with the spread printed on the card ("spread 11% — wide
+   market"); silent above 15%. The trade path's honesty is unchanged —
+   `select_contract()`'s NO TRADE labeling stands. Option A is rejected.
+3. **P4 severity: AMENDED — earnings are context AND signal, never
+   suppression** (owner's binding ruling; the proposal's original
+   `downgrade` recommendation muted the signal and is superseded).
+   - Earnings day **and** the day before: severity `context` — alerts
+     deliver **on time, at full tier**, with earnings named on the card
+     ("⚠ Earnings day — event-driven move; excluded from Similar Setups
+     stats").
+   - Macro release windows (FOMC/CPI/EIA minutes) keep `suppress` —
+     genuinely broken tape, not an earnings question.
+   - Stats purity is preserved by the existing `news_driven` exclusion,
+     which was always the only legitimate reason for suppression.
+   - Ingestion wiring proceeds exactly as proposed (P4's wire section).
+
+---
+
 ## Proposal 1 — Warm-start baselines (causes 2 & 4) — READY TO BUILD
 
 Give the five ATR-locked detectors a valid ATR-equivalent from the second
@@ -218,6 +245,8 @@ session-range) unchanged.
 
 ### Owner decision: the spread guard
 
+> **DECIDED 2026-08-17: Option B** — see the DECISIONS section.
+
 Thin extreme movers often carry >5% spreads, so the spread guard
 (guard.py:104–105) would still silence some.
 **Option A** — keep it (honest limitation; some verified movers still
@@ -265,8 +294,13 @@ quotes) all still suppress; no change to sub-25% behavior. Build size: S.
 
 ## Proposal 4 — Wire the earnings blackout, re-severitied (cause 6) — OWNER DECISION
 
-Recommendation: **wire it — do not remove it — but flip the earnings-day
-severity from `suppress` to `downgrade`.**
+> **DECIDED 2026-08-17, AMENDED:** earnings day and day-before are
+> `context` (full-tier, on-time, earnings named on the card) — not
+> `downgrade` as recommended below. Macro windows keep `suppress`. See the
+> DECISIONS section, which binds over this section's original text.
+
+Recommendation as originally written: **wire it — do not remove it — but
+flip the earnings-day severity from `suppress` to `downgrade`.**
 
 - **Wire:** call `refresh_earnings_events()` (built, tested, currently
   uncalled) once per session in `run_live`'s open block, for the watchlist;
