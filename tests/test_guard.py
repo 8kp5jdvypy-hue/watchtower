@@ -327,6 +327,28 @@ def test_extreme_mover_evidence_verified_carries_gap_pct_and_summed_volume():
     assert evidence.verified_volume == 100_000
 
 
+def test_extreme_mover_evidence_none_below_the_notional_floor():
+    # Ship #2 VPS acceptance run, 2026-08-17: the real shape that
+    # slipped through pre-fix -- a sub-penny name, 200+300 shares,
+    # $8.02 combined notional. Non-zero volume, real persistence, real
+    # tolerance -- everything but real money.
+    base = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+    bars = [
+        Bar("AACBR", base, 0.03, 0.031, 0.029, 0.03, volume=1000),
+        Bar("AACBR", base + timedelta(minutes=5), 0.03, 0.018, 0.016, 0.017, volume=200),
+        Bar("AACBR", base + timedelta(minutes=10), 0.017, 0.016, 0.015, 0.0154, volume=300),
+    ]
+    quote = _quote(last=0.0154)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=0.03), quote) is None
+
+
+def test_extreme_mover_evidence_verified_at_a_real_notional():
+    # Same shape, real dollar notional -- must still pass.
+    bars = _extreme_mover_bars(close1=140.0, close2=138.0, volume=10)  # (140+138)*10 = $2,780
+    quote = _quote(last=138.0)
+    assert extreme_mover_evidence(bars, _anchors(prior_close=100.0), quote) is not None
+
+
 def test_spread_pct_of_mid_matches_the_guards_own_formula():
     quote = _quote(bid=95.0, ask=105.0)
     assert spread_pct_of_mid(quote) == pytest.approx(0.10, abs=1e-9)
