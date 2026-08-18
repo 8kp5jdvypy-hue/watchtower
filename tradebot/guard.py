@@ -41,6 +41,15 @@ FLOAT_TOLERANCE = 1e-6
 # path's NO TRADE honesty is untouched by any of this.
 EXTREME_MOVER_SPREAD_MAX_PCT_OF_MID = 0.15
 EXTREME_MOVER_CLOSE_TOLERANCE_PCT = 0.10
+# Ship #2 VPS acceptance run, 2026-08-17: the doc's original "non-zero
+# volume" bar (literally b.volume > 0) let a $8.02-combined-notional
+# print (200+300 shares of a sub-penny name) verify. Re-run against
+# every real >25% session in the VPS cache: 9 of 42 would-alert
+# verifications sat under $1,900 combined notional (as low as $8), the
+# next-lowest real one was $3,815 -- a clean, wide gap in the actual
+# data, not a guessed number. $2,000 sits in that gap: excludes exactly
+# the 9 dubious ones, changes nothing for the other 33.
+EXTREME_MOVER_MIN_NOTIONAL = 2_000
 
 _REQUIRED_CLUSTER_FIELDS = ("close", "score")
 _REQUIRED_QUOTE_FIELDS = ("bid", "ask", "last")
@@ -68,7 +77,8 @@ class ExtremeMoverEvidence:
     """Proof a >25%-from-prior-close move is real, not a bad print: the
     last two consecutive RTH bars both traded real volume beyond the
     line, on the same side, at closes within
-    EXTREME_MOVER_CLOSE_TOLERANCE_PCT of each other."""
+    EXTREME_MOVER_CLOSE_TOLERANCE_PCT of each other, on combined dollar
+    notional of at least EXTREME_MOVER_MIN_NOTIONAL."""
 
     gap_pct: float  # magnitude, e.g. 0.488 for +48.8% -- always positive
     verified_volume: int  # sum of the two persistence-check bars' volume
@@ -107,6 +117,10 @@ def extreme_mover_evidence(bars: Sequence, anchors, quote) -> ExtremeMoverEviden
     c1, c2 = last_two[0].close, last_two[1].close
     close_tolerance_pct = abs(c1 - c2) / ((abs(c1) + abs(c2)) / 2)
     if close_tolerance_pct > EXTREME_MOVER_CLOSE_TOLERANCE_PCT:
+        return None
+
+    notional = sum(b.close * b.volume for b in last_two)
+    if notional < EXTREME_MOVER_MIN_NOTIONAL:
         return None
 
     return ExtremeMoverEvidence(gap_pct=gap_pct, verified_volume=sum(b.volume for b in last_two))

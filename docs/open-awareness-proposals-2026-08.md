@@ -225,7 +225,7 @@ replay; zero double-pushes in replay; confirmed-cohort close-continuation
 
 ---
 
-## Proposal 3 — Extreme-mover persistence check (cause 7) — SHIPPED 2026-08-17
+## Proposal 3 — Extreme-mover persistence check (cause 7) — SHIPPED-PENDING-ACCEPTANCE
 
 Replace the 25% hard silence (guard.py:127–131) with evidence-of-reality:
 past 25%, the alert goes out if the move **persists across two consecutive
@@ -443,8 +443,8 @@ before the next.
 | # | Ship | Why this position | Status |
 |---|---|---|---|
 | 1 | **P5b+5c** — hygiene: floor, runt purge, 20-session SIP backfill | The substrate. P1's profiles and P2's volume gate need clean SIP history; smallest risk; pure win. | **SHIPPED 2026-08-17** (PR #49 code, PR #50 DEPLOYMENT.md follow-up). See Ship log below. |
-| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). | **SHIPPED 2026-08-17** (PR #52). See Ship log below. |
-| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. | **Next up.** SIP-clean revalidation window confirmed (see Ship #1's log entry) — ready to build. |
+| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). | **SHIPPED-PENDING-ACCEPTANCE** (PR #52 + a notional-floor follow-up). Corrected 2026-08-17 — code merged/deployed is not the same as the acceptance gate clearing; see Ship log for the 3 open items. |
+| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. | **Blocked on ship #2's acceptance gate closing** — does not start until all 3 open items below resolve. |
 | 4 | **P1** — time-of-day profiles | Biggest surface area; profiles ready from ship 1's backfill; full recalibration ritual included. | Queued behind #3. |
 | 5 | **P4** — earnings wiring | Pairs naturally once P2's cards can carry the earnings tag. | Queued behind #4. |
 | 6 | **P6 phase 1** — cohort lines | After P1/P2 settle, so cohort definitions are stable before annotating with them. | Queued behind #5. |
@@ -493,7 +493,13 @@ before the next.
   01:19 SIP backfill; zero pre-flip IEX remnants in the trailing
   20-session window. Ships #3 (P2) and #4 (P1) are clear to consume it.
 
-**Ship #2 (P3), 2026-08-17 — merged, deployed, VPS-verified.**
+**Ship #2 (P3), 2026-08-17 — code merged/deployed; acceptance gate NOT yet cleared.**
+
+Corrected same day: code landing is not the same as the acceptance gate
+closing. The gate is literal — the two historically-suppressed movers,
+matched by symbol+session, verifying (or documented why not) — and
+that hadn't been checked. Three items are open; ship #3 (P2) does not
+start until all three close.
 
 - Code: PR #52. `tradebot/guard.py`'s `extreme_mover_evidence()` (past
   25%, verified by two consecutive real-volume bars closing within 10%
@@ -503,30 +509,52 @@ before the next.
   evidence that can't exist below the line). `spread_pct_of_mid()`
   shared between the guard check and the rendered card so the two can
   never disagree. `extreme_mover`/`extreme_mover_gap_pct`/
-  `extreme_mover_volume` journal columns, NULL unless verified. 24 new
-  tests incl. all three synthetic bad-print shapes (single spike, zero
-  volume, crossed quotes) still suppressing; full suite 828 passed.
-  `run_replay` before/after on 2026-08-04: identical tier counts (no
-  extreme movers in local cache — the expected null result).
-- VPS acceptance run, 2026-08-17: `scripts/verify_extreme_mover_evidence.py`
+  `extreme_mover_volume` journal columns, NULL unless verified. `run_replay`
+  before/after on 2026-08-04: identical tier counts (no extreme movers
+  in local cache — the expected null result).
+- First VPS run, 2026-08-17: `scripts/verify_extreme_mover_evidence.py`
   (no args — swept the full cache tree, not narrowed to the two
   originally-named incident movers, which were never identified by
-  symbol) found **43 real `>25%` sessions** across the broad-scan/
-  screening universe, 2026-08-12 through 08-17 (none on WATCHLIST).
-  **42 of 43 verify; 1 (DFSC, 08-13) correctly doesn't** — a real
-  single-bar spike (38.4%) reverting to 0.8% one bar later, exactly
-  the shape the persistence check exists to reject. Independently
-  re-checked against the saved output (not just re-trusting the live
-  run): zero `VERIFIED` bars at zero volume; the two boundary lines
-  printing `gap=25.0%` are both genuinely `>25%` in real float math
-  (one a float-rounding hair above the line, one a real 25.04% move) —
-  no false positives found. Caveat carried forward honestly: this
-  proves the shipped predicate's correctness at real production scale,
-  not a literal identification of the two historically-suppressed
-  rows named in the investigation (that would need a `journal.db`
-  cross-reference on `suppress_reason LIKE
-  'data_integrity_failed: extreme_prior_close_gap%'`, offered but not
-  run — the owner accepted the broader evidence as sufficient).
+  symbol) found 43 real `>25%` sessions across the broad-scan/screening
+  universe, 2026-08-12 through 08-17 (none on WATCHLIST): 42 verify,
+  1 (DFSC, 08-13) correctly doesn't — a real single-bar spike (38.4%)
+  reverting to 0.8% one bar later.
+- **Open item 1 — the literal acceptance gate.** The 43-session sweep
+  never identifies which (if any) of those sessions are the two rows
+  the investigation actually named as suppressed. Query, run on the
+  VPS:
+  ```bash
+  docker compose exec runner sqlite3 -header -column /app/data/journal.db \
+    "SELECT symbol, session, ts_utc, suppress_reason FROM detections WHERE suppress_reason LIKE 'data_integrity_failed: extreme_prior_close_gap%' ORDER BY ts_utc;"
+  ```
+  Match the returned symbol+session pairs against the 43-session sweep
+  output by hand; report whether the two real historically-suppressed
+  rows verify.
+- **Open item 2 — the volume check was too weak, now fixed.** Owner
+  review of the raw sweep output found a $8.02-combined-notional
+  verification (200+300 shares of a sub-penny name) — the doc's literal
+  "non-zero volume" bar passed it. Fixed in a follow-up commit:
+  `EXTREME_MOVER_MIN_NOTIONAL = $2,000`, a combined-dollar-notional
+  floor across the two persistence bars. Calibrated against the real
+  sweep data, not guessed: 9 of the 42 would-alert verifications sat
+  under $1,900 combined notional (as low as $8.02); the next-lowest
+  real one was $3,815 — a clean, wide gap the threshold sits in.
+  Excludes exactly the 9 dubious ones, changes nothing for the other
+  33. 2 new tests (`test_extreme_mover_evidence_none_below_the_notional_floor`,
+  `test_extreme_mover_evidence_verified_at_a_real_notional`); full
+  suite 830 passed. **Needs a second VPS run after this redeploys**,
+  to confirm the same 9 sessions now correctly stop verifying and
+  nothing else changes.
+- **Open item 3 — a specific "bar32... 10x collapse... VERIFIED" claim,
+  not yet reproduced.** Owner flagged a bar they read as a 10x single-bar
+  collapse printing VERIFIED in the raw sweep output. Two independent
+  programmatic scans of the full saved output (not eyeballing) found
+  **zero** `VERIFIED` tags whose two paired bars diverge by more than
+  the 10% tolerance anywhere in the file — including zero anything near
+  10x. Every bar-to-bar ratio ≥5x found (3, all in AACBR 08-13) is
+  correctly un-verified. Status: could not reproduce from the data in
+  hand; needs the specific symbol/session/bar to investigate further,
+  or stands resolved if it doesn't recur on the item-2 re-run.
 
 ---
 
