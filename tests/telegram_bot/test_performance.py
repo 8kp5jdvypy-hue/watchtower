@@ -9,17 +9,20 @@ import pytest
 
 from tradebot.detectors import Detection
 from tradebot.journal import connect, set_news_driven, set_no_trade, write_cluster
+from tradebot.telegram_bot import db as users_db
+from tradebot.telegram_bot import outbox
 from tradebot.telegram_bot import performance
 
 BASE = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)
 
 
-def _seed(conn, closes, marks, kinds, trends, no_trade_flags=None, news_driven_flags=None):
+def _seed(conn, closes, marks, kinds, trends, no_trade_flags=None, news_driven_flags=None, alerted_flags=None):
     for i in range(len(closes)):
         did = write_cluster(
             conn, session="2026-06-15", symbol="TEST", ts_utc=(BASE + timedelta(minutes=5 * i)).isoformat(),
             kinds=kinds[i], headlines="h", score=5.0, close=closes[i], atr14=1.0, trend=trends[i],
-            detections=[Detection("TEST", kinds[i], BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+            detections=[Detection("TEST", kinds[i], BASE, 5.0, "h", {})], code_version_str="abc",
+            alerted=alerted_flags[i] if alerted_flags is not None else True,
         )
         conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, marks[i]))
         if no_trade_flags is not None and no_trade_flags[i] is not None:
@@ -52,6 +55,75 @@ def test_hit_rate_avg_return_and_streak_hand_computed():
     # exactly 50% is z=0 by construction -> never significant
     assert tr.significance.z_score == 0.0
     assert tr.significance.is_significant is False
+
+
+# ---------------------------------------------------------------------- #
+# alerted_only (docs/phase4-proof-engine-proposal.md's "finding that
+# changes the design"): default False must keep every existing caller
+# (/performance, the Telegram weekly recap) computing over EVERY
+# HIGH-tier detection, alerted or not -- these regression tests exist
+# specifically to prove that adding the parameter didn't quietly change
+# what /performance and the Telegram recap have always reported.
+# ---------------------------------------------------------------------- #
+
+
+def test_track_record_default_still_includes_unalerted_detections():
+    """The exact regression this parameter must not cause: journaled-
+    but-never-sent detections (suppressed, over budget, a replay run)
+    must still count by default, same as before alerted_only existed."""
+    conn = connect(":memory:")
+    closes = [100] * 6
+    marks = [101, 99, 101, 99, 99, 101]
+    alerted_flags = [True, False, True, False, True, False]  # 3 of 6 actually sent
+    _seed(conn, closes, marks, ["level_break"] * 6, ["up"] * 6, alerted_flags=alerted_flags)
+
+    tr = performance.track_record(conn)  # alerted_only defaults to False
+
+    assert tr.sample_size == 6  # all 6, not just the 3 alerted ones
+    assert tr.hit_rate == 0.5
+
+
+def test_track_record_alerted_only_excludes_unalerted_detections():
+    conn = connect(":memory:")
+    closes = [100] * 10
+    marks = [101, 99, 101, 99, 99, 101, 99, 101, 99, 101]  # hits at idx 0,2,5,7,9
+    # only the first 5 (hits at 0,2 -> 2/5) were actually sent; the rest
+    # (hits at 5,7,9 -> 3/5) were journaled but never alerted
+    alerted_flags = [True] * 5 + [False] * 5
+    _seed(conn, closes, marks, ["level_break"] * 10, ["up"] * 10, alerted_flags=alerted_flags)
+
+    tr = performance.track_record(conn, alerted_only=True)
+
+    assert tr.sample_size == 5
+    assert tr.hit_rate == pytest.approx(2 / 5)
+
+
+def test_weekly_recap_default_still_includes_unalerted_detections():
+    conn = connect(":memory:")
+    closes = [100] * 6
+    marks = [101, 99, 101, 99, 99, 101]
+    alerted_flags = [True, False, True, False, True, False]
+    _seed(conn, closes, marks, ["level_break"] * 6, ["up"] * 6, alerted_flags=alerted_flags)
+    week_start = BASE.date().isoformat()
+    week_end = (BASE.date() + timedelta(days=7)).isoformat()
+
+    wr = performance.weekly_recap(conn, week_start, week_end)
+
+    assert wr.sample_size == 6
+
+
+def test_weekly_recap_alerted_only_excludes_unalerted_detections():
+    conn = connect(":memory:")
+    closes = [100] * 6
+    marks = [101, 99, 101, 99, 99, 101]
+    alerted_flags = [True, True, True, False, False, False]
+    _seed(conn, closes, marks, ["level_break"] * 6, ["up"] * 6, alerted_flags=alerted_flags)
+    week_start = BASE.date().isoformat()
+    week_end = (BASE.date() + timedelta(days=7)).isoformat()
+
+    wr = performance.weekly_recap(conn, week_start, week_end, alerted_only=True)
+
+    assert wr.sample_size == 3
 
 
 # ---------------------------------------------------------------------- #
@@ -308,3 +380,177 @@ def test_random_real_day_hit_rate_on_a_real_session_with_enough_samples():
     assert day.sample_size == 6
     assert day.hit_rate == pytest.approx(4 / 6)
     assert day.session == BASE.date().isoformat()
+
+
+# ---------------------------------------------------------------------- #
+# public_alert_history (docs/phase4-proof-engine-proposal.md, Part A/B).
+# Reads two databases: journal.db for detections/marks, users.db's
+# outbox for the real, verifiable send timestamp -- these tests seed
+# both, since the whole point of this function is the join between them.
+# ---------------------------------------------------------------------- #
+
+
+def _seed_delivered(users_conn, alert_id: str, when: datetime, chat_id: int = 12345) -> None:
+    outbox.enqueue_broadcast(users_conn, alert_id, [(chat_id, "text", None)], outbox.PRIORITY_HIGH, now=when)
+    row_id = users_conn.execute("SELECT id FROM outbox WHERE alert_id = ? AND chat_id = ?", (alert_id, chat_id)).fetchone()[0]
+    outbox.mark_delivered(users_conn, row_id, when)
+
+
+def test_public_alert_history_excludes_alerts_with_no_delivered_outbox_row():
+    """The core append-only property: alerted=1 alone (a replay run, or
+    a send still in flight) is not enough to appear -- only a real,
+    confirmed delivery is."""
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds="gap", headlines="h",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TEST", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    jconn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, 101.0))
+    jconn.commit()
+    # no outbox row enqueued at all for this alert_id
+
+    rows = performance.public_alert_history(jconn, uconn)
+    assert rows == []
+
+
+def test_public_alert_history_excludes_unalerted_detections_even_if_outbox_somehow_has_a_row():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds="gap", headlines="h",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TEST", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=False,
+    )
+    jconn.commit()
+    _seed_delivered(uconn, did, BASE)
+
+    assert performance.public_alert_history(jconn, uconn) == []
+
+
+def test_public_alert_history_includes_a_real_delivered_alert_with_the_outbox_timestamp():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds="gap", headlines="TEST gapped up",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TEST", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    jconn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (did, 101.0))
+    jconn.commit()
+    delivered_at = BASE + timedelta(seconds=3)
+    _seed_delivered(uconn, did, delivered_at)
+
+    rows = performance.public_alert_history(jconn, uconn)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.detection_id == did
+    assert row.symbol == "TEST"
+    assert row.headline == "TEST gapped up"
+    assert row.sent_at == delivered_at.isoformat()  # the real outbox time, not detection ts_utc
+    assert row.tracked is True
+    assert row.return_pct == pytest.approx(1.0)  # (101-100)/100*100, uptrend
+    assert row.origin == "watchlist"
+
+
+def test_public_alert_history_pending_row_shown_before_grading_not_hidden():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds="gap", headlines="h",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TEST", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    jconn.commit()  # no mark written yet -- not graded
+    _seed_delivered(uconn, did, BASE)
+
+    rows = performance.public_alert_history(jconn, uconn)
+
+    assert len(rows) == 1
+    assert rows[0].tracked is False
+    assert rows[0].return_pct is None
+
+
+def test_public_alert_history_uses_the_earliest_delivery_across_multiple_recipients():
+    """An alert_id can have multiple outbox rows (ops channel + N
+    subscriber DMs, see delivery.make_subscriber_hook) -- sent_at is the
+    earliest real delivery across all of them, not an arbitrary one."""
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds="gap", headlines="h",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TEST", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    jconn.commit()
+    _seed_delivered(uconn, did, BASE + timedelta(seconds=5), chat_id=111)  # ops channel, delivered later
+    _seed_delivered(uconn, did, BASE + timedelta(seconds=1), chat_id=222)  # a subscriber, delivered first
+
+    rows = performance.public_alert_history(jconn, uconn)
+
+    assert rows[0].sent_at == (BASE + timedelta(seconds=1)).isoformat()
+
+
+def test_public_alert_history_sorted_newest_sent_first():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    ids = []
+    for i in range(3):
+        did = write_cluster(
+            jconn, session="2026-06-15", symbol=f"SYM{i}", ts_utc=(BASE + timedelta(minutes=i)).isoformat(),
+            kinds="gap", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection(f"SYM{i}", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        ids.append(did)
+    jconn.commit()
+    # deliver out of detection order
+    _seed_delivered(uconn, ids[0], BASE + timedelta(minutes=10))
+    _seed_delivered(uconn, ids[1], BASE + timedelta(minutes=30))
+    _seed_delivered(uconn, ids[2], BASE + timedelta(minutes=20))
+
+    rows = performance.public_alert_history(jconn, uconn)
+
+    assert [r.symbol for r in rows] == ["SYM1", "SYM2", "SYM0"]
+
+
+def test_public_alert_history_respects_since_until_and_limit():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    for i in range(5):
+        ts = BASE + timedelta(days=i)
+        did = write_cluster(
+            jconn, session="2026-06-15", symbol=f"SYM{i}", ts_utc=ts.isoformat(),
+            kinds="gap", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+            detections=[Detection(f"SYM{i}", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        )
+        jconn.commit()
+        _seed_delivered(uconn, did, ts)
+
+    since = (BASE + timedelta(days=1)).isoformat()
+    until = (BASE + timedelta(days=4)).isoformat()
+    rows = performance.public_alert_history(jconn, uconn, since=since, until=until)
+    assert {r.symbol for r in rows} == {"SYM1", "SYM2", "SYM3"}
+
+    limited = performance.public_alert_history(jconn, uconn, limit=2)
+    assert len(limited) == 2
+    assert limited[0].symbol == "SYM4"  # newest sent first, still respected under limit
+
+
+def test_public_alert_history_origin_defaults_to_watchlist_and_screening_is_visible():
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    screening_id = write_cluster(
+        jconn, session="2026-06-15", symbol="RADAR", ts_utc=BASE.isoformat(), kinds="gap", headlines="h",
+        score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("RADAR", "gap", BASE, 5.0, "h", {})], code_version_str="abc", alerted=True,
+        origin="screening",
+    )
+    jconn.commit()
+    _seed_delivered(uconn, screening_id, BASE)
+
+    rows = performance.public_alert_history(jconn, uconn)
+
+    assert len(rows) == 1
+    assert rows[0].origin == "screening"

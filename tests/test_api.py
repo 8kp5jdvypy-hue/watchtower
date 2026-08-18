@@ -630,6 +630,103 @@ def test_performance_endpoint_caches_within_the_ttl(app, client, monkeypatch):
     assert call_count["n"] == 2
 
 
+def _seed_delivered_alert(app, symbol: str, ts: datetime, chat_id: int = 111, delivered_offset_sec: int = 3) -> str:
+    """A real, alerted=1 HIGH detection with a real delivered outbox row
+    — the shape docs/phase4-proof-engine-proposal.md's Part A actually
+    needs, not just a journaled detection."""
+    from tradebot.telegram_bot import outbox
+
+    detection_id = write_cluster(
+        app.journal_conn, session=ts.date().isoformat(), symbol=symbol, ts_utc=ts.isoformat(),
+        kinds="gap", headlines=f"{symbol} gapped up", score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection(symbol, "gap", ts, 5.0, "h", {})], code_version_str="abc", alerted=True,
+    )
+    app.journal_conn.execute("INSERT INTO marks (detection_id, offset_min, price) VALUES (?, 30, ?)", (detection_id, 101.0))
+    app.journal_conn.commit()
+    delivered_at = ts + timedelta(seconds=delivered_offset_sec)
+    outbox.enqueue_broadcast(app.users_conn, detection_id, [(chat_id, "text", None)], outbox.PRIORITY_HIGH, now=delivered_at)
+    row_id = app.users_conn.execute(
+        "SELECT id FROM outbox WHERE alert_id = ? AND chat_id = ?", (detection_id, chat_id)
+    ).fetchone()[0]
+    outbox.mark_delivered(app.users_conn, row_id, delivered_at)
+    return detection_id
+
+
+def test_public_track_record_requires_no_auth(app, client):
+    # No _request_and_extract_token/_verify_token here on purpose.
+    response = client.get("/public/track-record")
+    assert response.status_code == 200
+
+
+def test_public_track_record_empty_with_no_data_yet(app, client):
+    body = client.get("/public/track-record").get_json()
+    assert body["track_record"] is None
+    assert body["alerts"] == []
+
+
+def test_public_track_record_includes_a_real_delivered_alert(app, client):
+    detection_id = _seed_delivered_alert(app, "MSFT", datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc))
+
+    body = client.get("/public/track-record").get_json()
+
+    assert len(body["alerts"]) == 1
+    row = body["alerts"][0]
+    assert row["detection_id"] == detection_id
+    assert row["symbol"] == "MSFT"
+    assert row["sent_at"] is not None
+    assert row["origin"] == "watchlist"
+
+
+def test_public_track_record_excludes_a_never_delivered_detection():
+    """alerted=1 alone (a replay run, or a send still in flight) must not
+    be enough to show up on the public page — see
+    public_alert_history()'s own docstring for why."""
+    application = create_app(users_db_path=":memory:", journal_db_path=":memory:")
+    application.config["TESTING"] = True
+    write_cluster(
+        application.journal_conn, session="2026-06-15", symbol="TSLA",
+        ts_utc=datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc).isoformat(),
+        kinds="gap", headlines="h", score=5.0, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection("TSLA", "gap", datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc), 5.0, "h", {})],
+        code_version_str="abc", alerted=True,
+    )
+    application.journal_conn.commit()
+    # no outbox row at all -- never actually sent live
+
+    body = application.test_client().get("/public/track-record").get_json()
+    assert body["alerts"] == []
+
+
+def test_public_track_record_cors_wildcard_scoped_to_this_route_only(app, client):
+    public_response = client.get("/public/track-record", headers={"Origin": "https://evil.example.com"})
+    assert public_response.headers.get("Access-Control-Allow-Origin") == "*"
+    assert "Access-Control-Allow-Credentials" not in public_response.headers
+
+    # The credentialed dashboard route must NOT pick up the wildcard —
+    # an untrusted origin gets no CORS header there at all, same as
+    # before this route existed.
+    performance_response = client.get("/performance", headers={"Origin": "https://evil.example.com"})
+    assert "Access-Control-Allow-Origin" not in performance_response.headers
+
+
+def test_public_track_record_caches_within_the_ttl(app, client, monkeypatch):
+    import tradebot.api.app as api_app_module
+
+    call_count = {"n": 0}
+    real_public_alert_history = api_app_module.public_alert_history
+
+    def counting_public_alert_history(*args, **kwargs):
+        call_count["n"] += 1
+        return real_public_alert_history(*args, **kwargs)
+
+    monkeypatch.setattr(api_app_module, "public_alert_history", counting_public_alert_history)
+
+    client.get("/public/track-record")
+    client.get("/public/track-record")
+    client.get("/public/track-record")
+    assert call_count["n"] == 1
+
+
 def test_cors_header_only_reflects_an_allowed_origin(app, client):
     allowed = client.get("/healthz", headers={"Origin": app.frontend_url})
     assert allowed.headers.get("Access-Control-Allow-Origin") == app.frontend_url
