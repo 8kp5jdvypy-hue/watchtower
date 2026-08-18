@@ -43,23 +43,19 @@ versus what this file claimed.
 ## DEPLOYMENT.md — still missing (confirmed against current main)
 
 Now merged and no longer missing: the two-Workers split (#22), GIT_SHA's
-deploy-command line (#24), and the frontend caching contract (#35, which
+deploy-command line (#24), the frontend caching contract (#35, which
 also corrected it — zone Cache Rules are inert for Workers static
 assets, `_headers` governs browser caching only, deploys supersede the
-assets cache atomically, and no purge step exists). Still not written
-anywhere:
-- In-container `fetch_cache` invocation — `docker compose run --rm -v
-  /opt/perch/scripts:/app/scripts -e DETECTOR_DATA_FEED=sip runner
-  python3 scripts/fetch_cache.py` (host has no Python deps; the image
-  doesn't include `scripts/`, hence the mount).
-- Explicit warning: never clear current-day intraday cache files before
-  that day's `backfill_marks()` has run — the mechanism behind the
-  2026-08-12 incident (now fixed at the code level in PR #24, but the
-  operational warning for anyone doing a manual cache operation isn't
-  written down anywhere).
-- `fetch_cache.py` structurally cannot refetch the current day (session
-  walk-back starts at `date.today() - 1`) — worth stating plainly so a
-  future manual repair doesn't get attempted the wrong way.
+assets cache atomically, and no purge step exists), and — as of Ship #1
+(P5b+5c, PR #49), 2026-08-17, after the VPS 5b run hit exactly the two
+failure modes this item predicted (host has no deps, image has no
+`scripts/`) — the whole "how do you run a `scripts/` tool on this box"
+question: DEPLOYMENT.md's new "Running `scripts/` tools in-container"
+section has the one canonical invocation (`docker compose run --rm -v
+/opt/perch/scripts:/app/scripts runner python3 scripts/<name>.py`), the
+never-clear-current-day-cache-before-backfill_marks() warning, and the
+fetch_cache.py-can't-refetch-today note, all in one place instead of
+scattered or unwritten. Still not written anywhere:
 - Phase 0 cache archives happen **on the VPS**, not the local Mac
   checkout (the real one tonight: `data/cache-archive/iex-2026-08-11`,
   20M, made on the VPS before the cache clear).
