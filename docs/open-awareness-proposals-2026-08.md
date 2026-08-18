@@ -440,15 +440,61 @@ fires only on live-era cohorts in tests. Build size: S–M.
 One build ships at a time, replay-validated, then 2–3 live sessions watched
 before the next.
 
-| # | Ship | Why this position |
-|---|---|---|
-| 1 | **P5b+5c** — hygiene: floor, runt purge, 20-session SIP backfill | The substrate. P1's profiles and P2's volume gate need clean SIP history; smallest risk; pure win. |
-| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). |
-| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. |
-| 4 | **P1** — time-of-day profiles | Biggest surface area; profiles ready from ship 1's backfill; full recalibration ritual included. |
-| 5 | **P4** — earnings wiring | Pairs naturally once P2's cards can carry the earnings tag. |
-| 6 | **P6 phase 1** — cohort lines | After P1/P2 settle, so cohort definitions are stable before annotating with them. |
-| 7 | **P5a** — pre-open gap promotion | Extends P2's reach beyond the watchlist once gap-and-go has 2–3 clean live sessions. |
+| # | Ship | Why this position | Status |
+|---|---|---|---|
+| 1 | **P5b+5c** — hygiene: floor, runt purge, 20-session SIP backfill | The substrate. P1's profiles and P2's volume gate need clean SIP history; smallest risk; pure win. | **SHIPPED 2026-08-17** (PR #49 code, PR #50 DEPLOYMENT.md follow-up). See Ship log below. |
+| 2 | **P3** — extreme-mover persistence | Smallest detector-adjacent change, independent, immediate observed wins (this week's movers). | **Next up.** Owner decision (spread guard Option B) and VPS validation command are both already resolved/specified above — ready to build. |
+| 3 | **P2** — gap-and-go | The flagship gap fix; volume confirmation baseline SIP-clean from ship 1. | Queued behind #2. |
+| 4 | **P1** — time-of-day profiles | Biggest surface area; profiles ready from ship 1's backfill; full recalibration ritual included. | Queued behind #3. |
+| 5 | **P4** — earnings wiring | Pairs naturally once P2's cards can carry the earnings tag. | Queued behind #4. |
+| 6 | **P6 phase 1** — cohort lines | After P1/P2 settle, so cohort definitions are stable before annotating with them. | Queued behind #5. |
+| 7 | **P5a** — pre-open gap promotion | Extends P2's reach beyond the watchlist once gap-and-go has 2–3 clean live sessions. | Queued behind #6. |
+
+### Ship log
+
+**Ship #1 (P5b+5c), 2026-08-17 — merged, deployed, VPS-verified.**
+
+- Code: PR #49 (`tradebot/marketdata.py` plausibility floor,
+  `tradebot/runner.py` wiring at both required points,
+  `scripts/purge_and_backfill_runts.py`). Local replay evidence in the
+  PR body: floor re-verified against all 2,448 local cache files (3
+  rejections, all IEX-thin USO days); `run_replay` before/after on
+  2026-08-04 produced identical tier counts — additive hygiene, zero
+  detection-behavior regression.
+- Ops follow-up: PR #50 documented the in-container `scripts/`
+  invocation (`docker compose run --rm -v
+  /opt/perch/scripts:/app/scripts runner python3 scripts/<name>.py`) —
+  the VPS run surfaced that this was never written down; now it is,
+  permanently, in `docs/DEPLOYMENT.md`.
+- VPS execution, 2026-08-17: purge report found **33 runt files**
+  across **16 of 17 watchlist symbols × both 2026-08-11/12** (every
+  symbol but AMZN, whose 08-12 file simply didn't exist yet — an
+  unrelated pre-existing cache gap, not part of this incident; the
+  subsequent backfill step filled it regardless). All 33 rejections
+  were `implausible_volume`, all against realistic tens-of-millions
+  trailing-median references per symbol — i.e. this was a **watchlist-
+  wide** incident on those two dates, not the SPY-only shape the
+  HANDOFF section's framing ("~1M vs ~40M SPY volume") implied. `--apply`
+  deleted exactly those 33 files (1:1 with the report, nothing missed,
+  nothing extra). The SIP backfill then re-fetched all 34 slots (33
+  purged + AMZN's pre-existing gap) plus two unrelated pre-existing
+  gaps (PLTR and USO, both missing 08-14) that `--sessions-n 20`'s
+  normal walk-back closed in the same run — 0 errors across all 17
+  symbols.
+- Read as corroborating (not just circumstantial) evidence that the
+  purged numbers really were degraded-feed reads rather than random
+  bad prints: ~1M-scale RTH volume on SPY is within IEX's typical
+  ~2–3% share of consolidated tape for a ~40M-share day — i.e. the
+  "runt" numbers are the right *order of magnitude* for an IEX-only
+  read, not an arbitrary low number.
+- P1/P2 revalidation window's SIP-cleanliness (are the ~17-18
+  "skipped (exists)" files per symbol genuinely from the 08-12 01:19
+  SIP backfill, not stale pre-flip IEX remnants) is a file-mtime check
+  **run on the VPS, not yet executed as of this write-up** — see the
+  one-command verification in the HANDOFF section below. This gates
+  ships #3 (P2) and #4 (P1), which actually consume that window; it
+  does not block ship #2 (P3), which per the table above is independent
+  of it.
 
 ---
 
@@ -512,13 +558,31 @@ Same discipline as the SIP flip (Decision B), applied to coverage:
   repo — their methods and numbers are fully specified above; rebuild them
   as `run_replay`-based validations per proposal, which is required anyway
   before shipping.
-- **Production facts (verified 2026-08-17):** VPS at /opt/perch, Docker
-  compose, runner runs `--live --broad-scan`, `DETECTOR_DATA_FEED=sip`
-  since 2026-08-12; VPS cache has ~22 aligned watchlist sessions of which
-  July files were SIP-backfilled 08-12 01:19 and two runt files
-  (08-11, 08-12, ~1M vs ~40M SPY volume) need the 5b purge; `event_windows`
-  table is empty (P4 wires it); rvol baseline verified healthy (0.56–0.86×
-  on 08-13) — do not "fix" rvol, it isn't broken.
+- **Production facts (verified 2026-08-17, updated post-ship-1):** VPS at
+  /opt/perch, Docker compose, runner runs `--live --broad-scan`,
+  `DETECTOR_DATA_FEED=sip` since 2026-08-12; July files were SIP-
+  backfilled 08-12 01:19. The 5b purge is **done** (see the Ship log
+  above) — it turned out to be watchlist-wide (33 files, 16 of 17
+  symbols × both 08-11/12), not the SPY-only pair this bullet used to
+  say. `event_windows` table is empty (P4 wires it); rvol baseline
+  verified healthy (0.56–0.86× on 08-13) — do not "fix" rvol, it isn't
+  broken.
+- **SIP-clean verification (owed, not yet run):** confirms the ~17-18
+  pre-existing "skipped (exists)" files per symbol from ship #1's
+  backfill are genuinely SIP-era (from the 08-12 01:19 backfill or
+  later), not stale pre-flip IEX remnants sitting in the trailing
+  20-session window P2/P1 will build on. File mtime is the only local
+  signal available (the cache CSVs carry no feed column) — run on the
+  VPS:
+  ```bash
+  find /opt/perch/data/cache -name 'intraday_*.csv' \
+    ! -newermt '2026-08-12 01:19:00' -printf '%TY-%Tm-%Td %TH:%TM  %p\n' | sort
+  ```
+  Empty output = every cached intraday file across the whole watchlist
+  was written at or after the SIP backfill — the window is clean, ships
+  #3/#4 can proceed. Any line printed names a file that predates the
+  flip and needs the same purge+backfill treatment ship #1 gave
+  08-11/12 before P2/P1 build on it.
 - **Process:** ship order per the Sequencing table; one build per PR;
   replay validation results in the PR body; owner watches 2–3 live sessions
   between ships; every proposal's acceptance criteria are the merge bar.
