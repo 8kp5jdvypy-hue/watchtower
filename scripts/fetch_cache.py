@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+import tempfile
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -40,6 +42,35 @@ logger = logging.getLogger("watchtower.fetch_cache")
 _CALENDAR = ecals.get_calendar("XNYS")  # same instance pattern as runner.py's CALENDAR
 
 
+def _atomic_write_bars_csv(path: Path, bars: list) -> None:
+    """Same CSV shape as marketdata.write_bars_csv (reused verbatim, not
+    reimplemented -- two independent CSV writers would be exactly the
+    kind of drift this project avoids elsewhere), but via a temp file in
+    the same directory + os.replace() rather than a direct write to
+    `path`.
+
+    Without this, a kill mid-write leaves a truncated file sitting at
+    the final path -- and ensure_daily/ensure_sessions key their whole
+    idempotency check on path.exists(), so a truncated file is locked
+    in as "done" forever, never re-fetched or re-validated (full-code-
+    review finding #11). os.replace() is atomic on the same filesystem,
+    which the same-directory temp file guarantees. This wraps the
+    shared tradebot.marketdata.write_bars_csv from the outside rather
+    than changing it -- that function is also called directly by
+    tradebot.runner's live close-time cacher, which this fix does not
+    touch."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        _write_bars_csv(tmp_path, bars)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def ensure_daily(symbol: str, cache_dir: Path, n: int) -> str:
     path = cache_dir / symbol / "daily.csv"
     if path.exists():
@@ -50,7 +81,7 @@ def ensure_daily(symbol: str, cache_dir: Path, n: int) -> str:
         # returning zero daily bars is never expected -- always loud.
         logger.error("fetch_daily_bars returned no data for %s (requested n=%d)", symbol, n)
         return "no data returned"
-    _write_bars_csv(path, bars)
+    _atomic_write_bars_csv(path, bars)
     return f"fetched {len(bars)} bars"
 
 
@@ -73,7 +104,7 @@ def ensure_sessions(symbol: str, cache_dir: Path, n: int) -> list[tuple[date, st
         else:
             bars = fetch_intraday_bars(symbol, candidate)
             if bars:
-                _write_bars_csv(path, bars)
+                _atomic_write_bars_csv(path, bars)
                 satisfied += 1
                 results.append((candidate, f"fetched {len(bars)} bars"))
             elif _CALENDAR.is_session(candidate):
@@ -97,7 +128,7 @@ def ensure_sessions(symbol: str, cache_dir: Path, n: int) -> list[tuple[date, st
     return results
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--symbols", default=",".join(WATCHLIST), help="comma-separated symbols")
     parser.add_argument("--daily-n", type=int, default=60)
@@ -108,6 +139,7 @@ def main() -> None:
     symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
 
     summary_rows = []
+    failed_symbols = []
     for symbol in symbols:
         print(f"\n=== {symbol} ===")
 
@@ -119,6 +151,7 @@ def main() -> None:
         skipped = sum(1 for _, s in session_results if s.startswith("skipped"))
         no_data = sum(1 for _, s in session_results if s.startswith("no data"))
         errors = sum(1 for _, s in session_results if s.startswith("ERROR"))
+        gave_up = sum(1 for _, s in session_results if s.startswith("gave up"))
         for d, status in session_results:
             print(f"  {d}: {status}")
 
@@ -130,23 +163,45 @@ def main() -> None:
                 "sessions_skipped": skipped,
                 "sessions_no_data": no_data,
                 "sessions_errors": errors,
+                "sessions_gave_up": gave_up,
             }
         )
 
+        # A genuine post-retry failure, not a legitimate no-op: "skipped
+        # (exists)"/"no data (holiday)" leave a symbol fully satisfied
+        # and must not trip this. "no data returned" (ensure_daily) and
+        # any "ERROR"/"gave up" session row (ensure_sessions) are all
+        # cases where fetch_daily_bars/fetch_intraday_bars already
+        # exhausted their own internal retries and came back empty on a
+        # day that should have had data -- see full-code-review.md
+        # finding #3/C3.
+        if daily_status == "no data returned" or errors > 0 or gave_up > 0:
+            failed_symbols.append(symbol)
+
     print("\n=== summary ===")
-    header = f"{'symbol':<8} {'daily':<20} {'fetched':>8} {'skipped':>8} {'no_data':>8} {'errors':>8}"
+    header = (
+        f"{'symbol':<8} {'daily':<20} {'fetched':>8} {'skipped':>8} {'no_data':>8} {'errors':>8} {'gave_up':>8}"
+    )
     print(header)
     print("-" * len(header))
     for row in summary_rows:
         print(
             f"{row['symbol']:<8} {row['daily']:<20} "
             f"{row['sessions_fetched']:>8} {row['sessions_skipped']:>8} {row['sessions_no_data']:>8} "
-            f"{row['sessions_errors']:>8}"
+            f"{row['sessions_errors']:>8} {row['sessions_gave_up']:>8}"
         )
+
+    if failed_symbols:
+        print(
+            f"\n{len(failed_symbols)}/{len(symbols)} symbols failed: {', '.join(failed_symbols)}",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
     try:
-        main()
+        raise SystemExit(main())
     except AlpacaCredentialsError as e:
         raise SystemExit(f"error: {e}")
