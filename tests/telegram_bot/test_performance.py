@@ -3,12 +3,15 @@ drawdown and losing-streak math is easy to get subtly wrong, so it's
 worth pinning down with hand-computed expected values."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from tradebot.detectors import Detection
+from tradebot.alerts import Cluster
+from tradebot.detectors import DailyAnchors, Detection
 from tradebot.journal import connect, set_news_driven, set_no_trade, write_cluster
+from tradebot.marketdata import Quote
+from tradebot.rendering import templates
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot import outbox
 from tradebot.telegram_bot import performance
@@ -453,6 +456,57 @@ def test_public_alert_history_includes_a_real_delivered_alert_with_the_outbox_ti
     assert row.tracked is True
     assert row.return_pct == pytest.approx(1.0)  # (101-100)/100*100, uptrend
     assert row.origin == "watchlist"
+
+
+def test_public_alert_history_headline_is_the_primary_detection_not_the_full_joined_list():
+    """A multi-kind cluster's public headline must be the single sentence
+    render_high_alert() actually put in the sent message's rationale
+    line (cluster.primary_headline) -- not the full semicolon-joined
+    `headlines`, which is a superset nobody received verbatim (see
+    alerts.Cluster's own docstring). Verified two ways: against the
+    real render_high_alert() output directly, and against the
+    highest-scoring detection picked the same way runner.py picks it."""
+    jconn = connect(":memory:")
+    uconn = users_db.connect(":memory:")
+    detections = [
+        Detection("TEST", "range_expansion", BASE, 3.0, "TEST bar range 4.84 is 10.4x ATR(14)=0.47", {}),
+        Detection("TEST", "vwap_break", BASE, 7.5, "TEST broke below VWAP (489.74), 2.58 ATR", {}),
+    ]
+    primary = max(detections, key=lambda d: d.score)  # same rule runner.py's _build_cluster uses
+    kinds = ",".join(d.kind for d in detections)
+    headlines = "; ".join(d.headline for d in detections)
+    did = write_cluster(
+        jconn, session="2026-06-15", symbol="TEST", ts_utc=BASE.isoformat(), kinds=kinds,
+        headlines=headlines, score=7.5, close=100.0, atr14=1.0, trend="down",
+        detections=detections, code_version_str="abc", alerted=True, primary_kind=primary.kind,
+    )
+    jconn.commit()
+    delivered_at = BASE + timedelta(seconds=3)
+    _seed_delivered(uconn, did, delivered_at)
+
+    rows = performance.public_alert_history(jconn, uconn)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.headline == primary.headline
+    assert row.headline != headlines  # not the joined superset
+
+    cluster = Cluster(
+        id=did, ts_utc=BASE.isoformat(), session="2026-06-15", symbol="TEST", kinds=kinds,
+        headlines=headlines, primary_headline=primary.headline, score=7.5, tier="high",
+        close=100.0, atr14=1.0, trend="down", code_version="abc",
+    )
+    anchors = DailyAnchors(
+        symbol="TEST", session_date=date(2026, 6, 15), prior_close=100.0,
+        prior_high=102.0, prior_low=98.0, opening_range_high=100.5,
+        opening_range_low=99.5, opening_range_volume=10_000,
+        swing_high=103.0, swing_low=95.0, avg_cum_volume_by_bar={},
+    )
+    quote = Quote(symbol="TEST", ts=BASE, bid=97.98, ask=98.02, last=98.00)
+    rendered = templates.render_high_alert(cluster, anchors, quote, None, None)
+
+    # the exact string this test asserts is the public page's headline
+    # is the exact string a real subscriber's message actually contained
+    assert row.headline in rendered.splitlines()
 
 
 def test_public_alert_history_pending_row_shown_before_grading_not_hidden():

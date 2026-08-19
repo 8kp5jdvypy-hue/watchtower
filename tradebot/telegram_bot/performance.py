@@ -342,6 +342,29 @@ class PublicAlertRow:
     tracked: bool  # whether a mark exists yet at offset_min
 
 
+def _primary_headline(headlines: str, kinds: str, primary_kind: str | None) -> str:
+    """The one sentence render_high_alert() actually put in the sent
+    message's rationale line (cluster.primary_headline), not the full
+    semicolon-joined `headlines` -- that's every constituent detection's
+    headline, a superset nobody ever received verbatim (see alerts.Cluster's
+    own docstring). Recovered by position: kinds/headlines are written in
+    the same detection order (journal.write_cluster), so primary_kind's
+    index in `kinds` locates it in `headlines` too -- same technique
+    api.app._context_summary already uses for the same reason. Rows
+    written before primary_kind existed (NULL) fall back to the full
+    joined string -- the closest honest answer available, not a guess."""
+    if not primary_kind:
+        return headlines
+    kinds_list = kinds.split(",")
+    if primary_kind not in kinds_list:
+        return headlines
+    headline_list = headlines.split("; ")
+    idx = kinds_list.index(primary_kind)
+    if idx >= len(headline_list):
+        return headlines
+    return headline_list[idx]
+
+
 def public_alert_history(
     journal_conn: sqlite3.Connection,
     users_conn: sqlite3.Connection,
@@ -378,7 +401,10 @@ def public_alert_history(
     tier/offset_min: see track_record()'s docstring for why 30m is the
     canonical horizon this project already treats as the answer to
     "did it work" everywhere else the question comes up."""
-    query = "SELECT id, symbol, headlines, trend, origin, close, ts_utc FROM detections WHERE tier = ? AND alerted = 1"
+    query = (
+        "SELECT id, symbol, kinds, headlines, primary_kind, trend, origin, close, ts_utc "
+        "FROM detections WHERE tier = ? AND alerted = 1"
+    )
     params: list = [tier]
     if since is not None:
         query += " AND ts_utc >= ?"
@@ -408,7 +434,7 @@ def public_alert_history(
     )
 
     result = []
-    for id_, symbol, headlines, trend, origin, close, _ts_utc in rows:
+    for id_, symbol, kinds, headlines, primary_kind, trend, origin, close, _ts_utc in rows:
         sent_at = sent_by_id.get(id_)
         if sent_at is None:
             continue
@@ -417,7 +443,7 @@ def public_alert_history(
             PublicAlertRow(
                 detection_id=id_,
                 symbol=symbol,
-                headline=headlines,
+                headline=_primary_headline(headlines, kinds, primary_kind),
                 trend=trend,
                 origin=origin or "watchlist",
                 sent_at=sent_at,

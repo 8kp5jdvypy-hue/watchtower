@@ -176,9 +176,13 @@ choice is visible, not because it's free.
    module, same "one source of truth" reasoning). Reuses
    `_signed_returns`'s sign convention exactly (calls it internally
    with `alerted_only=True`) rather than recomputing `up`/`down` sign
-   logic a second time. Per row: `symbol`, `headline` (from
-   `detections.headlines`, already plain-English per
-   `render_high_alert`'s own convention), `trend`, `sent_at` (see
+   logic a second time. Per row: `symbol`, `headline` (the primary
+   detection's own sentence — the exact rationale line
+   `render_high_alert` put in the sent message, recovered from
+   `detections.headlines`/`kinds`/`primary_kind` by position; not the
+   plain-English dashboard card copy, which is a client-side-only
+   rendering that was never sent to anyone — see the 2026-08-19
+   session), `trend`, `sent_at` (see
    below), `return_pct` (signed, from the existing `_signed_returns`
    shape), `origin` (`watchlist`/`screening`, same field the dashboard
    already surfaces — RADAR badge convention carries over unchanged).
