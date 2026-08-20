@@ -799,6 +799,101 @@ def test_evaluate_bar_cluster_atr14_matches_the_primary_detectors_own_atr():
     assert abs(old_buggy_value - result["atr14"]) > 1.0  # ~1.6 vs ~0.2 in this fixture
 
 
+def test_evaluate_bar_reports_pct_from_prior_close_available():
+    """A1 (docs/open-awareness-proposals-2026-08.md): evaluate_bar's real
+    (non-mocked) output carries the signed percentage-point displacement
+    from anchors.prior_close, computed by the shared
+    tradebot.features.pct_from_prior_close primitive."""
+    anchors = DailyAnchors(
+        symbol="TSLA", session_date=date(2026, 7, 23), prior_close=100.0, prior_high=101.0, prior_low=99.0,
+        opening_range_high=100.5, opening_range_low=99.5, opening_range_volume=1000,
+        swing_high=102.0, swing_low=98.0, avg_cum_volume_by_bar={},
+    )
+    bar = Bar("TSLA", datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc), 110.0, 111.0, 109.0, 110.0, volume=10_000)
+
+    result = evaluate_bar("TSLA", [bar], anchors)
+
+    assert result is not None
+    assert result["pct_from_prior_close"] == 10.0  # (110-100)/100 * 100
+    assert result["pct_from_prior_close_status"] == "AVAILABLE"
+
+
+def test_evaluate_bar_reports_pct_from_prior_close_unavailable_on_bad_prior_close():
+    """A non-positive prior_close (a degenerate/bad daily bar) must never
+    silently divide -- explicit UNAVAILABLE, journaled as such."""
+    anchors = DailyAnchors(
+        symbol="TSLA", session_date=date(2026, 7, 23), prior_close=0.0, prior_high=101.0, prior_low=99.0,
+        opening_range_high=100.5, opening_range_low=99.5, opening_range_volume=1000,
+        swing_high=102.0, swing_low=98.0, avg_cum_volume_by_bar={},
+    )
+    bar = Bar("TSLA", datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc), 110.0, 111.0, 109.0, 110.0, volume=10_000)
+
+    result = evaluate_bar("TSLA", [bar], anchors)
+
+    assert result is not None
+    assert result["pct_from_prior_close"] is None
+    assert result["pct_from_prior_close_status"] == "UNAVAILABLE:invalid_prior_close"
+
+
+def test_process_new_bar_journals_pct_from_prior_close_from_a_real_evaluate_bar_call(monkeypatch):
+    """End-to-end: process_new_bar -> the REAL evaluate_bar (not a
+    monkeypatched fixture) -> journal.write_cluster actually threads the
+    A1 columns onto the row -- the one thing no lower-level test proves
+    on its own."""
+    anchors = DailyAnchors(
+        symbol="TSLA", session_date=date(2026, 7, 23), prior_close=100.0, prior_high=101.0, prior_low=99.0,
+        opening_range_high=112.0, opening_range_low=108.0, opening_range_volume=1000,
+        swing_high=101.0, swing_low=99.0, avg_cum_volume_by_bar={},
+    )
+    # A single bar with a real gap (score = |110-100| / (101-99) = 5.0,
+    # well above gap()'s 0.75 atr_units floor) so evaluate_bar actually
+    # produces a cluster to journal -- a bar that doesn't trigger any
+    # detector never reaches write_cluster at all.
+    bar = Bar("TSLA", datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc), 110.0, 112.0, 109.0, 110.0, volume=10_000)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=109.9, ask=110.1, last=110.0)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
+
+    row = conn.execute(
+        "SELECT pct_from_prior_close, pct_from_prior_close_status FROM detections WHERE symbol = 'TSLA'"
+    ).fetchone()
+    assert row == (10.0, "AVAILABLE")
+
+
+def test_process_new_bar_with_a_mocked_evaluate_bar_result_journals_null_pct_from_prior_close(monkeypatch):
+    """Existing tests (see _high_tier_fixture) monkeypatch evaluate_bar
+    with a hand-built dict that predates the A1 keys -- process_new_bar
+    must not KeyError on them, and must journal NULL/NULL rather than
+    fabricate a value the mocked evaluate_bar never computed."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats)
+    row = conn.execute(
+        "SELECT pct_from_prior_close, pct_from_prior_close_status FROM detections WHERE symbol = 'TSLA'"
+    ).fetchone()
+    assert row == (None, None)
+
+
 def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypatch, caplog, tmp_path):
     from tradebot import metrics as metrics_mod
 
