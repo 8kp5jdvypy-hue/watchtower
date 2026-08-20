@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tradebot.config import WATCHLIST
 from tradebot.detectors import DETECTORS, Bar, atr, bar_close_ts, build_anchors, score_cluster
+from tradebot.features import pct_from_prior_close
 from tradebot.journal import backfill_marks, code_version, connect, write_cluster
 from tradebot.marketdata import ReplayMarketData
 
@@ -108,6 +109,13 @@ def replay_symbol_session(
                         f"bar close={expected_close} for {symbol} {session_date}"
                     )
                 window = atr(bars)
+                # A1 (docs/open-awareness-proposals-2026-08.md): the SAME
+                # primitive runner.py's evaluate_bar uses -- this harness
+                # doesn't go through evaluate_bar, so without this call
+                # the feature would work live and silently vanish from
+                # the analysis harness. A RECORDED FEATURE ONLY, never a
+                # detection/scoring/tiering input.
+                displacement = pct_from_prior_close(last.close, anchors.prior_close)
                 rows.append(
                     {
                         "session": session_date.isoformat(),
@@ -120,6 +128,8 @@ def replay_symbol_session(
                         "close": last.close,
                         "atr14": round(window, 4) if window is not None else "",
                         "trend": "up" if last.close >= anchors.prior_close else "down",
+                        "pct_from_prior_close": displacement.value,
+                        "pct_from_prior_close_status": displacement.status,
                         "detections": detections,
                     }
                 )
@@ -182,7 +192,10 @@ def main() -> None:
             history_by_symbol[symbol].append(full_session_rth_bars(symbol, session_date, cache_dir))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    csv_fields = ["session", "ts_et", "symbol", "kinds", "headlines", "score", "close", "atr14", "trend"]
+    csv_fields = [
+        "session", "ts_et", "symbol", "kinds", "headlines", "score", "close", "atr14", "trend",
+        "pct_from_prior_close", "pct_from_prior_close_status",
+    ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
         writer.writeheader()
@@ -205,6 +218,8 @@ def main() -> None:
             trend=r["trend"],
             detections=r["detections"],
             code_version_str=version,
+            pct_from_prior_close=r["pct_from_prior_close"],
+            pct_from_prior_close_status=r["pct_from_prior_close_status"],
         )
     conn.commit()
     print(f"wrote {len(all_rows)} cluster rows to the journal ({version})")

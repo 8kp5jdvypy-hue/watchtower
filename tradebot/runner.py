@@ -85,6 +85,7 @@ from tradebot.journal import (
     tier_performance,
 )
 from tradebot.journal import write_cluster as journal_write_cluster
+from tradebot.features import pct_from_prior_close
 from tradebot.marketdata import (
     PLAUSIBILITY_WINDOW_SESSIONS,
     LiveMarketData,
@@ -260,6 +261,11 @@ def evaluate_bar(
     atr14 = primary.context.get("atr14")
     if atr14 is None:
         atr14 = atr(bars)
+    # A1 (docs/open-awareness-proposals-2026-08.md): prior-close
+    # displacement recorded alongside every cluster this evaluation
+    # already produces -- a RECORDED FEATURE ONLY, never a scoring or
+    # tiering input. See tradebot.features.pct_from_prior_close.
+    displacement = pct_from_prior_close(last.close, anchors.prior_close)
     return {
         "ts": expected_close,
         "close": last.close,
@@ -272,6 +278,8 @@ def evaluate_bar(
         "score": score_cluster(detections),
         "trend": "up" if last.close >= anchors.prior_close else "down",
         "detections": detections,
+        "pct_from_prior_close": displacement.value,
+        "pct_from_prior_close_status": displacement.status,
     }
 
 
@@ -407,6 +415,12 @@ def process_new_bar(
         primary_kind=result["primary_kind"],
         data_feed=data_feed,
         origin=origin,
+        # .get(): test doubles that monkeypatch evaluate_bar with a
+        # hand-built result dict (see test_integration_pipeline.py)
+        # predate these two keys -- None/None there is the correct
+        # "primitive never ran" default, same as every other pre-A1 row.
+        pct_from_prior_close=result.get("pct_from_prior_close"),
+        pct_from_prior_close_status=result.get("pct_from_prior_close_status"),
     )
     tier = tier_for_score(result["score"]).value
     raw_tier_is_high = tier == "high"

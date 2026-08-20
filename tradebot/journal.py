@@ -96,7 +96,9 @@ CREATE TABLE IF NOT EXISTS detections (
     origin TEXT,
     extreme_mover INTEGER,
     extreme_mover_gap_pct REAL,
-    extreme_mover_volume INTEGER
+    extreme_mover_volume INTEGER,
+    pct_from_prior_close REAL,
+    pct_from_prior_close_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS marks (
@@ -209,6 +211,21 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     _add_column_if_missing(conn, "detections", "extreme_mover", "INTEGER")
     _add_column_if_missing(conn, "detections", "extreme_mover_gap_pct", "REAL")
     _add_column_if_missing(conn, "detections", "extreme_mover_volume", "INTEGER")
+    # A1 (docs/open-awareness-proposals-2026-08.md, Phase 1 perception
+    # decomposition): prior-close displacement recorded as an audit
+    # feature only -- not a detector, not a scoring input, not a
+    # threshold. NULL on every row before this shipped and on any row
+    # where tradebot.features.pct_from_prior_close() came back
+    # UNAVAILABLE -- same NULL-means-not-applicable discipline as
+    # extreme_mover_gap_pct above. pct_from_prior_close_status is never
+    # NULL for a row written by a caller that ran the primitive (it's
+    # always 'AVAILABLE' or 'UNAVAILABLE:<reason>' -- see
+    # tradebot.features.PctFromPriorClose.status) -- the status column
+    # is what lets a query distinguish "this session had no signal" from
+    # "this feature couldn't be computed," which a bare NULL on the
+    # value column alone cannot.
+    _add_column_if_missing(conn, "detections", "pct_from_prior_close", "REAL")
+    _add_column_if_missing(conn, "detections", "pct_from_prior_close_status", "TEXT")
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
@@ -269,6 +286,8 @@ def write_cluster(
     primary_kind: str | None = None,
     data_feed: str | None = None,
     origin: str = "watchlist",
+    pct_from_prior_close: float | None = None,
+    pct_from_prior_close_status: str | None = None,
 ) -> str:
     """symbol_class (deep/thin liquidity, see tradebot.config) is derived
     and frozen here at write time, not looked up later — the watchlist's
@@ -286,7 +305,16 @@ def write_cluster(
     the fixed watchlist or promoted in by broad_scan for this session. The
     only place this fact is knowable is the caller's own merge point
     (tradebot.runner's `scan_symbols` construction), so it must be passed
-    in, not derived here. See docs/broad-scan-honesty-proposal.md."""
+    in, not derived here. See docs/broad-scan-honesty-proposal.md.
+
+    pct_from_prior_close/pct_from_prior_close_status: the caller's own
+    tradebot.features.pct_from_prior_close(close, anchors.prior_close)
+    result, already resolved before this call the same way data_feed/
+    origin are — this module has no reason to import tradebot.features
+    just to recompute what the caller already has. value is None exactly
+    when status is 'UNAVAILABLE:<reason>' rather than 'AVAILABLE'; both
+    default to None (pre-A1 callers/tests and any test double that never
+    ran the real primitive)."""
     tier = tier_for_score(score).value
     detection_id = cluster_id(symbol, session, ts_utc, kinds)
     context_json = json.dumps([d.context for d in detections])
@@ -296,8 +324,9 @@ def write_cluster(
         INSERT INTO detections
             (id, ts_utc, session, symbol, kinds, headlines, score, tier,
              close, atr14, trend, context_json, code_version, alerted, suppress_reason,
-             primary_kind, symbol_class, data_feed, origin)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             primary_kind, symbol_class, data_feed, origin,
+             pct_from_prior_close, pct_from_prior_close_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ts_utc=excluded.ts_utc, kinds=excluded.kinds, headlines=excluded.headlines,
             score=excluded.score, tier=excluded.tier, close=excluded.close,
@@ -305,12 +334,14 @@ def write_cluster(
             code_version=excluded.code_version, alerted=excluded.alerted,
             suppress_reason=excluded.suppress_reason, primary_kind=excluded.primary_kind,
             symbol_class=excluded.symbol_class, data_feed=excluded.data_feed,
-            origin=excluded.origin
+            origin=excluded.origin, pct_from_prior_close=excluded.pct_from_prior_close,
+            pct_from_prior_close_status=excluded.pct_from_prior_close_status
         """,
         (
             detection_id, ts_utc, session, symbol, kinds, headlines, score, tier,
             close, atr14, trend, context_json, code_version_str, int(alerted), suppress_reason,
             primary_kind, symbol_class, data_feed, origin,
+            pct_from_prior_close, pct_from_prior_close_status,
         ),
     )
     return detection_id

@@ -211,6 +211,60 @@ def test_extreme_mover_stays_null_when_never_set(tmp_path):
     assert row == (None, None, None)
 
 
+def test_write_cluster_pct_from_prior_close_round_trips(tmp_path):
+    """A1 (docs/open-awareness-proposals-2026-08.md): pct_from_prior_close
+    is a resolved value the caller already computed via
+    tradebot.features.pct_from_prior_close, passed straight through the
+    same way data_feed/origin are."""
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=110.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+        pct_from_prior_close=10.0, pct_from_prior_close_status="AVAILABLE",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT pct_from_prior_close, pct_from_prior_close_status FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (10.0, "AVAILABLE")
+
+
+def test_write_cluster_pct_from_prior_close_unavailable_status_round_trips(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=110.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+        pct_from_prior_close=None, pct_from_prior_close_status="UNAVAILABLE:invalid_prior_close",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT pct_from_prior_close, pct_from_prior_close_status FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (None, "UNAVAILABLE:invalid_prior_close")
+
+
+def test_pct_from_prior_close_stays_null_when_never_passed(tmp_path):
+    """Every pre-A1 caller/test that doesn't pass these two kwargs must
+    keep journaling exactly as before -- NULL/NULL, not a fabricated
+    default."""
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session="2026-06-15", symbol=SYMBOL, ts_utc="2026-06-15T14:00:00+00:00",
+        kinds="gap", headlines="h", score=4.0, close=110.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT pct_from_prior_close, pct_from_prior_close_status FROM detections WHERE id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (None, None)
+
+
 def test_cluster_id_is_deterministic():
     a = cluster_id("SPY", "2026-06-15", "2026-06-15T14:00:00+00:00", "gap")
     b = cluster_id("SPY", "2026-06-15", "2026-06-15T14:00:00+00:00", "gap")
