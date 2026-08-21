@@ -276,6 +276,65 @@ def test_latest_required_bar_close_never_exceeds_a_clamped_session_close():
     assert clamped is not None and clamped <= early_close
 
 
+def test_final_session_bar_not_yet_required_exactly_at_close_plus_grace():
+    """PR #64 review round 3's release-blocking finding, reproduced: the
+    OLD ordering (clamp `now` to session_close, THEN subtract grace)
+    stuck the required boundary at session_close - one bar width
+    forever, since it subtracted grace from an already-capped value --
+    the final bar could never earn its own grace window no matter how
+    long it stayed missing. Grace must apply to the real, unclamped
+    `now`; only the resulting boundary gets capped."""
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)  # 09:30 ET
+    session_close = datetime(2026, 8, 19, 20, 0, tzinfo=timezone.utc)  # 16:00 ET
+    now = session_close + timedelta(seconds=90)  # exactly grace past close -- not yet required (strict >)
+    required = latest_required_bar_close(session_open, now, grace_seconds=90, session_close=session_close)
+    assert required == session_close - timedelta(minutes=5)  # 15:55 -- the final 16:00 bar is NOT yet required
+
+
+def test_final_session_bar_required_just_past_close_plus_grace():
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    session_close = datetime(2026, 8, 19, 20, 0, tzinfo=timezone.utc)
+    now = session_close + timedelta(seconds=91)  # one second past strict grace
+    required = latest_required_bar_close(session_open, now, grace_seconds=90, session_close=session_close)
+    assert required == session_close  # the final bar is now genuinely required
+
+
+def test_required_boundary_stays_capped_at_session_close_far_after_close():
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    session_close = datetime(2026, 8, 19, 20, 0, tzinfo=timezone.utc)
+    now = session_close + timedelta(hours=1)  # a badly delayed iteration, well past close
+    required = latest_required_bar_close(session_open, now, grace_seconds=90, session_close=session_close)
+    assert required == session_close  # capped, never later than the real close
+
+
+def test_required_boundary_respects_a_real_early_close():
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    early_close = datetime(2026, 8, 19, 17, 0, tzinfo=timezone.utc)  # 13:00 ET early close
+    now = early_close + timedelta(hours=1)
+    required = latest_required_bar_close(session_open, now, grace_seconds=90, session_close=early_close)
+    assert required == early_close
+
+
+def test_only_closed_bars_excludes_a_bar_that_closed_during_the_fetch_window():
+    """PR #64 review round 3's other release-blocking finding: a request
+    can straddle a bar boundary (started 13:34:59.8, before the 13:35
+    close; the response returned 13:35:00.15, after it). bar_close_ts(bar)
+    <= a POST-fetch timestamp only proves the wall clock had passed the
+    boundary by the time we looked, not that the specific response held
+    was assembled after it. Eligibility must use the PRE-fetch instant --
+    the conservative choice, deferring an ambiguous bar to the next
+    poll rather than trusting a response that might have been
+    mid-formation when Alpaca built it."""
+    bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:35:00
+    pre_fetch_time = datetime(2026, 8, 19, 13, 34, 59, 800000, tzinfo=timezone.utc)  # before the request was sent
+    post_fetch_time = datetime(2026, 8, 19, 13, 35, 0, 150000, tzinfo=timezone.utc)  # after the response returned
+
+    assert only_closed_bars([bar], pre_fetch_time) == []  # what run_live() now does: correctly deferred
+    # The rejected alternative (judging by a post-fetch timestamp) would
+    # have wrongly admitted it -- exactly the bug this guards against.
+    assert only_closed_bars([bar], post_fetch_time) == [bar]
+
+
 def test_only_closed_bars_uses_a_fresh_per_symbol_timestamp_not_a_stale_outer_one():
     """The second review finding: closed-bar eligibility must use the
     actual per-symbol evaluation time, not an outer-loop timestamp
