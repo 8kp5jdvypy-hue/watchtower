@@ -2232,15 +2232,91 @@ def test_run_broad_scan_shadow_counts_satisfy_the_conservation_invariant(caplog)
     assert "requested=5" in msg
     assert "fetched=4" in msg
     assert "missing_from_fetch=1" in msg
-    assert "unexpected_from_fetch=0" in msg
     assert "insufficient_history=1" in msg
-    assert "snapshot=3" in msg
+    assert "requested_snapshot=3" in msg
     assert "invalid_baseline=1" in msg
     assert "evaluated_quiet=1" in msg
+    assert "requested_candidate=1" in msg
     assert "candidate=1" in msg
     assert "eligible_for_top_n=1" in msg
     assert "selected_top_n=1" in msg
+    # No vendor extras anywhere in this scenario -- every unexpected_*
+    # count must be zero.
+    assert "unexpected_from_fetch=0" in msg
+    assert "unexpected_snapshot=0" in msg
+    assert "unexpected_candidate=0" in msg
+    assert "unexpected_selected=0" in msg
     assert "invariant_ok=True" in msg
+
+
+def test_run_broad_scan_shadow_counts_track_unexpected_vendor_symbols_separately(caplog):
+    """If the vendor's bulk response includes a symbol that was NEVER
+    requested (not in active_symbols() at all), the requested-universe
+    conservation invariant must still hold using only the requested
+    population, the unexpected symbol must be counted separately at
+    every stage it reaches (fetch, snapshot, candidate, and — since it
+    scores as a real candidate here — selected), and the real returned
+    selection must be unaffected by this instrumentation: nothing in
+    build_snapshots_from_daily_bars/screen_snapshot/promote_candidates
+    filters by "was this symbol requested", so current production
+    semantics already process and would return such a symbol."""
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = ["QUIET1", "LOUD1"]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def _spike_bars(symbol):
+        bars = [Bar(symbol, datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        bars.append(Bar(symbol, datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        return bars
+
+    def fake_bars(fetched_symbols, lookback_days):
+        assert set(fetched_symbols) == set(symbols)  # only the real universe was ever requested
+        return {
+            "QUIET1": [Bar("QUIET1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)],
+            "LOUD1": _spike_bars("LOUD1"),
+            # EXTRA1 was never requested -- simulates a vendor response
+            # containing an unrequested symbol.
+            "EXTRA1": _spike_bars("EXTRA1"),
+        }
+
+    with caplog.at_level(logging.INFO, logger="watchtower.runner"):
+        promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    # Current production semantics, unrelated to this instrumentation:
+    # an unrequested-but-fetched symbol that screens as a real candidate
+    # is returned exactly like any other. This instrumentation must not
+    # change that.
+    assert set(promoted) == {"LOUD1", "EXTRA1"}
+
+    [shadow_record] = [r for r in caplog.records if "broad_scan_shadow_counts" in r.getMessage()]
+    msg = shadow_record.getMessage()
+    # Requested-universe conservation holds using ONLY the 2 real symbols
+    # -- EXTRA1 must not inflate any of these.
+    assert "requested=2" in msg
+    assert "fetched=2" in msg
+    assert "missing_from_fetch=0" in msg
+    assert "insufficient_history=0" in msg
+    assert "requested_snapshot=2" in msg
+    assert "invalid_baseline=0" in msg
+    assert "evaluated_quiet=1" in msg  # QUIET1
+    assert "requested_candidate=1" in msg  # LOUD1 only
+    assert "invariant_ok=True" in msg
+    # EXTRA1 tracked separately at every stage it reached, neither
+    # folded into the requested figures nor silently dropped.
+    assert "candidate=2" in msg  # true production total: LOUD1 + EXTRA1
+    assert "selected_top_n=2" in msg
+    assert "unexpected_from_fetch=1" in msg
+    assert "unexpected_snapshot=1" in msg
+    assert "unexpected_candidate=1" in msg
+    assert "unexpected_selected=1" in msg
 
 
 def test_broad_scan_shadow_count_failure_never_touches_the_returned_selection(caplog, monkeypatch):

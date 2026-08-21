@@ -1200,71 +1200,102 @@ def _log_broad_scan_shadow_counts(
     to run_broad_scan()'s real behavior as a failed metrics.increment
     call would be.
 
+    The requested-universe conservation invariant is scoped STRICTLY to
+    `symbols` (what active_symbols() actually asked for) at every stage
+    — never to the raw fetch response, which the vendor could in
+    principle pad with a symbol nobody requested. Nothing in
+    build_snapshots_from_daily_bars/screen_snapshot/promote_candidates
+    filters by "was this symbol requested", so the current production
+    pipeline WOULD process and could even select such a symbol if the
+    vendor ever sent one — that's real behavior, not a data-integrity
+    bug this function's job is to hide. So every stage is reported
+    twice: once scoped to `requested_symbols` (feeds the invariant) and
+    once as the true, unfiltered production total (`candidate`,
+    `selected_top_n`) — plus a parallel `unexpected_*` count at every
+    stage an unrequested symbol could reach, so vendor extras are
+    visible, never silently folded in or silently dropped.
+
     Each count maps to one specific, already-existing code path — no
     invented categories:
-      - missing_from_fetch: requested symbol absent from bars_by_symbol
-        (vendors.alpaca.fetch_daily_bars_bulk never pads a missing
-        symbol with a fabricated entry — see its own docstring)
-      - unexpected_from_fetch: the reverse — a symbol in the fetch
-        response that was never requested; expected to always be 0
-        under Alpaca's API contract, cheap to verify rather than assume
-      - insufficient_history: present in bars_by_symbol but dropped by
-        broad_scan.build_snapshots_from_daily_bars's own min_history
-        skip (broad_scan.py:111-112) — derived by set difference
-        against the snapshots it actually returned, never by
+      - missing_from_fetch: requested symbol absent from the fetch
+        response (vendors.alpaca.fetch_daily_bars_bulk never pads a
+        missing symbol with a fabricated entry — see its own docstring)
+      - unexpected_from_fetch / unexpected_snapshot / unexpected_candidate
+        / unexpected_selected: a symbol that was NEVER requested but
+        appeared at that stage anyway — expected to always be 0 under
+        Alpaca's API contract, cheap to verify rather than assume, and
+        reported at every stage it could reach rather than only at the
+        first one
+      - insufficient_history: a REQUESTED symbol present in the fetch
+        response but dropped by broad_scan.build_snapshots_from_daily_bars's
+        own min_history skip (broad_scan.py:111-112) — derived by set
+        difference against the snapshots it actually returned, never by
         re-checking a bar count against a hardcoded threshold
-      - invalid_baseline: a real Snapshot that would fail
+      - invalid_baseline: a REQUESTED symbol's Snapshot that would fail
         screen_snapshot's own guard (broad_scan.py:69-70) — the one
         deliberate, small duplication of that single boolean condition
         against Snapshot's own public fields, not a re-derivation of
         any ratio formula
-      - evaluated_quiet: the remainder, derived from the conservation
-        invariant itself (snapshot_count - invalid_baseline -
-        candidate), never independently computed
-      - candidate / selected_top_n: read directly off `promoted` /
-        `selected`, the exact objects run_broad_scan() already uses for
-        its real return value — never a separately recomputed count,
-        so this can never diverge from what was actually selected
+      - evaluated_quiet: the REQUESTED remainder, derived from the
+        conservation invariant itself, never independently computed
+      - candidate / selected_top_n: the TRUE production totals, read
+        directly off `promoted` / `selected` — never a separately
+        recomputed count, so these can never diverge from what was
+        actually selected
     """
     try:
-        requested_universe_count = len(symbols)
         requested_symbols = set(symbols)
-        fetched_symbols = set(bars_by_symbol.keys())
-        fetched_count = len(requested_symbols & fetched_symbols)
-        missing_from_fetch_count = len(requested_symbols - fetched_symbols)
-        unexpected_from_fetch_count = len(fetched_symbols - requested_symbols)
+        returned_symbols = set(bars_by_symbol.keys())
+        requested_fetched_symbols = requested_symbols & returned_symbols
+        fetched_count = len(requested_fetched_symbols)
+        missing_from_fetch_count = len(requested_symbols - returned_symbols)
+        unexpected_from_fetch_count = len(returned_symbols - requested_symbols)
 
         snapshot_symbols = {s.symbol for s in snapshots}
-        insufficient_history_count = len(fetched_symbols - snapshot_symbols)
-        snapshot_count = len(snapshots)
+        requested_snapshot_symbols = snapshot_symbols & requested_symbols
+        insufficient_history_count = len(requested_fetched_symbols - requested_snapshot_symbols)
+        requested_snapshot_count = len(requested_snapshot_symbols)
+        unexpected_snapshot_count = len(snapshot_symbols - requested_symbols)
 
-        invalid_baseline_count = sum(1 for s in snapshots if s.avg_volume <= 0 or s.prior_close <= 0)
-        candidate_count = len(promoted)
-        evaluated_quiet_count = snapshot_count - invalid_baseline_count - candidate_count
+        requested_snapshots = [s for s in snapshots if s.symbol in requested_symbols]
+        invalid_baseline_count = sum(1 for s in requested_snapshots if s.avg_volume <= 0 or s.prior_close <= 0)
 
-        # promote_candidates' own default threshold (1.0) is already
-        # screen_snapshot's own construction floor (broad_scan.py:65-96),
-        # so these are provably equal under current code — logging both
-        # so a future threshold change would show up as a divergence
-        # instead of silently disappearing, the same reasoning the
-        # universe_candidates_promoted naming issue exists to avoid
+        requested_candidate_count = sum(1 for c in promoted if c.symbol in requested_symbols)
+        unexpected_candidate_count = len(promoted) - requested_candidate_count
+        evaluated_quiet_count = requested_snapshot_count - invalid_baseline_count - requested_candidate_count
+
+        # True production totals — unfiltered, exactly what run_broad_scan()
+        # actually processed/returned. promote_candidates' own default
+        # threshold (1.0) is already screen_snapshot's own construction
+        # floor (broad_scan.py:65-96), so candidate_count ==
+        # eligible_for_top_n_count is provably true under current code —
+        # logging both so a future threshold change would show up as a
+        # divergence instead of silently disappearing, the same reasoning
+        # the universe_candidates_promoted naming issue exists to avoid
         # repeating.
+        candidate_count = len(promoted)
         eligible_for_top_n_count = candidate_count
         selected_top_n_count = len(selected)
+        unexpected_selected_count = sum(1 for c in selected if c.symbol not in requested_symbols)
 
-        requested_check = missing_from_fetch_count + insufficient_history_count + snapshot_count
-        snapshot_check = invalid_baseline_count + evaluated_quiet_count + candidate_count
-        invariant_ok = (requested_check == requested_universe_count) and (snapshot_check == snapshot_count)
+        requested_universe_count = len(requested_symbols)
+        requested_check = missing_from_fetch_count + insufficient_history_count + requested_snapshot_count
+        snapshot_check = invalid_baseline_count + evaluated_quiet_count + requested_candidate_count
+        invariant_ok = (requested_check == requested_universe_count) and (snapshot_check == requested_snapshot_count)
 
         logger.info(
             "broad_scan_shadow_counts requested=%d fetched=%d missing_from_fetch=%d "
-            "unexpected_from_fetch=%d insufficient_history=%d snapshot=%d "
-            "invalid_baseline=%d evaluated_quiet=%d candidate=%d "
-            "eligible_for_top_n=%d selected_top_n=%d promotion_limit=%d invariant_ok=%s",
+            "insufficient_history=%d requested_snapshot=%d invalid_baseline=%d "
+            "evaluated_quiet=%d requested_candidate=%d candidate=%d "
+            "eligible_for_top_n=%d selected_top_n=%d promotion_limit=%d "
+            "unexpected_from_fetch=%d unexpected_snapshot=%d unexpected_candidate=%d "
+            "unexpected_selected=%d invariant_ok=%s",
             requested_universe_count, fetched_count, missing_from_fetch_count,
-            unexpected_from_fetch_count, insufficient_history_count, snapshot_count,
-            invalid_baseline_count, evaluated_quiet_count, candidate_count,
-            eligible_for_top_n_count, selected_top_n_count, promotion_limit, invariant_ok,
+            insufficient_history_count, requested_snapshot_count, invalid_baseline_count,
+            evaluated_quiet_count, requested_candidate_count, candidate_count,
+            eligible_for_top_n_count, selected_top_n_count, promotion_limit,
+            unexpected_from_fetch_count, unexpected_snapshot_count, unexpected_candidate_count,
+            unexpected_selected_count, invariant_ok,
         )
     except Exception:
         logger.error("broad_scan shadow-count instrumentation failed (non-fatal): %s", traceback.format_exc())
