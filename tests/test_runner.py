@@ -36,6 +36,7 @@ from tradebot.runner import (
     expected_rth_bar_count,
     full_session_rth_bars,
     is_bar_gap,
+    expected_latest_bar_close,
     is_halted_bar,
     is_stale,
     only_closed_bars,
@@ -119,17 +120,112 @@ def test_only_closed_bars_keeps_every_newly_completed_bar_after_a_delayed_loop()
 
 
 def test_only_closed_bars_combined_with_is_stale_still_detects_a_genuinely_stale_bar():
-    """Filtering first, then checking staleness on the result (as
-    run_live() now does), still catches a real stale-data condition --
-    this guard doesn't mask the existing protection, it fixes the
-    trivial-false-negative case (a forming bar's future close always
-    reading as "not stale")."""
+    """is_stale() and only_closed_bars() as standalone primitives: a bar
+    closed 91s before `now`, with nothing newer in the list, does read
+    as stale under is_stale()'s own (unmodified) now-vs-bar-close
+    semantics.
+
+    NOTE: this is NOT the production call pattern. run_live() does not
+    call is_stale(bar_close_ts(rth_bars[-1]), evaluation_time) directly
+    -- that reads as stale for most of every healthy candle (see the
+    expected_latest_bar_close tests below, and PR #64's review history:
+    an earlier version of this fix made exactly that mistake). Production
+    calls is_stale(bar_close_ts(rth_bars[-1]), expected_latest_bar_close(...))
+    instead -- comparing against the expected bar boundary, not raw wall
+    clock. This test just documents that is_stale() itself, unmodified,
+    still does what it always did when handed a genuine staleness gap."""
     t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
     stale_bar = Bar("XPON", t0, 10, 10.2, 9.9, 10.1, 400)  # closes 13:35
     now = t0 + timedelta(minutes=5, seconds=91)  # 91s past its close, > STALENESS_SECONDS (90)
     closed = only_closed_bars([stale_bar], now)
     assert closed == [stale_bar]
     assert is_stale(bar_close_ts(closed[-1]), now, max_seconds=90) is True
+
+
+def test_expected_latest_bar_close_is_none_before_the_first_bar_can_have_closed():
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    now = session_open + timedelta(minutes=2)  # still inside the first bar
+    assert expected_latest_bar_close(session_open, now) is None
+
+
+def test_expected_latest_bar_close_exactly_at_a_boundary():
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    now = session_open + timedelta(minutes=15)  # exactly 3 bars' worth, right on the boundary
+    assert expected_latest_bar_close(session_open, now) == session_open + timedelta(minutes=15)
+
+
+def test_healthy_mid_candle_data_is_not_flagged_stale():
+    """PR #64 review's release-blocking finding, reproduced as a
+    regression test: the exact production XPON timing. Filtering out
+    the forming bar leaves a completed bar that closed ~151s ago -- more
+    than STALENESS_SECONDS (90) by pure wall-clock distance, but this is
+    completely normal mid-candle behavior, not delayed data. Staleness
+    must be judged against the expected bar boundary
+    (expected_latest_bar_close), not the bar's own close time."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    completed_bar = Bar("XPON", datetime(2026, 8, 19, 13, 25, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:30
+    forming_bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10.1, 10.3, 10.0, 10.2, 100)  # closes 13:35
+    now = datetime(2026, 8, 19, 13, 32, 31, tzinfo=timezone.utc)  # the real production timing
+
+    closed = only_closed_bars([completed_bar, forming_bar], now)
+    assert closed == [completed_bar]
+
+    expected = expected_latest_bar_close(session_open, now)
+    assert expected == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    assert is_stale(bar_close_ts(closed[-1]), expected) is False
+
+
+def test_healthy_mid_candle_still_not_stale_one_poll_later():
+    """Same healthy polling phase, one bar later -- the phase-lock the
+    original bug would have kept repeating every cycle (~151s past each
+    bar's own close, ~90s over threshold under the old, wrong
+    comparison) must not recur under the corrected one."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    completed_bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:35
+    forming_bar = Bar("XPON", datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc), 10.1, 10.3, 10.0, 10.2, 100)  # closes 13:40
+    now = datetime(2026, 8, 19, 13, 37, 31, tzinfo=timezone.utc)
+
+    closed = only_closed_bars([completed_bar, forming_bar], now)
+    assert closed == [completed_bar]
+
+    expected = expected_latest_bar_close(session_open, now)
+    assert expected == datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+    assert is_stale(bar_close_ts(closed[-1]), expected) is False
+
+
+def test_genuine_missing_bar_still_triggers_staleness():
+    """The corrected comparison must still catch real delayed/missing
+    data -- fixing the healthy-candle false positive must not turn into
+    disabling staleness protection entirely."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    # Feed is stuck: the only bar available closed at 13:15, three
+    # bar-widths behind where data should be by 13:32:31 (expected
+    # boundary 13:30).
+    stuck_bar = Bar("XPON", datetime(2026, 8, 19, 13, 10, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:15
+    now = datetime(2026, 8, 19, 13, 32, 31, tzinfo=timezone.utc)
+
+    closed = only_closed_bars([stuck_bar], now)
+    assert closed == [stuck_bar]
+
+    expected = expected_latest_bar_close(session_open, now)
+    assert expected == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    # gap = 13:30 - 13:15 = 900s, well past the 90s grace -- genuinely stale.
+    assert is_stale(bar_close_ts(closed[-1]), expected, max_seconds=90) is True
+
+
+def test_only_closed_bars_uses_a_fresh_per_symbol_timestamp_not_a_stale_outer_one():
+    """The second review finding: closed-bar eligibility must use the
+    actual per-symbol evaluation time, not an outer-loop timestamp
+    captured before broad-scan work and earlier symbols in scan_symbols
+    were processed. A bar that closed in that gap is legitimately
+    available and must not be postponed to the next poll just because a
+    stale outer timestamp was used to judge it."""
+    bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:35:00
+    stale_outer_loop_start = datetime(2026, 8, 19, 13, 34, 50, tzinfo=timezone.utc)  # captured before the bar closed
+    fresh_evaluation_time = datetime(2026, 8, 19, 13, 35, 15, tzinfo=timezone.utc)  # this symbol's actual fetch moment
+
+    assert only_closed_bars([bar], stale_outer_loop_start) == []  # would incorrectly postpone a real bar
+    assert only_closed_bars([bar], fresh_evaluation_time) == [bar]  # correctly available
 
 
 def test_is_halted_bar_detects_zero_volume():

@@ -158,6 +158,37 @@ def only_closed_bars(bars: list[Bar], now: datetime) -> list[Bar]:
     return [b for b in bars if bar_close_ts(b) <= now]
 
 
+def expected_latest_bar_close(
+    session_open: datetime, now: datetime, bar_minutes: int = BAR_MINUTES
+) -> datetime | None:
+    """The close timestamp of the most recent bar that SHOULD already
+    exist, given `now` — the most recent bar_minutes-aligned boundary at
+    or before `now`, counted from `session_open` (not from a calendar
+    clock boundary — deriving it from the actual session open is what
+    keeps this early-close-safe and not an accident of NYSE's 09:30 ET
+    open happening to already land on a clean UTC 5-minute mark).
+
+    None if `now` is still within the first bar (elapsed < bar_minutes)
+    — nothing has closed yet this session, so there is nothing to have
+    gone stale relative to.
+
+    This is the reference staleness must actually compare against.
+    "Is the newest available bar's own close more than STALENESS_SECONDS
+    old?" reads as stale for most of every healthy candle — a bar that
+    closed 4 minutes ago while its successor is still forming is
+    completely normal, not delayed data. The real question is "has the
+    bar that should exist by now failed to show up for more than the
+    allowed grace" — i.e. the gap between this expected boundary and
+    whatever bar we actually have, not wall-clock distance from that
+    bar's own close.
+    """
+    elapsed = (now - session_open).total_seconds()
+    completed = int(elapsed // (bar_minutes * 60))
+    if completed <= 0:
+        return None
+    return session_open + timedelta(minutes=bar_minutes * completed)
+
+
 def is_halted_bar(bar: Bar) -> bool:
     """A zero-volume bar means no trades happened — treat it as no new
     information rather than feeding it to the detectors, so a halted
@@ -1540,10 +1571,19 @@ def run_live(
                 rth_bars = list(md[symbol].session_bars(symbol, session_date))
                 if not rth_bars:
                     continue
-                rth_bars = only_closed_bars(rth_bars, loop_start)
+                # A fresh timestamp here, not the outer loop_start captured
+                # before broad-scan work and any earlier symbols in
+                # scan_symbols were processed — this symbol's own bars were
+                # just fetched, and closed-bar eligibility (and the
+                # staleness check derived from it) must reflect when THAT
+                # actually happened, not how stale loop_start itself has
+                # become by the time we get here.
+                evaluation_time = datetime.now(timezone.utc)
+                rth_bars = only_closed_bars(rth_bars, evaluation_time)
                 if not rth_bars:
                     continue
-                if is_stale(bar_close_ts(rth_bars[-1]), loop_start):
+                expected_close = expected_latest_bar_close(open_ts, evaluation_time)
+                if expected_close is not None and is_stale(bar_close_ts(rth_bars[-1]), expected_close):
                     metrics.increment("data_health_suppression", reason="stale")
                     if not stale_notified:
                         alerter.send(
