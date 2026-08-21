@@ -438,7 +438,7 @@ def _commit_then_send(conn, alerter, text: str, *, priority: int, alert_id: str 
 
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
-    subscriber_hook=None, now=None, market_bars=None, data_feed=None, origin="watchlist",
+    subscriber_hook=None, validation_now_fn=None, market_bars=None, data_feed=None, origin="watchlist",
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
     called right after a HIGH alert is sent to the ops channel/console —
@@ -451,8 +451,15 @@ def process_new_bar(
     prior behavior — no fan-out, used by replay and by every existing
     test.
 
-    now: real wall-clock time, tz-aware, for the guard's quote-staleness
-    check. Only run_live() passes this — a replayed historical quote is
+    validation_now_fn: zero-argument callable returning real wall-clock
+    time, tz-aware, for the guard's quote-staleness check. Called (if
+    given) immediately after quote_fn(symbol) returns, so the captured
+    timestamp reflects when the quote actually arrived — not when this
+    function, or the caller's loop iteration, started. An iteration can
+    be delayed by unrelated earlier work (other symbols, a broad scan),
+    so a timestamp captured any earlier would understate the quote's true
+    age, in the worst case making a genuinely stale quote look fresh.
+    Only run_live() passes this — a replayed historical quote is
     definitionally hours/days "stale" relative to real now, so replay
     passes None and the guard skips that one check, the same way
     STALENESS_SECONDS/is_stale() is already a live-only concept here.
@@ -591,8 +598,11 @@ def process_new_bar(
 
     if decision in (Decision.SEND, Decision.CAP_REACHED_NOTICE):
         quote = quote_fn(symbol)
+        # Captured here, after the quote request returns, not earlier --
+        # see validation_now_fn's docstring above.
+        validation_now = validation_now_fn() if validation_now_fn is not None else None
         guard_reason = validate_alert_data(
-            cluster, anchors, quote, bars=bars, now=now, primary_detection=result["primary_detection"],
+            cluster, anchors, quote, bars=bars, now=validation_now, primary_detection=result["primary_detection"],
         )
         if guard_reason is None:
             # Proposal 3: re-derive the same evidence validate_alert_data
@@ -1666,7 +1676,9 @@ def run_live(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
                     lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
-                    stats, subscriber_hook, now=loop_start, market_bars=market_bars,
+                    stats, subscriber_hook,
+                    validation_now_fn=lambda: datetime.now(timezone.utc),
+                    market_bars=market_bars,
                     data_feed=DETECTOR_DATA_FEED, origin=origin,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)

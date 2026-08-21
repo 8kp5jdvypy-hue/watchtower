@@ -1226,6 +1226,136 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     }
 
 
+# --------------------------------------------------------------------------
+# 2026-08-21 stale loop_start / quote-staleness fix: validation_now_fn is
+# captured *after* quote_fn(symbol) returns, not at the caller's iteration
+# start. See process_new_bar's docstring above.
+# --------------------------------------------------------------------------
+
+
+def test_process_new_bar_rejects_a_quote_stale_relative_to_the_validation_clock(monkeypatch):
+    """The exact bug scenario: a quote genuinely older than
+    QUOTE_MAX_STALENESS_SECONDS relative to the real evaluation time must
+    be rejected -- even though an old iteration-start timestamp captured
+    before the quote was fetched could have made it look fresh, or even
+    negative-age, under the pre-fix behavior."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    # 120s after the quote's own timestamp -- past the 60s ceiling. A stale
+    # loop_start captured *before* the quote fetch (e.g. bar.ts - 5min)
+    # would instead have produced a negative age and wrongly passed.
+    validation_now_fn = lambda: bar.ts + timedelta(seconds=120)
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+        validation_now_fn=validation_now_fn,
+    )
+
+    row = conn.execute("SELECT alerted, suppress_reason, suppress_category FROM detections").fetchone()
+    assert row[0] == 0
+    assert row[1].startswith("data_integrity_failed: stale_quote")
+    assert row[2] == "data_integrity"
+
+
+def test_process_new_bar_accepts_a_quote_fresh_under_the_staleness_threshold(monkeypatch):
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    validation_now_fn = lambda: bar.ts + timedelta(seconds=30)  # under the 60s ceiling
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+        validation_now_fn=validation_now_fn,
+    )
+
+    row = conn.execute("SELECT alerted FROM detections").fetchone()
+    assert row[0] == 1
+
+
+def test_process_new_bar_calls_validation_now_fn_only_after_quote_fn_returns(monkeypatch):
+    """Controlled fake clock: quote_fn advances the clock as a stand-in for
+    the network fetch taking real time; validation_now_fn reads that same
+    clock. If validation_now_fn were (incorrectly) invoked before
+    quote_fn -- e.g. at the caller's loop-iteration start, the original
+    bug -- it would observe the pre-fetch clock value and the quote would
+    wrongly pass as fresh. Observing the rejection here proves the
+    post-fetch clock value was actually used."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    clock = {"t": bar.ts}  # pre-fetch: age would be 0s if read now (fresh)
+
+    def quote_fn(symbol):
+        clock["t"] = bar.ts + timedelta(seconds=200)  # simulated fetch delay, > 60s ceiling
+        return Quote(symbol=symbol, ts=bar.ts, bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+        validation_now_fn=lambda: clock["t"],
+    )
+
+    row = conn.execute("SELECT alerted, suppress_reason FROM detections").fetchone()
+    assert row[0] == 0
+    assert row[1].startswith("data_integrity_failed: stale_quote")
+
+
+def test_process_new_bar_validation_now_fn_none_skips_the_staleness_check(monkeypatch):
+    """None (the default, and what run_replay() always passes) preserves
+    today's behavior exactly: the staleness check is skipped regardless of
+    how old the quote's own timestamp is -- a replayed historical quote is
+    definitionally "stale" relative to real time and must not be rejected
+    on that basis."""
+    anchors, bar, result = _high_tier_fixture()
+    monkeypatch.setattr(runner_mod, "evaluate_bar", lambda symbol, bars, anch, market_bars=None: result)
+
+    conn = journal_connect(":memory:")
+    budget = AlertBudget(now=lambda: bar.ts)
+    stats = HeartbeatStats(start_time=bar.ts, session_date=date(2026, 7, 23))
+
+    def quote_fn(symbol):
+        # timestamped days in the past -- would fail staleness by a wide
+        # margin if the check ran at all
+        return Quote(symbol=symbol, ts=bar.ts - timedelta(days=3), bid=100.1, ask=100.3, last=100.2)
+
+    def chain_fn(symbol, expiry):
+        raise NotImplementedError
+
+    process_new_bar(
+        conn, budget, ConsoleAlerter(), "v1", "TSLA", date(2026, 7, 23), [bar], anchors, quote_fn, chain_fn, stats,
+    )  # validation_now_fn omitted entirely, same as every run_replay() call
+
+    row = conn.execute("SELECT alerted FROM detections").fetchone()
+    assert row[0] == 1
+
+
 def test_process_new_bar_tags_and_renders_a_verified_extreme_mover(monkeypatch, tmp_path):
     """End-to-end Proposal 3: a >25% move persisting across two
     consecutive real-volume bars clears guard.py, gets journaled via
