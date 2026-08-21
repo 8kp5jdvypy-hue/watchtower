@@ -36,9 +36,9 @@ from tradebot.runner import (
     expected_rth_bar_count,
     full_session_rth_bars,
     is_bar_gap,
-    expected_latest_bar_close,
     is_halted_bar,
     is_stale,
+    latest_required_bar_close,
     only_closed_bars,
     process_new_bar,
     session_bounds,
@@ -127,13 +127,13 @@ def test_only_closed_bars_combined_with_is_stale_still_detects_a_genuinely_stale
 
     NOTE: this is NOT the production call pattern. run_live() does not
     call is_stale(bar_close_ts(rth_bars[-1]), evaluation_time) directly
-    -- that reads as stale for most of every healthy candle (see the
-    expected_latest_bar_close tests below, and PR #64's review history:
-    an earlier version of this fix made exactly that mistake). Production
-    calls is_stale(bar_close_ts(rth_bars[-1]), expected_latest_bar_close(...))
-    instead -- comparing against the expected bar boundary, not raw wall
-    clock. This test just documents that is_stale() itself, unmodified,
-    still does what it always did when handed a genuine staleness gap."""
+    -- that reads as stale for most of every healthy candle. Production
+    calls latest_required_bar_close() to find the boundary that has
+    actually earned a complaint (more than STALENESS_SECONDS past its
+    OWN nominal close, not past whatever the caller's "now" happens to
+    be), and compares the actual bar directly against that. This test
+    just documents that is_stale() itself, unmodified, still does what
+    it always did when handed a genuine staleness gap."""
     t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
     stale_bar = Bar("XPON", t0, 10, 10.2, 9.9, 10.1, 400)  # closes 13:35
     now = t0 + timedelta(minutes=5, seconds=91)  # 91s past its close, > STALENESS_SECONDS (90)
@@ -142,26 +142,52 @@ def test_only_closed_bars_combined_with_is_stale_still_detects_a_genuinely_stale
     assert is_stale(bar_close_ts(closed[-1]), now, max_seconds=90) is True
 
 
-def test_expected_latest_bar_close_is_none_before_the_first_bar_can_have_closed():
-    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
-    now = session_open + timedelta(minutes=2)  # still inside the first bar
-    assert expected_latest_bar_close(session_open, now) is None
+def test_latest_required_bar_close_is_none_before_any_bar_can_be_overdue():
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    now = session_open + timedelta(minutes=1)  # first bar hasn't even closed yet
+    assert latest_required_bar_close(session_open, now, grace_seconds=90) is None
 
 
-def test_expected_latest_bar_close_exactly_at_a_boundary():
-    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
-    now = session_open + timedelta(minutes=15)  # exactly 3 bars' worth, right on the boundary
-    assert expected_latest_bar_close(session_open, now) == session_open + timedelta(minutes=15)
+def test_latest_required_bar_close_requires_only_a_bar_more_than_grace_seconds_overdue():
+    """PR #64 review's second, release-blocking finding, exactly
+    reproduced: bar boundaries are 300s apart; comparing the actual bar
+    against "what boundary exists right now" (no grace) makes a bar
+    missing by even 1 second look 300s stale. latest_required_bar_close
+    must only demand a boundary once it is itself more than
+    grace_seconds past ITS OWN nominal close -- not "the current
+    boundary, zero tolerance"."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    # Bars close 13:30, 13:35, 13:40, ... . At 13:35:30 the 13:35 bar is
+    # only 30s late -- well within the 90s grace -- so nothing past
+    # 13:30 should be required yet.
+    now = datetime(2026, 8, 19, 13, 35, 30, tzinfo=timezone.utc)
+    assert latest_required_bar_close(session_open, now, grace_seconds=90) == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+
+
+def test_latest_required_bar_close_respects_the_strict_greater_than_grace_boundary():
+    """Same scenario, walked right up to and past the exact 90s grace
+    boundary (13:35:00 + 90s = 13:36:30) -- matching is_stale()'s own
+    strict `>` discipline: exactly AT the grace threshold is not yet
+    overdue, only strictly past it is."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    boundary_13_35 = datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+
+    just_before = datetime(2026, 8, 19, 13, 36, 29, tzinfo=timezone.utc)
+    assert latest_required_bar_close(session_open, just_before, grace_seconds=90) == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+
+    exactly_at_grace = datetime(2026, 8, 19, 13, 36, 30, tzinfo=timezone.utc)  # 13:35 + 90s exactly
+    assert latest_required_bar_close(session_open, exactly_at_grace, grace_seconds=90) == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+
+    just_after = datetime(2026, 8, 19, 13, 36, 31, tzinfo=timezone.utc)
+    assert latest_required_bar_close(session_open, just_after, grace_seconds=90) == boundary_13_35
 
 
 def test_healthy_mid_candle_data_is_not_flagged_stale():
-    """PR #64 review's release-blocking finding, reproduced as a
+    """PR #64 review's FIRST release-blocking finding, reproduced as a
     regression test: the exact production XPON timing. Filtering out
     the forming bar leaves a completed bar that closed ~151s ago -- more
     than STALENESS_SECONDS (90) by pure wall-clock distance, but this is
-    completely normal mid-candle behavior, not delayed data. Staleness
-    must be judged against the expected bar boundary
-    (expected_latest_bar_close), not the bar's own close time."""
+    completely normal mid-candle behavior, not delayed data."""
     session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
     completed_bar = Bar("XPON", datetime(2026, 8, 19, 13, 25, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:30
     forming_bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10.1, 10.3, 10.0, 10.2, 100)  # closes 13:35
@@ -170,16 +196,16 @@ def test_healthy_mid_candle_data_is_not_flagged_stale():
     closed = only_closed_bars([completed_bar, forming_bar], now)
     assert closed == [completed_bar]
 
-    expected = expected_latest_bar_close(session_open, now)
-    assert expected == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
-    assert is_stale(bar_close_ts(closed[-1]), expected) is False
+    required = latest_required_bar_close(session_open, now, grace_seconds=90)
+    assert required == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    assert not (bar_close_ts(closed[-1]) < required)  # NOT stale
 
 
 def test_healthy_mid_candle_still_not_stale_one_poll_later():
     """Same healthy polling phase, one bar later -- the phase-lock the
-    original bug would have kept repeating every cycle (~151s past each
-    bar's own close, ~90s over threshold under the old, wrong
-    comparison) must not recur under the corrected one."""
+    original bug (and the second, grace-window bug) would each have
+    kept repeating every cycle must not recur under the corrected
+    comparison."""
     session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
     completed_bar = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:35
     forming_bar = Bar("XPON", datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc), 10.1, 10.3, 10.0, 10.2, 100)  # closes 13:40
@@ -188,29 +214,66 @@ def test_healthy_mid_candle_still_not_stale_one_poll_later():
     closed = only_closed_bars([completed_bar, forming_bar], now)
     assert closed == [completed_bar]
 
-    expected = expected_latest_bar_close(session_open, now)
-    assert expected == datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
-    assert is_stale(bar_close_ts(closed[-1]), expected) is False
+    required = latest_required_bar_close(session_open, now, grace_seconds=90)
+    assert required == datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)
+    assert not (bar_close_ts(closed[-1]) < required)  # NOT stale
+
+
+def test_if_the_expected_bar_is_actually_present_it_is_never_stale_regardless_of_timing():
+    """Presence overrides timing entirely -- at any of the timings from
+    the grace-boundary tests above, a bar that IS available for the
+    boundary in question must never be flagged stale."""
+    session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
+    bar_13_30 = Bar("XPON", datetime(2026, 8, 19, 13, 25, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:30
+    bar_13_35 = Bar("XPON", datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc), 10.1, 10.3, 10.0, 10.2, 400)  # closes 13:35
+
+    for now in (
+        datetime(2026, 8, 19, 13, 35, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 19, 13, 36, 29, tzinfo=timezone.utc),
+        datetime(2026, 8, 19, 13, 36, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 19, 13, 36, 31, tzinfo=timezone.utc),
+    ):
+        closed = only_closed_bars([bar_13_30, bar_13_35], now)
+        required = latest_required_bar_close(session_open, now, grace_seconds=90)
+        assert required is not None
+        assert not (bar_close_ts(closed[-1]) < required), f"falsely stale at {now}"
 
 
 def test_genuine_missing_bar_still_triggers_staleness():
     """The corrected comparison must still catch real delayed/missing
-    data -- fixing the healthy-candle false positive must not turn into
-    disabling staleness protection entirely."""
+    data -- fixing the healthy-candle false positives must not turn
+    into disabling staleness protection entirely."""
     session_open = datetime(2026, 8, 19, 13, 0, tzinfo=timezone.utc)
-    # Feed is stuck: the only bar available closed at 13:15, three
-    # bar-widths behind where data should be by 13:32:31 (expected
-    # boundary 13:30).
+    # Feed is stuck: the only bar available closed at 13:15, well behind
+    # where data should be by 13:32:31 (required boundary 13:30, per the
+    # 90s-grace rule -- the 13:30 bar itself has been available for over
+    # two minutes, comfortably past its own grace window).
     stuck_bar = Bar("XPON", datetime(2026, 8, 19, 13, 10, tzinfo=timezone.utc), 10, 10.2, 9.9, 10.1, 400)  # closes 13:15
     now = datetime(2026, 8, 19, 13, 32, 31, tzinfo=timezone.utc)
 
     closed = only_closed_bars([stuck_bar], now)
     assert closed == [stuck_bar]
 
-    expected = expected_latest_bar_close(session_open, now)
-    assert expected == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
-    # gap = 13:30 - 13:15 = 900s, well past the 90s grace -- genuinely stale.
-    assert is_stale(bar_close_ts(closed[-1]), expected, max_seconds=90) is True
+    required = latest_required_bar_close(session_open, now, grace_seconds=90)
+    assert required == datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    assert bar_close_ts(closed[-1]) < required  # 13:15 < 13:30 -- genuinely stale
+
+
+def test_latest_required_bar_close_never_exceeds_a_clamped_session_close():
+    """The session-close-boundary finding: a sufficiently delayed loop
+    iteration crossing an early or normal close must never compute a
+    required boundary past when a bar could actually exist. Clamping to
+    session_close (session_bounds()'s own close_ts) rather than a
+    hardcoded time keeps this correct on an early-close day too."""
+    session_open = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)  # 09:30 ET
+    early_close = datetime(2026, 8, 19, 17, 0, tzinfo=timezone.utc)  # 13:00 ET early close
+    way_past_close = datetime(2026, 8, 19, 17, 30, tzinfo=timezone.utc)  # a badly delayed iteration
+
+    unclamped = latest_required_bar_close(session_open, way_past_close, grace_seconds=90)
+    assert unclamped is not None and unclamped > early_close  # would demand a bar that could never exist
+
+    clamped = latest_required_bar_close(session_open, way_past_close, grace_seconds=90, session_close=early_close)
+    assert clamped is not None and clamped <= early_close
 
 
 def test_only_closed_bars_uses_a_fresh_per_symbol_timestamp_not_a_stale_outer_one():

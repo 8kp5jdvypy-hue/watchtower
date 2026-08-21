@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 import time
 import traceback
@@ -158,35 +159,48 @@ def only_closed_bars(bars: list[Bar], now: datetime) -> list[Bar]:
     return [b for b in bars if bar_close_ts(b) <= now]
 
 
-def expected_latest_bar_close(
-    session_open: datetime, now: datetime, bar_minutes: int = BAR_MINUTES
+def latest_required_bar_close(
+    session_open: datetime,
+    now: datetime,
+    grace_seconds: int = STALENESS_SECONDS,
+    session_close: datetime | None = None,
+    bar_minutes: int = BAR_MINUTES,
 ) -> datetime | None:
-    """The close timestamp of the most recent bar that SHOULD already
-    exist, given `now` — the most recent bar_minutes-aligned boundary at
-    or before `now`, counted from `session_open` (not from a calendar
-    clock boundary — deriving it from the actual session open is what
-    keeps this early-close-safe and not an accident of NYSE's 09:30 ET
-    open happening to already land on a clean UTC 5-minute mark).
+    """The most recent bar boundary that must ALREADY be available by
+    `now`, given `grace_seconds` of tolerance past its own nominal close
+    — None if no boundary has become required yet.
 
-    None if `now` is still within the first bar (elapsed < bar_minutes)
-    — nothing has closed yet this session, so there is nothing to have
-    gone stale relative to.
+    This is deliberately NOT "the most recent boundary at or before
+    now" (that reads as stale for most of every healthy candle — a bar
+    that closed 4 minutes ago while its successor is still forming is
+    completely normal, not delayed data). It's also not "gap from the
+    single latest boundary" (that under-reports: if we're missing
+    several bars in a row, an EARLIER boundary can already be overdue
+    even while the very latest one is still inside its own grace
+    window — checking only the latest boundary would miss that). This
+    finds the latest boundary B such that `now - B > grace_seconds`
+    (strict, matching is_stale()'s own strict `>` discipline — a bar
+    exactly `grace_seconds` late is not yet stale, only one MORE than
+    that late is) by counting how many bar_minutes-aligned boundaries
+    fall strictly before `now - grace_seconds`.
 
-    This is the reference staleness must actually compare against.
-    "Is the newest available bar's own close more than STALENESS_SECONDS
-    old?" reads as stale for most of every healthy candle — a bar that
-    closed 4 minutes ago while its successor is still forming is
-    completely normal, not delayed data. The real question is "has the
-    bar that should exist by now failed to show up for more than the
-    allowed grace" — i.e. the gap between this expected boundary and
-    whatever bar we actually have, not wall-clock distance from that
-    bar's own close.
+    session_close (session_bounds()'s own close_ts, not a hardcoded
+    16:00) clamps `now` first, so a sufficiently delayed loop iteration
+    that crosses the session's real close can never compute a required
+    boundary past when a bar could actually exist — early-close safe
+    because session_close itself already reflects a real early close,
+    not assumed from the caller's timing alone.
     """
-    elapsed = (now - session_open).total_seconds()
-    completed = int(elapsed // (bar_minutes * 60))
-    if completed <= 0:
+    if session_close is not None and now > session_close:
+        now = session_close
+    bar_seconds = bar_minutes * 60
+    elapsed_past_grace = (now - timedelta(seconds=grace_seconds) - session_open).total_seconds()
+    if elapsed_past_grace <= 0:
         return None
-    return session_open + timedelta(minutes=bar_minutes * completed)
+    completed = math.ceil(elapsed_past_grace / bar_seconds) - 1
+    if completed < 1:
+        return None
+    return session_open + timedelta(seconds=bar_seconds * completed)
 
 
 def is_halted_bar(bar: Bar) -> bool:
@@ -1582,8 +1596,10 @@ def run_live(
                 rth_bars = only_closed_bars(rth_bars, evaluation_time)
                 if not rth_bars:
                     continue
-                expected_close = expected_latest_bar_close(open_ts, evaluation_time)
-                if expected_close is not None and is_stale(bar_close_ts(rth_bars[-1]), expected_close):
+                required_close = latest_required_bar_close(
+                    open_ts, evaluation_time, STALENESS_SECONDS, session_close=close_ts
+                )
+                if required_close is not None and bar_close_ts(rth_bars[-1]) < required_close:
                     metrics.increment("data_health_suppression", reason="stale")
                     if not stale_notified:
                         alerter.send(
