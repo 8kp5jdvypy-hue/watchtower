@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -2177,6 +2178,182 @@ def test_run_broad_scan_respects_the_promotion_limit():
     promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars, promotion_limit=2)
     assert len(promoted) == 2
     assert promoted == ["SYM4", "SYM3"]  # strongest first
+
+
+def test_run_broad_scan_shadow_counts_satisfy_the_conservation_invariant(caplog):
+    """Decision Ledger measurement gate: one symbol in each of the five
+    mutually-exclusive Stage-1 outcomes (missing from the vendor
+    response, too little history, a real Snapshot with an invalid
+    baseline, a real Snapshot that's genuinely quiet, and a real
+    candidate), and the shadow-count log line must both classify each
+    one correctly and satisfy the two conservation equations:
+        requested = missing_from_fetch + insufficient_history + snapshot
+        snapshot = invalid_baseline + evaluated_quiet + candidate
+    This also doubles as the real-selection check: run_broad_scan()'s
+    actual return value must still be exactly the one real candidate,
+    unaffected by any of the new counting logic."""
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = ["MISSING1", "SHORT1", "INVALID1", "QUIET1", "LOUD1"]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(fetched_symbols, lookback_days):
+        assert set(fetched_symbols) == set(symbols)
+        out = {}
+        # SHORT1: fewer than min_history (6) bars -> INSUFFICIENT_HISTORY.
+        out["SHORT1"] = [Bar("SHORT1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 4)]
+        # INVALID1: 6 zero-volume history bars -> avg_volume == 0 -> INVALID_BASELINE.
+        invalid_bars = [Bar("INVALID1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 0) for d in range(1, 7)]
+        invalid_bars.append(Bar("INVALID1", datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000))
+        out["INVALID1"] = invalid_bars
+        # QUIET1: real Snapshot, nothing crosses a Stage-1 threshold -> EVALUATED_AND_QUIET, no row/entry at all.
+        out["QUIET1"] = [Bar("QUIET1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)]
+        # LOUD1: the one real candidate (rvol spike), same shape as the existing promotion test.
+        loud_bars = [Bar("LOUD1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        loud_bars.append(Bar("LOUD1", datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        out["LOUD1"] = loud_bars
+        # MISSING1: absent entirely -> MISSING_FROM_FETCH.
+        return out
+
+    with caplog.at_level(logging.INFO, logger="watchtower.runner"):
+        promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    assert promoted == ["LOUD1"]  # the real, unaffected selection
+
+    [shadow_record] = [r for r in caplog.records if "broad_scan_shadow_counts" in r.getMessage()]
+    msg = shadow_record.getMessage()
+    assert "requested=5" in msg
+    assert "fetched=4" in msg
+    assert "missing_from_fetch=1" in msg
+    assert "insufficient_history=1" in msg
+    assert "requested_snapshot=3" in msg
+    assert "invalid_baseline=1" in msg
+    assert "evaluated_quiet=1" in msg
+    assert "requested_candidate=1" in msg
+    assert "candidate=1" in msg
+    assert "eligible_for_top_n=1" in msg
+    assert "selected_top_n=1" in msg
+    # No vendor extras anywhere in this scenario -- every unexpected_*
+    # count must be zero.
+    assert "unexpected_from_fetch=0" in msg
+    assert "unexpected_snapshot=0" in msg
+    assert "unexpected_candidate=0" in msg
+    assert "unexpected_selected=0" in msg
+    assert "invariant_ok=True" in msg
+
+
+def test_run_broad_scan_shadow_counts_track_unexpected_vendor_symbols_separately(caplog):
+    """If the vendor's bulk response includes a symbol that was NEVER
+    requested (not in active_symbols() at all), the requested-universe
+    conservation invariant must still hold using only the requested
+    population, the unexpected symbol must be counted separately at
+    every stage it reaches (fetch, snapshot, candidate, and — since it
+    scores as a real candidate here — selected), and the real returned
+    selection must be unaffected by this instrumentation: nothing in
+    build_snapshots_from_daily_bars/screen_snapshot/promote_candidates
+    filters by "was this symbol requested", so current production
+    semantics already process and would return such a symbol."""
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = ["QUIET1", "LOUD1"]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def _spike_bars(symbol):
+        bars = [Bar(symbol, datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        bars.append(Bar(symbol, datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        return bars
+
+    def fake_bars(fetched_symbols, lookback_days):
+        assert set(fetched_symbols) == set(symbols)  # only the real universe was ever requested
+        return {
+            "QUIET1": [Bar("QUIET1", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)],
+            "LOUD1": _spike_bars("LOUD1"),
+            # EXTRA1 was never requested -- simulates a vendor response
+            # containing an unrequested symbol.
+            "EXTRA1": _spike_bars("EXTRA1"),
+        }
+
+    with caplog.at_level(logging.INFO, logger="watchtower.runner"):
+        promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    # Current production semantics, unrelated to this instrumentation:
+    # an unrequested-but-fetched symbol that screens as a real candidate
+    # is returned exactly like any other. This instrumentation must not
+    # change that.
+    assert set(promoted) == {"LOUD1", "EXTRA1"}
+
+    [shadow_record] = [r for r in caplog.records if "broad_scan_shadow_counts" in r.getMessage()]
+    msg = shadow_record.getMessage()
+    # Requested-universe conservation holds using ONLY the 2 real symbols
+    # -- EXTRA1 must not inflate any of these.
+    assert "requested=2" in msg
+    assert "fetched=2" in msg
+    assert "missing_from_fetch=0" in msg
+    assert "insufficient_history=0" in msg
+    assert "requested_snapshot=2" in msg
+    assert "invalid_baseline=0" in msg
+    assert "evaluated_quiet=1" in msg  # QUIET1
+    assert "requested_candidate=1" in msg  # LOUD1 only
+    assert "invariant_ok=True" in msg
+    # EXTRA1 tracked separately at every stage it reached, neither
+    # folded into the requested figures nor silently dropped.
+    assert "candidate=2" in msg  # true production total: LOUD1 + EXTRA1
+    assert "selected_top_n=2" in msg
+    assert "unexpected_from_fetch=1" in msg
+    assert "unexpected_snapshot=1" in msg
+    assert "unexpected_candidate=1" in msg
+    assert "unexpected_selected=1" in msg
+
+
+def test_broad_scan_shadow_count_failure_never_touches_the_returned_selection(caplog, monkeypatch):
+    """If the shadow-count instrumentation itself breaks -- including in
+    a way that bypasses its own internal try/except entirely, the
+    worst case this test deliberately simulates -- run_broad_scan()'s
+    real return value must be byte-identical to the unbroken case, and
+    the failure must still be observable (logged), not silently lost."""
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+
+    def fake_asset(symbol):
+        return AssetInfo(symbol=symbol, exchange="NASDAQ", name=symbol, tradable=True, options_enabled=True, overnight_eligible=None, attributes=())
+
+    universe_mod.refresh_universe(
+        universe_conn, lambda: [fake_asset("QUIET"), fake_asset("LOUD")], datetime(2026, 8, 8, tzinfo=timezone.utc),
+    )
+
+    def fake_bars(symbols, lookback_days):
+        quiet_bars = [Bar("QUIET", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 8)]
+        loud_bars = [Bar("LOUD", datetime(2026, 8, d, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, 1000) for d in range(1, 7)]
+        loud_bars.append(Bar("LOUD", datetime(2026, 8, 7, tzinfo=timezone.utc), 100, 100.5, 99.5, 100, int(RVOL_THRESHOLD * 1000)))
+        return {"QUIET": quiet_bars, "LOUD": loud_bars}
+
+    def _broken(*args, **kwargs):
+        raise RuntimeError("simulated instrumentation bug, bypassing its own internal guard")
+
+    monkeypatch.setattr(runner_mod, "_log_broad_scan_shadow_counts", _broken)
+
+    with caplog.at_level(logging.ERROR, logger="watchtower.runner"):
+        promoted = runner_mod.run_broad_scan(universe_conn, fetch_bars_fn=fake_bars)
+
+    assert promoted == ["LOUD"]  # unchanged from the non-broken case
+    assert any("shadow-count instrumentation failed" in r.getMessage() for r in caplog.records)
 
 
 def _write_intraday_csv(cache_dir: Path, symbol: str, session: date, closes: list[float]) -> None:
