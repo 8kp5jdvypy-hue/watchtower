@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 import time
 import traceback
@@ -128,6 +129,86 @@ logger = logging.getLogger("watchtower.runner")
 
 def is_stale(latest_bar_close: datetime, now: datetime, max_seconds: int = STALENESS_SECONDS) -> bool:
     return (now - latest_bar_close).total_seconds() > max_seconds
+
+
+def only_closed_bars(bars: list[Bar], now: datetime) -> list[Bar]:
+    """Live-only lookahead guard (CLAUDE.md: never make a decision
+    timestamped before the bar it used has closed). LiveMarketData.
+    session_bars() can include the currently-forming bar — Alpaca's
+    intraday-bars response, queried through "now", may report the
+    in-progress candle with whatever partial OHLCV has accumulated so
+    far — and nothing in that read path checks a bar's own close time
+    against the wall clock. is_stale() doesn't catch this either: it
+    only flags a bar that's too OLD (now - close > max_seconds), and a
+    still-forming bar's bar_close_ts is in the future, so that
+    subtraction is negative and trivially "not stale".
+
+    Filters rather than truncates-from-the-first-bad-one, so a genuinely
+    completed bar is never dropped just because a later, still-forming
+    one was also returned in the same response — correct even if a
+    vendor response were ever out of chronological order, not just in
+    the common case where only the last element can possibly be
+    incomplete. Exactly at its own close (bar_close_ts(bar) == now) a
+    bar is included, not excluded — "closed", not "closed and a beat
+    late".
+
+    Live only: ReplayMarketData's bars are cached historical data, real
+    and fully closed by construction, so run_replay() has no equivalent
+    call and no use for this — see its own separate loop in run_replay().
+    """
+    return [b for b in bars if bar_close_ts(b) <= now]
+
+
+def latest_required_bar_close(
+    session_open: datetime,
+    now: datetime,
+    grace_seconds: int = STALENESS_SECONDS,
+    session_close: datetime | None = None,
+    bar_minutes: int = BAR_MINUTES,
+) -> datetime | None:
+    """The most recent bar boundary that must ALREADY be available by
+    `now`, given `grace_seconds` of tolerance past its own nominal close
+    — None if no boundary has become required yet.
+
+    This is deliberately NOT "the most recent boundary at or before
+    now" (that reads as stale for most of every healthy candle — a bar
+    that closed 4 minutes ago while its successor is still forming is
+    completely normal, not delayed data). It's also not "gap from the
+    single latest boundary" (that under-reports: if we're missing
+    several bars in a row, an EARLIER boundary can already be overdue
+    even while the very latest one is still inside its own grace
+    window — checking only the latest boundary would miss that). This
+    finds the latest boundary B such that `now - B > grace_seconds`
+    (strict, matching is_stale()'s own strict `>` discipline — a bar
+    exactly `grace_seconds` late is not yet stale, only one MORE than
+    that late is) by counting how many bar_minutes-aligned boundaries
+    fall strictly before `now - grace_seconds`.
+
+    session_close (session_bounds()'s own close_ts, not a hardcoded
+    16:00) caps the RESULT, not the input `now` — clamping `now` first
+    would subtract grace_seconds from an already-capped value, so the
+    final session's own bar could never earn its own grace window and
+    would never become required no matter how long it stayed missing
+    after the close (real bug, caught in review: clamping-then-grace
+    stuck the required boundary one bar early forever). Grace is applied
+    to the real, unclamped `now` so the final bar gets exactly the same
+    grace period every other bar does; only the boundary this produces
+    is then capped at session_close, so a sufficiently delayed loop
+    iteration can still never demand a fictional post-close bar —
+    early-close safe because session_close itself already reflects a
+    real early close, not assumed from the caller's timing alone.
+    """
+    bar_seconds = bar_minutes * 60
+    elapsed_past_grace = (now - timedelta(seconds=grace_seconds) - session_open).total_seconds()
+    if elapsed_past_grace <= 0:
+        return None
+    completed = math.ceil(elapsed_past_grace / bar_seconds) - 1
+    if completed < 1:
+        return None
+    required = session_open + timedelta(seconds=bar_seconds * completed)
+    if session_close is not None and required > session_close:
+        required = session_close
+    return required
 
 
 def is_halted_bar(bar: Bar) -> bool:
@@ -1509,10 +1590,39 @@ def run_live(
         for symbol in scan_symbols:
             origin = "watchlist" if symbol in WATCHLIST else "screening"
             try:
+                # Captured before the fetch, not after: a request can
+                # straddle a bar boundary (start at 13:34:59.8, Alpaca
+                # forms the response from data available at THAT instant,
+                # network returns at 13:35:00.15) — bar_close_ts(bar) <=
+                # some later post-fetch timestamp only proves the wall
+                # clock has passed the boundary by the time we looked, not
+                # that the specific response we're holding was assembled
+                # after it. Using the pre-fetch instant as the eligibility
+                # cutoff is the conservative choice: a bar whose nominal
+                # close falls in the request's own window is deferred to
+                # the next poll rather than trusted as final from a
+                # response that might have been mid-formation when Alpaca
+                # built it.
+                pre_fetch_time = datetime.now(timezone.utc)
                 rth_bars = list(md[symbol].session_bars(symbol, session_date))
                 if not rth_bars:
                     continue
-                if is_stale(bar_close_ts(rth_bars[-1]), loop_start):
+                rth_bars = only_closed_bars(rth_bars, pre_fetch_time)
+                if not rth_bars:
+                    continue
+                # Staleness wants the freshest possible "now" — the fetch
+                # has already completed by this point, and using an older
+                # timestamp here would only make the check less sensitive,
+                # never wrongly reject good data (the direction eligibility
+                # above needs to be conservative in; this direction is
+                # safe to be as fresh as possible instead). Not
+                # loop_start: see the eligibility comment above — the
+                # same staleness applies to it.
+                post_fetch_time = datetime.now(timezone.utc)
+                required_close = latest_required_bar_close(
+                    open_ts, post_fetch_time, STALENESS_SECONDS, session_close=close_ts
+                )
+                if required_close is not None and bar_close_ts(rth_bars[-1]) < required_close:
                     metrics.increment("data_health_suppression", reason="stale")
                     if not stale_notified:
                         alerter.send(
