@@ -11,6 +11,8 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from requests.adapters import HTTPAdapter
+
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed, OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
@@ -65,19 +67,78 @@ def _credentials() -> tuple[str, str]:
     return key_id, secret_key
 
 
+# 2026-08-21 production incident: the single-threaded live runner's
+# heartbeat stopped advancing for ~16 minutes; the kernel stack showed
+# the process blocked in tcp_recvmsg -> sk_wait_data on an established
+# TCP/443 socket -- an Alpaca HTTP call with no bound on how long it can
+# sit waiting for the connection or a response. alpaca-py 0.43.5's
+# RESTClient.__init__ exposes no timeout parameter, and _request/
+# _one_request never put a `timeout` key in the requests.Session.request()
+# call (alpaca/common/rest.py), so this was always true, not a regression
+# -- it just hadn't stalled in production before.
+#
+# This bounds CONNECT/READ INACTIVITY, not total wall-clock request
+# duration: `read` is the max gap between consecutive socket reads, not
+# a cap on how long a response can take to fully arrive. A response can
+# run for an arbitrarily long total duration if it keeps making socket
+# progress and no individual gap between reads exceeds
+# READ_TIMEOUT_SECONDS -- that slow-drip case, a slow DNS resolution
+# (not reliably covered by the connect phase at all -- socket.
+# create_connection() resolves the hostname before the timeout ever
+# applies), and a request that internally paginates into several HTTP
+# calls are all real, unclosed residual risks this does not bound. What
+# it does bound, directly and exactly: the failure class actually
+# observed -- an idle, established socket making zero progress.
+CONNECT_TIMEOUT_SECONDS = 5
+READ_TIMEOUT_SECONDS = 15
+
+
+class _TimeoutHTTPAdapter(HTTPAdapter):
+    """Injects a default (connect, read) inactivity timeout only when the
+    caller didn't already specify one -- alpaca-py's RESTClient never
+    does (see the module comment above), so this is the one place a
+    bound actually gets applied. Any timeout the caller DOES supply
+    (tuple or scalar) is preserved exactly, unchanged.
+
+    No __init__ override, no max_retries change -- requests.HTTPAdapter's
+    own default retry behavior is untouched; this class adds nothing but
+    a timeout default to send()."""
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        if timeout is None:
+            timeout = (CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS)
+        return super().send(request, stream=stream, timeout=timeout, verify=verify, cert=cert, proxies=proxies)
+
+
+def _bound_timeout(client):
+    """Mounts _TimeoutHTTPAdapter on the client's own requests.Session,
+    via that Session's public .mount() method -- not a monkeypatch of
+    any alpaca-py method. Touches client._session, a private-by-
+    convention attribute, only because RESTClient.__init__ (alpaca-py
+    0.43.5) exposes no public constructor hook to inject a session,
+    adapter, or timeout; every alpaca-py client class Perch uses
+    (StockHistoricalDataClient, OptionHistoricalDataClient,
+    TradingClient) subclasses the same RESTClient, so this one helper
+    covers all three identically."""
+    adapter = _TimeoutHTTPAdapter()
+    client._session.mount("https://", adapter)
+    client._session.mount("http://", adapter)
+    return client
+
+
 def _client() -> StockHistoricalDataClient:
     key_id, secret_key = _credentials()
-    return StockHistoricalDataClient(key_id, secret_key)
+    return _bound_timeout(StockHistoricalDataClient(key_id, secret_key))
 
 
 def _option_client() -> OptionHistoricalDataClient:
     key_id, secret_key = _credentials()
-    return OptionHistoricalDataClient(key_id, secret_key)
+    return _bound_timeout(OptionHistoricalDataClient(key_id, secret_key))
 
 
 def _trading_client() -> TradingClient:
     key_id, secret_key = _credentials()
-    return TradingClient(key_id, secret_key, paper=True)
+    return _bound_timeout(TradingClient(key_id, secret_key, paper=True))
 
 
 def _with_backoff(fn, max_retries: int = 5, base_delay: float = 2.0):
