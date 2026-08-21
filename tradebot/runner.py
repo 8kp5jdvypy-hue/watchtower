@@ -130,6 +130,34 @@ def is_stale(latest_bar_close: datetime, now: datetime, max_seconds: int = STALE
     return (now - latest_bar_close).total_seconds() > max_seconds
 
 
+def only_closed_bars(bars: list[Bar], now: datetime) -> list[Bar]:
+    """Live-only lookahead guard (CLAUDE.md: never make a decision
+    timestamped before the bar it used has closed). LiveMarketData.
+    session_bars() can include the currently-forming bar — Alpaca's
+    intraday-bars response, queried through "now", may report the
+    in-progress candle with whatever partial OHLCV has accumulated so
+    far — and nothing in that read path checks a bar's own close time
+    against the wall clock. is_stale() doesn't catch this either: it
+    only flags a bar that's too OLD (now - close > max_seconds), and a
+    still-forming bar's bar_close_ts is in the future, so that
+    subtraction is negative and trivially "not stale".
+
+    Filters rather than truncates-from-the-first-bad-one, so a genuinely
+    completed bar is never dropped just because a later, still-forming
+    one was also returned in the same response — correct even if a
+    vendor response were ever out of chronological order, not just in
+    the common case where only the last element can possibly be
+    incomplete. Exactly at its own close (bar_close_ts(bar) == now) a
+    bar is included, not excluded — "closed", not "closed and a beat
+    late".
+
+    Live only: ReplayMarketData's bars are cached historical data, real
+    and fully closed by construction, so run_replay() has no equivalent
+    call and no use for this — see its own separate loop in run_replay().
+    """
+    return [b for b in bars if bar_close_ts(b) <= now]
+
+
 def is_halted_bar(bar: Bar) -> bool:
     """A zero-volume bar means no trades happened — treat it as no new
     information rather than feeding it to the detectors, so a halted
@@ -1510,6 +1538,9 @@ def run_live(
             origin = "watchlist" if symbol in WATCHLIST else "screening"
             try:
                 rth_bars = list(md[symbol].session_bars(symbol, session_date))
+                if not rth_bars:
+                    continue
+                rth_bars = only_closed_bars(rth_bars, loop_start)
                 if not rth_bars:
                     continue
                 if is_stale(bar_close_ts(rth_bars[-1]), loop_start):

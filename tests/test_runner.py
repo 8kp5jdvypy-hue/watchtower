@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
-from tradebot.detectors import DailyAnchors, Detection
+from tradebot.detectors import DailyAnchors, Detection, bar_close_ts
 from tradebot.events import add_event_window
 from tradebot.marketdata import Bar, Quote, ReplayMarketData, write_bars_csv
 from tradebot.journal import backfill_marks
@@ -38,6 +38,7 @@ from tradebot.runner import (
     is_bar_gap,
     is_halted_bar,
     is_stale,
+    only_closed_bars,
     process_new_bar,
     session_bounds,
 )
@@ -53,6 +54,82 @@ def test_is_stale_false_within_the_threshold():
     latest_close = datetime(2026, 7, 23, 14, 0, tzinfo=timezone.utc)
     now = latest_close + timedelta(seconds=89)
     assert is_stale(latest_close, now, max_seconds=90) is False
+
+
+def test_only_closed_bars_excludes_a_bar_whose_close_is_still_in_the_future():
+    """The production defect this guards against: a still-forming bar's
+    bar_close_ts is in the future, so is_stale() alone never catches it
+    (now - future_close is negative, trivially "not stale") — this is
+    the guard that actually drops it before anything downstream sees
+    it."""
+    ts = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)  # closes 13:35
+    forming_bar = Bar("XPON", ts, 10, 10.5, 9.5, 10.2, 500)
+    now = datetime(2026, 8, 19, 13, 32, 31, tzinfo=timezone.utc)  # queued 13:32:31Z, per the production evidence
+    assert only_closed_bars([forming_bar], now) == []
+
+
+def test_only_closed_bars_includes_a_bar_exactly_at_its_close():
+    ts = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    bar = Bar("XPON", ts, 10, 10.5, 9.5, 10.2, 500)
+    now = datetime(2026, 8, 19, 13, 35, tzinfo=timezone.utc)  # exactly bar_close_ts(bar)
+    assert only_closed_bars([bar], now) == [bar]
+    just_after = now + timedelta(seconds=1)
+    assert only_closed_bars([bar], just_after) == [bar]
+
+
+def test_only_closed_bars_keeps_completed_bars_alongside_a_dropped_incomplete_one():
+    """A completed bar earlier in the list must never be discarded just
+    because a later, still-forming one was also returned in the same
+    session_bars() response."""
+    t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    closed1 = Bar("XPON", t0, 10, 10.2, 9.9, 10.1, 400)
+    closed2 = Bar("XPON", t0 + timedelta(minutes=5), 10.1, 10.3, 10.0, 10.2, 450)
+    forming = Bar("XPON", t0 + timedelta(minutes=10), 10.2, 10.4, 10.1, 10.3, 100)
+    now = t0 + timedelta(minutes=12)  # closed1/closed2 have closed; forming closes at t0+15
+    assert only_closed_bars([closed1, closed2, forming], now) == [closed1, closed2]
+
+
+def test_only_closed_bars_is_stable_when_no_new_bar_has_closed():
+    """Same filtered result across two poll ticks with no newly-closed
+    bar in between -- this is exactly what run_live()'s existing
+    len(rth_bars) == rth_bar_count[symbol] dedup check depends on to
+    avoid reprocessing the same bar twice."""
+    t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    closed = Bar("XPON", t0, 10, 10.2, 9.9, 10.1, 400)
+    forming = Bar("XPON", t0 + timedelta(minutes=5), 10.1, 10.3, 10.0, 10.2, 100)
+    bars = [closed, forming]
+    tick1 = t0 + timedelta(minutes=6)
+    tick2 = t0 + timedelta(minutes=7)  # still before forming's own close at t0+10
+    result1 = only_closed_bars(bars, tick1)
+    result2 = only_closed_bars(bars, tick2)
+    assert result1 == result2 == [closed]
+
+
+def test_only_closed_bars_keeps_every_newly_completed_bar_after_a_delayed_loop():
+    """If the loop is delayed and multiple bars close between polls,
+    every genuinely completed one must survive -- this guard only ever
+    drops a bar that hasn't closed yet, never a real one, regardless of
+    how many closed in the gap."""
+    t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    bars = [Bar("XPON", t0 + timedelta(minutes=5 * i), 10, 10.2, 9.9, 10.1, 400) for i in range(4)]
+    # bars close at 13:35, 13:40, 13:45, 13:50 -- a delayed loop tick at 13:47
+    # means the first three have closed and the fourth hasn't.
+    now = datetime(2026, 8, 19, 13, 47, tzinfo=timezone.utc)
+    assert only_closed_bars(bars, now) == bars[:3]
+
+
+def test_only_closed_bars_combined_with_is_stale_still_detects_a_genuinely_stale_bar():
+    """Filtering first, then checking staleness on the result (as
+    run_live() now does), still catches a real stale-data condition --
+    this guard doesn't mask the existing protection, it fixes the
+    trivial-false-negative case (a forming bar's future close always
+    reading as "not stale")."""
+    t0 = datetime(2026, 8, 19, 13, 30, tzinfo=timezone.utc)
+    stale_bar = Bar("XPON", t0, 10, 10.2, 9.9, 10.1, 400)  # closes 13:35
+    now = t0 + timedelta(minutes=5, seconds=91)  # 91s past its close, > STALENESS_SECONDS (90)
+    closed = only_closed_bars([stale_bar], now)
+    assert closed == [stale_bar]
+    assert is_stale(bar_close_ts(closed[-1]), now, max_seconds=90) is True
 
 
 def test_is_halted_bar_detects_zero_volume():
