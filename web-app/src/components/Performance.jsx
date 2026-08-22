@@ -57,20 +57,35 @@ export default function Performance() {
           API's tier IN ('high','medium') and signalOrder.js), so LOG has
           no card of its own to explain itself and would otherwise read
           as a third kind of alert sitting next to MEDIUM.
-          Each line states the tier's real delivery path, not its score:
-          HIGH -> Decision.SEND, MEDIUM -> QUEUED_FOR_DIGEST released on
-          the clock hour, LOG -> QUEUED_FOR_EOD drained into one
-          end-of-day summary (tradebot/alerts.py, runner.py's
-          send_medium_digest_if_due/send_log_summary). Deliberately no
-          thresholds or daily-cap number here -- those are tuned in
-          detectors.py/alerts.py and copy that repeats them would go
-          quietly stale. */}
+          Every clause here is deliberately hedged, because the SUBSCRIBER
+          delivery path is not the same as the tier decision:
+          - HIGH clears the tier bar but is only ELIGIBLE to be sent --
+            telegram_bot/delivery.py's make_subscriber_hook filters by
+            db.list_subscribers_for_symbol (onboarded, risk-acked, not
+            paused/locked/session-halted, symbol on their watchlist,
+            reachable) and a 'quiet' subscriber's personal floor sits
+            above the global one; alerts.py can still suppress on cap or
+            cooldown, and the outbox delivers asynchronously.
+          - MEDIUM's hourly digest reaches subscribers only through
+            make_medium_fanout_fn, which is 'aggressive' sensitivity
+            only -- most users never receive it.
+          - LOG has no fan-out function at all. send_log_summary() writes
+            to `alerter`, which is the ops channel/console
+            (TelegramAlerter/ConsoleAlerter), never a subscriber DM -- so
+            this must not imply users get an end-of-day recap.
+          - tier_performance() JOINs marks and applies
+            CURRENT_FEED_FILTER_SQL, so the rates are neither every
+            detection nor only delivered ones: they are the qualifying
+            journaled ones, and nothing filters on `alerted`.
+          No thresholds, caps, or cooldown numbers in the copy -- those
+          are tuned in detectors.py/alerts.py and would go quietly stale
+          here. */}
       {tiers.length > 0 && (
         <p className="tier-legend">
-          <b>HIGH</b> is sent on its own the moment it fires. <b>MEDIUM</b> is held and delivered
-          together once an hour. <b>LOG</b> is never alerted on its own — it's journaled as it
-          happens and only recapped in an end-of-day summary. It appears here so these rates cover
-          everything Perch noticed, not just what it sent you.
+          <b>HIGH</b> is eligible for an immediate individual alert, subject to alert safeguards and
+          your settings. <b>MEDIUM</b> is batched hourly and sent to users who choose aggressive
+          alerts. <b>LOG</b> is lower-priority activity kept in Perch's journal; it is not sent as a
+          user alert. These rates include qualifying journaled detections, not only delivered alerts.
         </p>
       )}
 
