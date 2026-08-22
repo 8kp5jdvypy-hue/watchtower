@@ -2930,3 +2930,245 @@ def test_importing_runner_module_alone_does_not_configure_logging():
         cwd=repo_root, capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+
+
+# --------------------------------------------------------------------------
+# 2026-08-22 shared-per-iteration proxy fetch: run_live() used to build
+# market_bars (2 fresh SPY/QQQ session_bars() calls) for EVERY symbol that
+# advanced this iteration -- 17 + 17*2 = 51 fetch_intraday_bars calls in
+# steady state. Now it's fetched lazily, once per while-loop iteration, on
+# the first symbol that reaches that point, closed-bar-filtered against its
+# own fetch instant, and reused unchanged for every later symbol's
+# process_new_bar call this same iteration -- 17 + 2 = 19.
+#
+# These tests drive run_live() through exactly one while-loop iteration
+# with a fake LiveMarketData and a process_new_bar spy: no need for real
+# alert-worthy detections, since what's under test is the fetch/reuse
+# mechanism itself, not detector output. The while loop is stopped via
+# HALT_FILE once a precomputed expected number of session_bars calls has
+# happened -- run_live() only checks HALT_FILE at the top of the NEXT
+# iteration, so this always lets the current pass finish first.
+# --------------------------------------------------------------------------
+
+_PROXY_FROZEN_NOW = datetime(2026, 7, 23, 13, 40, tzinfo=timezone.utc)
+_CLOSED_BAR_OPEN = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)  # close 13:35, well before frozen now
+_FORMING_BAR_OPEN = datetime(2026, 7, 23, 13, 40, tzinfo=timezone.utc)  # close 13:45, AFTER frozen now -- must be filtered
+
+
+def _proxy_test_bar(symbol: str, open_time: datetime, close: float = 100.0) -> Bar:
+    return Bar(symbol, open_time, close, close + 0.1, close - 0.1, close, volume=1000)
+
+
+def _drive_one_live_iteration(monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls):
+    """session_bars_by_symbol[symbol] is either a list[Bar] (returned on
+    every call) or a zero-arg callable (invoked fresh each call -- lets a
+    test raise on the first call and succeed on a later one, e.g. test 6
+    below). Returns (session_bars_calls, process_new_bar_calls, stats)."""
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _PROXY_FROZEN_NOW
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    halt_file = tmp_path / "HALT"
+
+    monkeypatch.setattr(runner_mod, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(runner_mod, "WATCHLIST", list(watchlist))
+    monkeypatch.setattr(runner_mod, "CACHE_DIR", cache_dir)
+    monkeypatch.setattr(runner_mod, "SESSION_CLOSE_STATE_FILE", tmp_path / "session_close_state.json")
+    monkeypatch.setattr(runner_mod, "SESSION_OPEN_STATE_FILE", tmp_path / "session_open_state.json")
+    monkeypatch.setattr(runner_mod, "HALT_FILE", halt_file)
+    monkeypatch.setattr(runner_mod, "HEARTBEAT_FILE", tmp_path / "heartbeat.json")
+    monkeypatch.setattr(runner_mod.time, "sleep", lambda seconds: None)
+
+    session_bars_calls: list[str] = []
+    call_counter = {"n": 0}
+
+    class _FakeLiveMarketData:
+        def __init__(self, symbol, session_date):
+            self.symbol = symbol
+            self.session_date = session_date
+
+        def session_bars(self, symbol, session_date):
+            session_bars_calls.append(symbol)
+            call_counter["n"] += 1
+            if call_counter["n"] >= halt_after_session_bars_calls:
+                halt_file.touch()
+            value = session_bars_by_symbol[symbol]
+            return list(value()) if callable(value) else list(value)
+
+        def daily_bars(self, symbol, n):
+            return [_proxy_test_bar(symbol, _CLOSED_BAR_OPEN - timedelta(days=1), close=100.0)]
+
+        def quote(self, symbol):
+            raise NotImplementedError("process_new_bar is spied in these tests -- quote should never be reached")
+
+        def chain(self, symbol, expiry):
+            raise NotImplementedError
+
+    monkeypatch.setattr(runner_mod, "LiveMarketData", _FakeLiveMarketData)
+
+    process_new_bar_calls: list[dict] = []
+
+    def _spy_process_new_bar(*args, **kwargs):
+        process_new_bar_calls.append({"symbol": args[4], "market_bars": kwargs.get("market_bars")})
+
+    monkeypatch.setattr(runner_mod, "process_new_bar", _spy_process_new_bar)
+
+    stats = runner_mod.run_live(ConsoleAlerter(), db_path=tmp_path / "journal.db")
+    return session_bars_calls, process_new_bar_calls, stats
+
+
+def test_shared_proxy_fetch_happens_exactly_once_per_iteration_when_symbols_advance(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    session_bars_by_symbol = {s: closed for s in watchlist}
+
+    session_bars_calls, process_new_bar_calls, stats = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=6,
+    )
+
+    # 4 primary (one per watchlist symbol) + 2 shared proxy (SPY, QQQ,
+    # fetched once during AAA's turn) = 6 -- not 4 + 4*2 = 12 under the
+    # old per-symbol design.
+    assert len(session_bars_calls) == 6
+    assert session_bars_calls.count("SPY") == 2  # 1 shared proxy fetch + 1 primary fetch (SPY is also a watchlist symbol)
+    assert session_bars_calls.count("QQQ") == 2
+    assert [c["symbol"] for c in process_new_bar_calls] == watchlist
+    assert stats.errors == []
+
+
+def test_shared_proxy_fetch_does_not_happen_when_no_symbol_advances(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    session_bars_by_symbol = {s: [] for s in watchlist}  # every symbol: "not rth_bars: continue" fires immediately
+
+    session_bars_calls, process_new_bar_calls, stats = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=4,
+    )
+
+    assert session_bars_calls == ["AAA", "BBB", "SPY", "QQQ"]  # exactly one primary attempt each, no proxy fetch layered on
+    assert process_new_bar_calls == []
+
+
+def test_shared_proxy_fetch_is_lazy_first_call_is_the_primary_symbol(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    session_bars_by_symbol = {s: closed for s in watchlist}
+
+    session_bars_calls, _, _ = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=6,
+    )
+
+    # If the proxy fetch were eager (top-of-loop), SPY/QQQ would be
+    # among the first calls regardless of watchlist order. Lazy means
+    # AAA's own primary fetch -- and its closed-bar/staleness/dedup
+    # decisions -- happen first; the shared fetch triggers only once
+    # AAA reaches the point the old per-symbol market_bars build used
+    # to sit at.
+    assert session_bars_calls[0] == "AAA"
+    assert session_bars_calls[1] == "SPY"
+    assert session_bars_calls[2] == "QQQ"
+
+
+def test_shared_proxy_snapshot_filters_a_forming_bar_and_stays_frozen_for_later_symbols(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    spy_raw = [_proxy_test_bar("SPY", _CLOSED_BAR_OPEN), _proxy_test_bar("SPY", _FORMING_BAR_OPEN)]  # closed + forming
+    session_bars_by_symbol = {"AAA": closed, "BBB": closed, "SPY": spy_raw, "QQQ": closed}
+
+    _, process_new_bar_calls, _ = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=6,
+    )
+
+    aaa_call = next(c for c in process_new_bar_calls if c["symbol"] == "AAA")
+    spy_context = aaa_call["market_bars"]["SPY"]
+    assert len(spy_context) == 1  # the forming bar (close 13:45, after frozen now 13:40) was filtered out
+    assert spy_context[0].ts == _CLOSED_BAR_OPEN
+
+    # BBB is evaluated after AAA in this same iteration but must see the
+    # exact same (already-filtered, frozen) shared snapshot -- a bar
+    # that only "closes" after the shared fetch can never be
+    # positionally paired with a later primary symbol's bars, because
+    # the snapshot isn't refetched for BBB at all.
+    bbb_call = next(c for c in process_new_bar_calls if c["symbol"] == "BBB")
+    assert bbb_call["market_bars"] is aaa_call["market_bars"]
+
+
+def test_process_new_bar_still_runs_for_a_symbol_whose_bars_outgrew_the_shared_proxy_snapshot(monkeypatch, tmp_path):
+    """runner.py must not special-case a symbol whose own bars have grown
+    past the shared proxy snapshot's length -- that's
+    relative_strength_break's own len(proxy_bars) < len(bars) guard to
+    handle conservatively (see tests/test_detectors.py::
+    test_relative_strength_break_returns_none_when_the_proxy_has_not_
+    caught_up_yet, unchanged by this PR), not something the runner
+    itself should detect or react to."""
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    one_bar = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    two_bars = [
+        _proxy_test_bar("x", _CLOSED_BAR_OPEN - timedelta(minutes=5)),
+        _proxy_test_bar("x", _CLOSED_BAR_OPEN),
+    ]
+    session_bars_by_symbol = {"AAA": one_bar, "BBB": two_bars, "SPY": one_bar, "QQQ": one_bar}
+
+    _, process_new_bar_calls, stats = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=6,
+    )
+
+    bbb_call = next(c for c in process_new_bar_calls if c["symbol"] == "BBB")
+    assert len(bbb_call["market_bars"]["SPY"]) == 1  # unchanged, shorter than BBB's own 2 bars -- not "fixed up"
+    assert stats.errors == []  # the mismatch is not treated as a runner-level error
+
+
+def test_shared_proxy_fetch_failure_is_isolated_and_not_retried_per_symbol(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+
+    spy_calls = {"n": 0}
+
+    def _spy_bars():
+        spy_calls["n"] += 1
+        if spy_calls["n"] == 1:
+            raise RuntimeError("simulated vendor failure")
+        return closed  # SPY's own later primary-turn fetch succeeds normally
+
+    session_bars_by_symbol = {"AAA": closed, "BBB": closed, "QQQ": closed, "SPY": _spy_bars}
+
+    session_bars_calls, process_new_bar_calls, stats = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=5,
+    )
+
+    # Exactly one failed shared-fetch attempt (SPY raises during AAA's
+    # turn); QQQ's proxy fetch is never even attempted, since the dict
+    # comprehension aborts on SPY's exception, and no later symbol
+    # retries the shared fetch (shared_market_bars_attempted is already
+    # True) -- only SPY's own later primary-turn fetch adds a 2nd call.
+    assert session_bars_calls.count("SPY") == 2
+    assert session_bars_calls.count("QQQ") == 1
+    assert len(stats.errors) == 1
+    assert "RuntimeError" in stats.errors[0]
+
+    # Ordinary detector processing continues for every symbol, including
+    # AAA (whose turn triggered the failed shared fetch) -- with
+    # market_bars=None there, not an aborted evaluation.
+    assert [c["symbol"] for c in process_new_bar_calls] == watchlist
+    aaa_call = next(c for c in process_new_bar_calls if c["symbol"] == "AAA")
+    assert aaa_call["market_bars"] is None
+
+
+def test_shared_proxy_snapshot_has_no_mutation_leakage_across_symbol_evaluations(monkeypatch, tmp_path):
+    watchlist = ["AAA", "BBB", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    session_bars_by_symbol = {s: closed for s in watchlist}
+
+    _, process_new_bar_calls, _ = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=6,
+    )
+
+    market_bars_seen = [c["market_bars"] for c in process_new_bar_calls]
+    first = market_bars_seen[0]
+    for later in market_bars_seen[1:]:
+        assert later is first  # identical object, not rebuilt or copied-and-diverged
+        assert later == first  # and its contents never changed in between
+    assert first == {"SPY": closed, "QQQ": closed}  # exactly what was fetched, unmodified by any evaluation

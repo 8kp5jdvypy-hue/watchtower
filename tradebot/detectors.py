@@ -456,11 +456,15 @@ def relative_strength_break(
     checks a symbol against anything but its own history.
 
     market_bars is a {symbol: bars} map the caller (runner.py) builds
-    once per tick from the same MarketData instances it already holds
-    for every WATCHLIST symbol (SPY/QQQ are always in WATCHLIST) — no
-    new vendor fetch. Symbol and proxy bars are aligned by same-session
-    bar INDEX, not by looking up the proxy's own DailyAnchors, so this
-    has no dependency on WATCHLIST iteration order.
+    once per while-loop iteration -- one shared fetch per proxy per
+    tick, reused across every symbol evaluated that iteration, not
+    refetched per symbol. Symbol and proxy bars are aligned by
+    same-session bar INDEX, not by looking up the proxy's own
+    DailyAnchors, so this has no dependency on WATCHLIST iteration
+    order -- which is also why a proxy snapshot fetched once and reused
+    for several symbols' evaluations is safe: a later symbol with more
+    bars than the shared proxy snapshot has caught up to is handled by
+    the len(proxy_bars) < len(bars) guard below, not by re-fetching.
 
     Returns None — never raises — on any missing/short/misaligned
     market_bars, same fail-conservative discipline as every other
