@@ -8,9 +8,12 @@ These tests cover the pieces that are meaningfully testable in isolation.
 from __future__ import annotations
 
 import csv
+import io
 import json
 import logging
 import sqlite3
+import subprocess
+import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2821,3 +2824,109 @@ def test_full_session_rth_bars_defaults_to_the_module_cache_dir():
 
     default = inspect.signature(full_session_rth_bars).parameters["cache_dir"].default
     assert default == runner_mod.CACHE_DIR
+
+
+# --------------------------------------------------------------------------
+# 2026-08-21 runner INFO logging visibility prerequisite: configure_logging()
+# attaches a handler to the "watchtower" parent logger (never the root
+# logger, and never as an import-time side effect) so watchtower.runner
+# and future children like watchtower.vendors.alpaca actually reach
+# Docker's captured output instead of being silently dropped by Python's
+# handler-less default. See configure_logging's own docstring.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _clean_watchtower_logger():
+    """configure_logging() mutates process-global logger state (the
+    "watchtower" logger's handlers/level/propagate) -- exactly the kind
+    of state a pre-existing test elsewhere in this file already depends
+    on (e.g. the guard-rejection test's caplog.at_level(..., logger=
+    "watchtower.runner"), which relies on propagation reaching pytest's
+    root-attached capture handler). Every test that calls
+    configure_logging() must restore the exact pre-test state afterward,
+    or it risks silently breaking an unrelated test's propagation-based
+    assertions depending on run order."""
+    wt_logger = logging.getLogger("watchtower")
+    saved_handlers = list(wt_logger.handlers)
+    saved_level = wt_logger.level
+    saved_propagate = wt_logger.propagate
+    yield wt_logger
+    wt_logger.handlers = saved_handlers
+    wt_logger.setLevel(saved_level)
+    wt_logger.propagate = saved_propagate
+
+
+def test_configure_logging_makes_watchtower_runner_info_visible(_clean_watchtower_logger):
+    stream = io.StringIO()
+    runner_mod.configure_logging(level="INFO", stream=stream)
+
+    logging.getLogger("watchtower.runner").info("hello from the runner")
+
+    output = stream.getvalue()
+    assert "hello from the runner" in output
+    assert "INFO" in output
+    assert "watchtower.runner" in output
+
+
+def test_configure_logging_makes_a_future_vendor_child_logger_info_visible(_clean_watchtower_logger):
+    """watchtower.vendors.alpaca doesn't have a logger yet (this module
+    has none as of this PR -- see the vendor-observability reconnaissance),
+    but any watchtower.* child must inherit visibility the same way,
+    proving the fix is scoped to the namespace, not hardcoded to
+    watchtower.runner specifically."""
+    stream = io.StringIO()
+    runner_mod.configure_logging(level="INFO", stream=stream)
+
+    logging.getLogger("watchtower.vendors.alpaca").info("vendor_call_start operation=fetch_daily_bars_bulk")
+
+    output = stream.getvalue()
+    assert "vendor_call_start operation=fetch_daily_bars_bulk" in output
+    assert "watchtower.vendors.alpaca" in output
+
+
+def test_configure_logging_log_level_warning_suppresses_info_but_emits_warning(_clean_watchtower_logger):
+    stream = io.StringIO()
+    runner_mod.configure_logging(level="WARNING", stream=stream)
+
+    logging.getLogger("watchtower.runner").info("should not appear")
+    logging.getLogger("watchtower.runner").warning("should appear")
+
+    output = stream.getvalue()
+    assert "should not appear" not in output
+    assert "should appear" in output
+
+
+def test_configure_logging_called_twice_does_not_duplicate_handlers_or_lines(_clean_watchtower_logger):
+    stream = io.StringIO()
+    runner_mod.configure_logging(level="INFO", stream=stream)
+    runner_mod.configure_logging(level="INFO", stream=stream)
+
+    assert len(logging.getLogger("watchtower").handlers) == 1
+
+    logging.getLogger("watchtower.runner").info("only once")
+
+    assert stream.getvalue().count("only once") == 1
+
+
+def test_configure_logging_does_not_make_an_unrelated_third_party_logger_info_visible(_clean_watchtower_logger):
+    stream = io.StringIO()
+    runner_mod.configure_logging(level="INFO", stream=stream)
+
+    assert logging.getLogger("some_third_party_lib").isEnabledFor(logging.INFO) is False
+
+
+def test_importing_runner_module_alone_does_not_configure_logging():
+    """A real fresh interpreter, not a monkeypatched one -- proves import
+    time has no logging side effect, not just that this particular test
+    process's already-imported module happens not to have one right now."""
+    repo_root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import tradebot.runner, logging, sys; "
+            "sys.exit(0 if logging.getLogger('watchtower').handlers == [] else 1)",
+        ],
+        cwd=repo_root, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
