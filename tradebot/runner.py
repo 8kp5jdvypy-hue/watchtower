@@ -20,6 +20,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 import time
 import traceback
@@ -120,6 +121,46 @@ OFF_SESSION_IDLE_SECONDS = 1800
 CALENDAR = ecals.get_calendar("XNYS")
 
 logger = logging.getLogger("watchtower.runner")
+
+
+def configure_logging(level: str | None = None, stream=None) -> None:
+    """Attaches (or replaces) a single stream handler on the "watchtower"
+    parent logger -- not the root logger -- so INFO-level operational
+    logs from watchtower.runner, and any future child such as
+    watchtower.vendors.alpaca, actually reach Docker's captured
+    stdout/stderr instead of being silently dropped. Without this, the
+    process has no handler anywhere in its logger hierarchy, so Python
+    falls back to logging.lastResort (WARNING-only) -- this is exactly
+    why PR #63's broad_scan_shadow_counts INFO logs were never visible
+    in production.
+
+    Scoped to "watchtower", not the root logger: watchtower.runner and
+    watchtower.vendors.alpaca are both children of it and inherit this
+    handler/level via normal propagation, while third-party loggers
+    (urllib3, alpaca, websockets, ...) live outside this namespace
+    entirely and are completely unaffected -- their volume doesn't
+    change just because Perch's own operational logs became visible.
+
+    Only called from main(), never at module import time -- importing
+    this module as a library (as every test in this file does) must
+    never configure logging as a side effect. This is also why LOG_LEVEL
+    is read here, not at module import time: reading it eagerly at
+    import would bake in whatever the environment happened to be when
+    the module was first imported, not when the process actually starts.
+
+    Idempotent: assigns a fresh single-element handler list rather than
+    appending, so calling this more than once (accidentally, or from a
+    test) never produces duplicate log lines.
+
+    level/stream: only ever overridden by tests -- real callers rely on
+    the LOG_LEVEL env var (default "INFO") and sys.stderr."""
+    resolved_level = (level if level is not None else os.environ.get("LOG_LEVEL", "INFO")).upper()
+    watchtower_logger = logging.getLogger("watchtower")
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    watchtower_logger.handlers = [handler]
+    watchtower_logger.setLevel(resolved_level)
+    watchtower_logger.propagate = False
 
 
 # --------------------------------------------------------------------------
@@ -1721,6 +1762,7 @@ def run_live(
 
 
 def main() -> None:
+    configure_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="push real alerts to Telegram; default is console/log-only")
     parser.add_argument(
