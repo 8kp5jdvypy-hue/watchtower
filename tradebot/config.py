@@ -26,11 +26,13 @@ def liquidity_class(symbol: str) -> str:
 
 
 # Broad-market proxies for tradebot.detectors.relative_strength_break.
-# Both are already in WATCHLIST, so no new vendor fetch is needed — see
-# that detector's docstring. Scoped to SPY only for v1 (DEFAULT_MARKET_
-# PROXY); QQQ is listed for a possible future blend/tech-specific proxy,
-# not used yet. No sector-ETF mapping exists here or anywhere in the
-# codebase — a true sector-relative signal would need one sourced for
-# real, not invented.
+# Both are already in WATCHLIST, but that doesn't mean free data --
+# run_live() fetches each once per while-loop iteration (shared across
+# every symbol evaluated that iteration, not once per symbol) — see
+# run_live's shared_market_bars comment and that detector's docstring.
+# Scoped to SPY only for v1 (DEFAULT_MARKET_PROXY); QQQ is listed for a
+# possible future blend/tech-specific proxy, not used yet. No sector-ETF
+# mapping exists here or anywhere in the codebase — a true
+# sector-relative signal would need one sourced for real, not invented.
 MARKET_PROXY_SYMBOLS = ("SPY", "QQQ")
 DEFAULT_MARKET_PROXY = "SPY"

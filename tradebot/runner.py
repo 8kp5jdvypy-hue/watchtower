@@ -1638,6 +1638,19 @@ def run_live(
             last_broad_scan = loop_start
 
         scan_symbols = WATCHLIST + [s for s in dynamic_symbols if s not in WATCHLIST]
+        # Shared across every symbol THIS iteration: relative_strength_break
+        # (the only market_bars consumer, see detectors.py) only needs one
+        # proxy snapshot per tick, not one freshly re-fetched per symbol --
+        # its own alignment is positional (proxy_bars[len(bars)-1]) with an
+        # explicit len(proxy_bars) < len(bars) abstention guard, so a single
+        # shared, closed-bar-filtered fetch is exactly as safe to read from
+        # every symbol's evaluation as a per-symbol refetch was, at 1/17th
+        # the vendor calls. shared_market_bars_attempted (not just checking
+        # "is shared_market_bars truthy") is what stops a failed or
+        # legitimately-empty first attempt from silently retrying on every
+        # later symbol in the same iteration.
+        shared_market_bars: dict[str, list[Bar]] | None = None
+        shared_market_bars_attempted = False
         for symbol in scan_symbols:
             origin = "watchlist" if symbol in WATCHLIST else "screening"
             try:
@@ -1709,17 +1722,37 @@ def run_live(
                         historical_session_bars=history_by_symbol.get(symbol, []),
                     )
 
-                market_bars = {
-                    proxy: list(md[proxy].session_bars(proxy, session_date))
-                    for proxy in MARKET_PROXY_SYMBOLS if proxy in md
-                }
+                # Lazy: only the first symbol THIS iteration that reaches
+                # this point pays for the shared proxy fetch -- an
+                # iteration where no symbol advances this far (no bars, not
+                # closed, stale, or no new bar) makes zero proxy calls.
+                # Isolated in its own try/except, separate from the outer
+                # per-symbol handler below: a shared-fetch failure must
+                # degrade only relative_strength_break's context for the
+                # rest of this iteration, never abort this (or any later)
+                # symbol's ordinary detector processing the way an
+                # unguarded exception here would.
+                if not shared_market_bars_attempted:
+                    shared_market_bars_attempted = True
+                    try:
+                        proxy_pre_fetch_time = datetime.now(timezone.utc)
+                        shared_market_bars = {
+                            proxy: only_closed_bars(
+                                list(md[proxy].session_bars(proxy, session_date)), proxy_pre_fetch_time
+                            )
+                            for proxy in MARKET_PROXY_SYMBOLS if proxy in md
+                        }
+                    except Exception:
+                        stats.errors.append(traceback.format_exc())
+                        shared_market_bars = None
+
                 process_new_bar(
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], md[symbol].quote,
                     lambda s, expiry, _sym=symbol: md[_sym].chain(s, expiry=expiry),
                     stats, subscriber_hook,
                     validation_now_fn=lambda: datetime.now(timezone.utc),
-                    market_bars=market_bars,
+                    market_bars=shared_market_bars,
                     data_feed=DETECTOR_DATA_FEED, origin=origin,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
