@@ -14,7 +14,7 @@ import os
 import sqlite3
 import statistics
 import subprocess
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -151,6 +151,56 @@ CREATE INDEX IF NOT EXISTS idx_event_windows_symbol_time ON event_windows(symbol
 -- which would otherwise let every macro-calendar refresh insert a copy.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
     ON event_windows(COALESCE(symbol, ''), kind, start_utc, source);
+
+-- Append-only ledger of the individual decisions taken about a detection
+-- on its way through the pipeline. Deliberately NOT columns on
+-- `detections`: that row is a mutable snapshot of the cluster's latest
+-- known state (write_cluster upserts it, set_no_trade/set_news_driven/
+-- set_extreme_mover overwrite fields on it), which by construction cannot
+-- answer "what did we decide, in what order, and on what basis, at the
+-- time." One detection has many decision_events; a decision_event is
+-- never revised, only superseded by a later one appended after it.
+--
+-- Nothing writes to this table yet -- foundation only (see
+-- record_decision_event). Wiring the pipeline's real decision points into
+-- it is deliberately a separate change, so that change is reviewable as
+-- "behavior now records X" rather than as a schema change too.
+CREATE TABLE IF NOT EXISTS decision_events (
+    -- AUTOINCREMENT (not bare rowid): guarantees a strictly increasing
+    -- seq that is never reused, so ordering by seq is a real append
+    -- order for the life of the file. Matches event_windows above.
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- detections.id. Loose reference, no SQLite FK constraint -- same
+    -- style as marks.detection_id / contract_selections.detection_id.
+    detection_id TEXT NOT NULL,
+    ts_utc TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    detail_json TEXT,
+    code_version TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_decision_events_detection ON decision_events(detection_id, seq);
+CREATE INDEX IF NOT EXISTS idx_decision_events_ts ON decision_events(ts_utc);
+
+-- Append-only enforced by the database, not by convention. A ledger whose
+-- immutability rests on "no helper in this module issues an UPDATE" is
+-- only as good as the next person who opens a sqlite3 shell; these make a
+-- rewrite fail loudly instead. Consequence, accepted deliberately: rows
+-- here can never be edited or purged in place. Correcting the record means
+-- appending a superseding event, which is the property the ledger exists
+-- to have.
+CREATE TRIGGER IF NOT EXISTS decision_events_no_update
+BEFORE UPDATE ON decision_events
+BEGIN
+    SELECT RAISE(ABORT, 'decision_events is append-only: UPDATE is not permitted');
+END;
+
+CREATE TRIGGER IF NOT EXISTS decision_events_no_delete
+BEFORE DELETE ON decision_events
+BEGIN
+    SELECT RAISE(ABORT, 'decision_events is append-only: DELETE is not permitted');
+END;
 """
 
 
@@ -986,3 +1036,126 @@ def get_contract_outcome(conn: sqlite3.Connection, detection_id: str) -> Contrac
         (detection_id,),
     ).fetchone()
     return ContractOutcome(*row) if row else None
+
+
+# --------------------------------------------------------------------------
+# Decision ledger — an append-only record of the individual decisions taken
+# about a detection, in the order they were taken. Every other write path in
+# this module overwrites: write_cluster upserts the detections row,
+# set_no_trade/set_news_driven/set_extreme_mover UPDATE columns on it. That
+# makes `detections` a snapshot of latest-known state and leaves it unable,
+# by construction, to answer "what did we decide, when, and on what basis" —
+# which is the only question that matters when an alert that should have
+# fired didn't. This table answers that, and answers it the same way
+# afterwards as it did at the time, because nothing here is ever rewritten.
+#
+# FOUNDATION ONLY: nothing in the pipeline calls record_decision_event yet.
+# Adding the real call sites is a separate change on purpose.
+# --------------------------------------------------------------------------
+
+MAX_DECISION_DETAIL_JSON_LEN = 2000
+
+
+@dataclass(frozen=True)
+class DecisionEvent:
+    """One appended row. `seq` is the ledger's own append order, not
+    anything derived from ts_utc — two events can share a timestamp (the
+    same pass through the pipeline resolving several decisions off one
+    clock read), and seq still totally orders them."""
+
+    seq: int
+    detection_id: str
+    ts_utc: str
+    stage: str
+    decision: str
+    reason: str | None
+    detail: dict | None
+    code_version: str | None
+
+
+def record_decision_event(
+    conn: sqlite3.Connection,
+    detection_id: str,
+    *,
+    stage: str,
+    decision: str,
+    reason: str | None = None,
+    detail: dict | None = None,
+    ts_utc: datetime | None = None,
+    code_version_str: str | None = None,
+) -> int:
+    """Append one decision event. Returns its `seq`.
+
+    Appends unconditionally: there is no upsert key and no de-duplication.
+    Recording the same stage/decision pair twice for one detection is a
+    real fact about what happened (the pipeline reached that point twice),
+    not a mistake to collapse — the same reasoning that keeps sub-threshold
+    'log' tier clusters in the detections table rather than dropping them.
+
+    ts_utc: when the decision was actually taken. Defaults to wall clock
+    for the ordinary live caller, but is a parameter so a caller that
+    already knows the decision's real timestamp passes it rather than
+    letting it drift to "whenever the write happened", and so tests are
+    deterministic — same injectable-clock discipline as runner.py's
+    validation_now_fn. Stored as ISO-8601; naive datetimes are assumed UTC
+    and stamped as such rather than silently recorded without an offset.
+
+    detail: structured context for this one decision (thresholds compared,
+    values seen). Serialized to JSON; dropped rather than truncated if it
+    exceeds MAX_DECISION_DETAIL_JSON_LEN, since half a JSON document is
+    not a smaller fact, it's an unparseable one — same all-or-nothing
+    choice funnel_events.record_event makes with props.
+
+    code_version_str: the caller's code_version() at decision time, same
+    frozen-at-write-time discipline as write_cluster's. None (the default)
+    means the caller didn't record one — never back-filled from a later
+    code_version() call, which would attribute a decision to code that
+    didn't make it."""
+    if ts_utc is None:
+        ts_utc = datetime.now(timezone.utc)
+    elif ts_utc.tzinfo is None:
+        ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+
+    detail_json = None
+    if detail:
+        encoded = json.dumps(detail, separators=(",", ":"), sort_keys=True, default=str)
+        if len(encoded) <= MAX_DECISION_DETAIL_JSON_LEN:
+            detail_json = encoded
+        else:
+            logger.warning(
+                "record_decision_event(detection_id=%s, stage=%s): detail JSON is %d bytes "
+                "(limit %d) -- recording the event without it",
+                detection_id, stage, len(encoded), MAX_DECISION_DETAIL_JSON_LEN,
+            )
+
+    cursor = conn.execute(
+        """
+        INSERT INTO decision_events
+            (detection_id, ts_utc, stage, decision, reason, detail_json, code_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (detection_id, ts_utc.isoformat(), stage, decision, reason, detail_json, code_version_str),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def decision_events_for_detection(conn: sqlite3.Connection, detection_id: str) -> list[DecisionEvent]:
+    """Every event appended for this detection, in append order. Read-only
+    counterpart to record_decision_event — no HTTP endpoint, no UI; this
+    is what a shell, a test, or a future consumer reads the ledger with."""
+    rows = conn.execute(
+        """
+        SELECT seq, detection_id, ts_utc, stage, decision, reason, detail_json, code_version
+        FROM decision_events WHERE detection_id = ? ORDER BY seq
+        """,
+        (detection_id,),
+    ).fetchall()
+    return [
+        DecisionEvent(
+            seq=seq, detection_id=det_id, ts_utc=ts, stage=stage, decision=decision,
+            reason=reason, detail=json.loads(detail_json) if detail_json else None,
+            code_version=code_ver,
+        )
+        for seq, det_id, ts, stage, decision, reason, detail_json, code_ver in rows
+    ]
