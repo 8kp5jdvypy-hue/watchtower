@@ -1,13 +1,21 @@
 """Tests for tradebot.vendors.alpaca -- limited to the parts that don't
 need a real Alpaca client (DETECTOR_DATA_FEED resolution), plus the
-timeout-adapter/backoff logic added for the 2026-08-21 reliability fix,
-which is fully testable without any real network I/O: constructing a
-client and mounting an adapter is local object setup, and _with_backoff
-is exercised with fake callables. Everything else in this module talks
-to the real Alpaca SDK by design (see its own module docstring) and
-isn't unit tested here.
+timeout-adapter/backoff logic added for the 2026-08-21 reliability fix
+and the vendor-call observability logging added the same day, all fully
+testable without any real network I/O: constructing a client and
+mounting an adapter is local object setup, _with_backoff/_observed_call
+are exercised with fake callables, and the public fetch_* functions'
+observability context (chunk/page context, no symbol-list/URL/secret
+leakage) is exercised with fake client objects standing in for the real
+Alpaca SDK clients. Everything else in this module talks to the real
+Alpaca SDK by design (see its own module docstring) and isn't unit
+tested here.
 """
 from __future__ import annotations
+
+import io
+import logging
+from datetime import date, datetime, timezone
 
 import pytest
 import requests
@@ -15,6 +23,7 @@ from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed
 from requests.adapters import HTTPAdapter
 
+import tradebot.runner as runner_mod
 import tradebot.vendors.alpaca as alpaca_module
 from tradebot.vendors.alpaca import _resolve_detector_data_feed
 
@@ -216,3 +225,295 @@ def test_with_backoff_retries_a_non_429_apierror_with_flat_backoff(monkeypatch):
 
     assert calls["n"] == 5
     assert sleep_calls == [2, 2, 2, 2]
+
+
+# --------------------------------------------------------------------------
+# 2026-08-21 vendor-call observability: _observed_call, and the 10
+# existing _with_backoff(...) call sites it now wraps from the outside.
+# --------------------------------------------------------------------------
+
+
+def test_observed_call_uses_the_watchtower_vendors_alpaca_logger():
+    assert alpaca_module.logger.name == "watchtower.vendors.alpaca"
+
+
+def test_observed_call_emits_start_before_invoking_the_callable(caplog):
+    """The whole point of a start event: proving it exists BEFORE fn()
+    runs, not just that it exists somewhere in the log. fn() checks the
+    already-captured records for its own start line as its first action,
+    which only passes if the start log truly precedes the call."""
+    saw_start_before_running = []
+
+    def fn():
+        saw_start_before_running.append(
+            any("vendor_call_start" in r.message for r in caplog.records)
+        )
+        return "result"
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        result = alpaca_module._observed_call("fetch_daily_bars", fn, client="stock", symbol="TSLA")
+
+    assert saw_start_before_running == [True]
+    assert result == "result"
+
+
+def test_observed_call_success_returns_result_unchanged_and_emits_finish(caplog):
+    def fn():
+        return {"ok": True}
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        result = alpaca_module._observed_call("fetch_daily_bars", fn, client="stock", symbol="TSLA")
+
+    assert result == {"ok": True}
+    finish_records = [r for r in caplog.records if "vendor_call_finish" in r.message]
+    assert len(finish_records) == 1
+    msg = finish_records[0].message
+    assert "operation=fetch_daily_bars" in msg
+    assert "client=stock" in msg
+    assert "symbol=TSLA" in msg
+    assert "outcome=success" in msg
+    elapsed = float(msg.split("elapsed_ms=")[1].split()[0])
+    assert elapsed >= 0
+
+
+def test_observed_call_failure_read_timeout(caplog):
+    def fn():
+        raise requests.exceptions.ReadTimeout("read timed out, host=data.alpaca.markets")
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            alpaca_module._observed_call(
+                "fetch_daily_bars_bulk", fn, client="stock", chunk_index=4, chunk_count=9, chunk_size=1500,
+            )
+
+    failure_records = [r for r in caplog.records if "vendor_call_failure" in r.message]
+    assert len(failure_records) == 1
+    assert failure_records[0].levelname == "WARNING"
+    msg = failure_records[0].message
+    assert "exception=ReadTimeout" in msg
+    assert "status_code=" not in msg  # not an APIError -- no status_code available
+    assert "read timed out" not in msg  # str(exception) must never be logged
+    assert "data.alpaca.markets" not in msg
+
+
+def test_observed_call_failure_connect_timeout(caplog):
+    def fn():
+        raise requests.exceptions.ConnectTimeout("connect timed out")
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        with pytest.raises(requests.exceptions.ConnectTimeout):
+            alpaca_module._observed_call("fetch_intraday_bars", fn, client="stock", symbol="TSLA")
+
+    failure_records = [r for r in caplog.records if "vendor_call_failure" in r.message]
+    assert len(failure_records) == 1
+    assert "exception=ConnectTimeout" in failure_records[0].message
+    assert "connect timed out" not in failure_records[0].message
+
+
+def test_observed_call_failure_apierror_includes_status_code_not_body(caplog):
+    def fn():
+        raise _fake_api_error(500)
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        with pytest.raises(APIError):
+            alpaca_module._observed_call("fetch_us_equity_assets", fn, client="trading")
+
+    failure_records = [r for r in caplog.records if "vendor_call_failure" in r.message]
+    assert len(failure_records) == 1
+    msg = failure_records[0].message
+    assert "exception=APIError" in msg
+    assert "status_code=500" in msg
+    # only type name + status code are logged, never the APIError's own
+    # message body ("error", from _fake_api_error's constructor arg) --
+    # checked as the exact standalone body text, since "APIError" itself
+    # lowercases to a substring containing "error"
+    assert " error " not in f" {msg} "
+
+
+def test_observed_call_reraises_the_identical_exception_instance():
+    original = requests.exceptions.ReadTimeout("boom")
+
+    def fn():
+        raise original
+
+    with pytest.raises(requests.exceptions.ReadTimeout) as exc_info:
+        alpaca_module._observed_call("fetch_daily_bars", fn, client="stock", symbol="TSLA")
+
+    assert exc_info.value is original
+
+
+def test_observed_call_output_never_contains_secrets_or_urls(caplog):
+    def fn():
+        return "result"
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        alpaca_module._observed_call(
+            "fetch_daily_bars_bulk", fn, client="stock",
+            chunk_index=4, chunk_count=9, chunk_size=1500, lookback_days=30,
+        )
+
+    all_messages = "\n".join(r.message for r in caplog.records)
+    for forbidden in ("http://", "https://", "Authorization", "APCA-API-KEY-ID", "APCA-API-SECRET-KEY"):
+        assert forbidden not in all_messages
+
+
+def test_observed_call_wrapping_with_backoff_preserves_the_429_retry_shape(monkeypatch, caplog):
+    """_observed_call wraps the LOGICAL call, not each retry attempt --
+    one start/failure event pair for the whole 5-attempt retried
+    sequence, and _with_backoff's own attempt count/sleep pattern
+    (already proven unchanged by the dedicated tests above) is
+    unaffected by being wrapped."""
+    sleep_calls = []
+    monkeypatch.setattr(alpaca_module.time, "sleep", lambda s: sleep_calls.append(s))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise _fake_api_error(429)
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        with pytest.raises(APIError):
+            alpaca_module._observed_call(
+                "fetch_daily_bars_bulk",
+                lambda: alpaca_module._with_backoff(fn),
+                client="stock", chunk_index=1, chunk_count=1, chunk_size=10,
+            )
+
+    assert calls["n"] == 5
+    assert sleep_calls == [2, 4, 8, 16]
+    assert len([r for r in caplog.records if "vendor_call_start" in r.message]) == 1
+    assert len([r for r in caplog.records if "vendor_call_failure" in r.message]) == 1
+
+
+# --------------------------------------------------------------------------
+# The same context/safety guarantees, exercised through the real public
+# fetch_* functions (fake client objects standing in for the Alpaca SDK)
+# rather than _observed_call directly -- proves the actual call-site
+# wiring (chunk math, page counters, phase labels), not just the helper.
+# --------------------------------------------------------------------------
+
+
+class _FakeQuote:
+    def __init__(self, ts: datetime = datetime(2026, 8, 5, 14, 30, tzinfo=timezone.utc)):
+        self.timestamp = ts
+        self.bid_price = 100.0
+        self.ask_price = 100.2
+
+
+def test_fetch_latest_quotes_logs_correct_chunk_context_and_no_symbol_list(monkeypatch, caplog):
+    class _FakeClient:
+        def get_stock_latest_quote(self, request):
+            return {s: _FakeQuote() for s in request.symbol_or_symbols}
+
+    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeClient())
+    monkeypatch.setattr(alpaca_module, "BULK_FETCH_CHUNK_SIZE", 2)
+    symbols = ["AAA", "BBB", "CCC"]  # chunk 1: [AAA, BBB] (size 2), chunk 2: [CCC] (size 1)
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        result = alpaca_module.fetch_latest_quotes(symbols)
+
+    assert set(result.keys()) == {"AAA", "BBB", "CCC"}
+
+    starts = [r.message for r in caplog.records if "vendor_call_start" in r.message]
+    assert len(starts) == 2
+    assert "operation=fetch_latest_quotes" in starts[0] and "client=stock" in starts[0]
+    assert "chunk_index=1" in starts[0] and "chunk_count=2" in starts[0] and "chunk_size=2" in starts[0]
+    assert "chunk_index=2" in starts[1] and "chunk_count=2" in starts[1] and "chunk_size=1" in starts[1]
+
+    all_messages = "\n".join(r.message for r in caplog.records)
+    for symbol in symbols:
+        assert symbol not in all_messages
+    assert "symbols=" not in all_messages
+
+
+def test_fetch_daily_bars_bulk_logs_correct_chunk_context_and_no_symbol_list(monkeypatch, caplog):
+    class _FakeBar:
+        timestamp = datetime(2026, 8, 5, tzinfo=timezone.utc)
+        open = high = low = close = 100.0
+        volume = 1000
+
+    class _FakeResponse:
+        def __init__(self, symbols):
+            self.data = {s: [_FakeBar()] for s in symbols}
+
+    class _FakeClient:
+        def get_stock_bars(self, request):
+            return _FakeResponse(request.symbol_or_symbols)
+
+    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeClient())
+    monkeypatch.setattr(alpaca_module, "BULK_FETCH_CHUNK_SIZE", 2)
+    symbols = ["AAA", "BBB", "CCC"]
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        result = alpaca_module.fetch_daily_bars_bulk(symbols, lookback_days=30)
+
+    assert set(result.keys()) == {"AAA", "BBB", "CCC"}
+
+    starts = [r.message for r in caplog.records if "vendor_call_start" in r.message]
+    assert len(starts) == 2
+    assert "operation=fetch_daily_bars_bulk" in starts[0]
+    assert "chunk_index=1" in starts[0] and "chunk_count=2" in starts[0] and "chunk_size=2" in starts[0]
+    assert "lookback_days=30" in starts[0]
+    assert "chunk_index=2" in starts[1] and "chunk_size=1" in starts[1]
+
+    all_messages = "\n".join(r.message for r in caplog.records)
+    for symbol in symbols:
+        assert symbol not in all_messages
+
+
+def test_fetch_option_chain_logs_contracts_phase_then_chain_snapshot_phase(monkeypatch, caplog):
+    class _FakeContract:
+        symbol = "TSLA260130C00500000"
+
+    class _FakeContractsResponse:
+        option_contracts = [_FakeContract()]
+        next_page_token = None
+
+    class _FakeTradingClient:
+        def get_option_contracts(self, request):
+            return _FakeContractsResponse()
+
+    class _FakeOptionClient:
+        def get_option_chain(self, request):
+            return {}  # no snapshot for the one contract -- it's just dropped; only logging matters here
+
+    monkeypatch.setattr(alpaca_module, "_trading_client", lambda: _FakeTradingClient())
+    monkeypatch.setattr(alpaca_module, "_option_client", lambda: _FakeOptionClient())
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        alpaca_module.fetch_option_chain("TSLA", date(2026, 1, 30))
+
+    starts = [r.message for r in caplog.records if "vendor_call_start" in r.message]
+    assert len(starts) == 2
+
+    assert "operation=fetch_option_chain" in starts[0] and "client=trading" in starts[0]
+    assert "phase=contracts" in starts[0] and "page_index=1" in starts[0] and "symbol=TSLA" in starts[0]
+
+    assert "operation=fetch_option_chain" in starts[1] and "client=option" in starts[1]
+    assert "phase=chain_snapshot" in starts[1] and "symbol=TSLA" in starts[1]
+
+
+def test_configure_logging_integration_with_a_real_observed_call():
+    """PR #67's own tests already prove any watchtower.* child inherits
+    visibility generically (using a bare logging.getLogger(...) call) --
+    this is the one integration point that couldn't exist until now:
+    proving the REAL _observed_call-driven log line from this module
+    flows through runner.configure_logging()'s handler end to end."""
+    wt_logger = logging.getLogger("watchtower")
+    saved_handlers = list(wt_logger.handlers)
+    saved_level = wt_logger.level
+    saved_propagate = wt_logger.propagate
+    try:
+        stream = io.StringIO()
+        runner_mod.configure_logging(level="INFO", stream=stream)
+
+        alpaca_module._observed_call("fetch_daily_bars", lambda: "ok", client="stock", symbol="TSLA")
+
+        output = stream.getvalue()
+        assert "vendor_call_start operation=fetch_daily_bars" in output
+        assert "vendor_call_finish operation=fetch_daily_bars" in output
+        assert "watchtower.vendors.alpaca" in output
+    finally:
+        wt_logger.handlers = saved_handlers
+        wt_logger.setLevel(saved_level)
+        wt_logger.propagate = saved_propagate
