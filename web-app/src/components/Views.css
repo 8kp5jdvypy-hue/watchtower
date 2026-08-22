@@ -72,6 +72,11 @@
 .empty-state { color: var(--ink-dim); font-size: 0.88rem; padding: 1.5rem 0; text-align: center; }
 
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+/* Reads as a caption to the tier tiles directly above it, so it sits a
+   step quieter than .view-subtitle (0.88rem) while the three tier names
+   stay at full --ink to survive a scan. Existing tokens only. */
+.tier-legend { color: var(--ink-dim); font-size: 0.83rem; line-height: 1.6; margin: 0 0 1.6rem; }
+.tier-legend b { color: var(--ink); font-weight: 600; }
 /* Performance's by-kind grid caps at 3 columns (min 210px): its five
    tiles were landing 4+1, one orphan alone on row two (review L6) --
    3+2 balances. Scoped here, not on .stat-grid, so the journal's

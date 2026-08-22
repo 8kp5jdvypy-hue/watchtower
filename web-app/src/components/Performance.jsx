@@ -52,6 +52,43 @@ export default function Performance() {
         </div>
       )}
 
+      {/* The only place in the app a user ever meets the word LOG: the
+          list endpoints filter sub-threshold rows out entirely (see the
+          API's tier IN ('high','medium') and signalOrder.js), so LOG has
+          no card of its own to explain itself and would otherwise read
+          as a third kind of alert sitting next to MEDIUM.
+          Every clause here is deliberately hedged, because the SUBSCRIBER
+          delivery path is not the same as the tier decision:
+          - HIGH clears the tier bar but is only ELIGIBLE to be sent --
+            telegram_bot/delivery.py's make_subscriber_hook filters by
+            db.list_subscribers_for_symbol (onboarded, risk-acked, not
+            paused/locked/session-halted, symbol on their watchlist,
+            reachable) and a 'quiet' subscriber's personal floor sits
+            above the global one; alerts.py can still suppress on cap or
+            cooldown, and the outbox delivers asynchronously.
+          - MEDIUM's hourly digest reaches subscribers only through
+            make_medium_fanout_fn, which is 'aggressive' sensitivity
+            only -- most users never receive it.
+          - LOG has no fan-out function at all. send_log_summary() writes
+            to `alerter`, which is the ops channel/console
+            (TelegramAlerter/ConsoleAlerter), never a subscriber DM -- so
+            this must not imply users get an end-of-day recap.
+          - tier_performance() JOINs marks and applies
+            CURRENT_FEED_FILTER_SQL, so the rates are neither every
+            detection nor only delivered ones: they are the qualifying
+            journaled ones, and nothing filters on `alerted`.
+          No thresholds, caps, or cooldown numbers in the copy -- those
+          are tuned in detectors.py/alerts.py and would go quietly stale
+          here. */}
+      {tiers.length > 0 && (
+        <p className="tier-legend">
+          <b>HIGH</b> is eligible for an immediate individual alert, subject to alert safeguards and
+          your settings. <b>MEDIUM</b> is batched hourly and sent to users who choose aggressive
+          alerts. <b>LOG</b> is lower-priority activity kept in Perch's journal; it is not sent as a
+          user alert. These rates include qualifying journaled detections, not only delivered alerts.
+        </p>
+      )}
+
       {kinds.length === 0 && <p className="empty-state">Not enough history yet to report performance by signal type.</p>}
       {kinds.length > 0 && (
         <>
