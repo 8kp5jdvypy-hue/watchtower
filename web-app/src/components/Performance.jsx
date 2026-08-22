@@ -52,6 +52,28 @@ export default function Performance() {
         </div>
       )}
 
+      {/* The only place in the app a user ever meets the word LOG: the
+          list endpoints filter sub-threshold rows out entirely (see the
+          API's tier IN ('high','medium') and signalOrder.js), so LOG has
+          no card of its own to explain itself and would otherwise read
+          as a third kind of alert sitting next to MEDIUM.
+          Each line states the tier's real delivery path, not its score:
+          HIGH -> Decision.SEND, MEDIUM -> QUEUED_FOR_DIGEST released on
+          the clock hour, LOG -> QUEUED_FOR_EOD drained into one
+          end-of-day summary (tradebot/alerts.py, runner.py's
+          send_medium_digest_if_due/send_log_summary). Deliberately no
+          thresholds or daily-cap number here -- those are tuned in
+          detectors.py/alerts.py and copy that repeats them would go
+          quietly stale. */}
+      {tiers.length > 0 && (
+        <p className="tier-legend">
+          <b>HIGH</b> is sent on its own the moment it fires. <b>MEDIUM</b> is held and delivered
+          together once an hour. <b>LOG</b> is never alerted on its own — it's journaled as it
+          happens and only recapped in an end-of-day summary. It appears here so these rates cover
+          everything Perch noticed, not just what it sent you.
+        </p>
+      )}
+
       {kinds.length === 0 && <p className="empty-state">Not enough history yet to report performance by signal type.</p>}
       {kinds.length > 0 && (
         <>
