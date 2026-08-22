@@ -142,6 +142,21 @@
 
 .sd-tech-details { margin-top: 0.85rem; }
 
+/* The raw engine sentence once a plain-English lead sits above it --
+   deliberately the same demotion SignalCard makes (.sc-headline-raw:
+   mono, faint, small), so the same sentence reads as the same kind of
+   thing on the card and in the panel.
+   Both variants carry the panel's own 1.25rem gutter, which the section
+   wrappers would otherwise have supplied; declared after
+   .sd-why-technical so the multi-detector <details> keeps that gutter
+   while still inheriting that rule's summary styling. */
+.sd-headline-raw {
+  font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint);
+  line-height: 1.5; margin: 0.35rem 1.25rem 0;
+}
+.sd-headline-raw-details { margin: 0.4rem 1.25rem 0; }
+.sd-headline-raw-details .sd-headline-raw { margin: 0.4rem 0 0; }
+
 .sd-context-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.6rem; }
 .sd-context-item {
   background: var(--bg-1); border: 1px solid var(--line); border-radius: 8px;

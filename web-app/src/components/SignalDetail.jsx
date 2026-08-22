@@ -148,6 +148,29 @@ export default function SignalDetail({ id, onClose }) {
   const kinds = data?.kinds || []
   const contexts = data?.contexts || []
 
+  // Plain English first, technical detail second -- the same hierarchy
+  // SignalCard already renders (cardHeadline() above .sc-headline-raw).
+  //
+  // explainContext() is the reusable source of truth here, not
+  // cardHeadline(): explainContext reads the full per-kind context dicts
+  // /signals/<id> actually returns, while cardHeadline consumes the list
+  // endpoints' context_summary -- a RENAMED projection of those same
+  // fields (atr14 -> atr, level -> level_value; see the API's
+  // _HEADLINE_CONTEXT_FIELDS). Handing cardHeadline a raw context would
+  // silently drop every number it couldn't find under the new name and
+  // degrade to a number-free sentence, so this view reuses the helper
+  // built for its own payload -- the one the "Why" section below already
+  // relies on. Either way the numbers stay real: neither helper invents.
+  //
+  // kinds[0], not the cluster's primary kind: /signals/<id> doesn't
+  // return primary_kind (the highest-scoring detector -- see runner.py's
+  // `primary = max(detections, key=score)`), and adding it is a backend
+  // change this view can't make on its own. First-listed is the honest
+  // best available, and it costs nothing: every kind still gets its own
+  // sentence in "Why Perch flagged this" directly below, so leading with
+  // this one summarises rather than hides.
+  const plainLead = kinds.length > 0 ? explainContext(kinds[0], contexts[0]).plain : null
+
   // Portaled to document.body: rendered in place, this fixed overlay sits
   // inside `.view`'s stacking context (z-index: 1) and loses to .tabs (2)
   // and .mobile-nav (10) -- undimmed chrome above the modal, tabs still
@@ -198,7 +221,27 @@ export default function SignalDetail({ id, onClose }) {
               </span>
               <span className={`sd-tier sd-tier-${data.tier}`}>{data.tier}</span>
             </div>
-            <p className="sd-headline">{data.headlines}</p>
+            <p className="sd-headline">{plainLead || data.headlines}</p>
+            {/* The raw engine sentence, demoted beneath the plain one and
+                never shown twice -- with no kinds to explain, it IS
+                .sd-headline above and this doesn't render at all (the
+                same honest fallback SignalCard makes).
+                A multi-detector cluster's `headlines` is one clause per
+                detector, semicolon-joined (runner.py), so it arrives long
+                enough to dominate the top of the panel -- that case folds
+                into the disclosure the sections below already use instead
+                of leading with a wall of ATR phrasing. Still one click
+                away, never removed. */}
+            {plainLead && data.headlines && (
+              kinds.length > 1 ? (
+                <details className="sd-why-technical sd-headline-raw-details">
+                  <summary>Technical details</summary>
+                  <p className="sd-headline-raw">{data.headlines}</p>
+                </details>
+              ) : (
+                <p className="sd-headline-raw">{data.headlines}</p>
+              )
+            )}
 
             {(data.news_driven === true || data.news_driven === false || data.alerted || data.origin === 'screening') && (
               <div className="sd-flags">
