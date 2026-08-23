@@ -1,8 +1,9 @@
 """Tests for the append-only decision_events ledger in tradebot.journal.
 
-Foundation only: nothing in the pipeline writes to this table yet, so
-these tests exercise the helper and the table's append-only guarantee
-directly rather than through the runner.
+These exercise the storage helper and the table's append-only guarantee
+directly. The pipeline's own call sites — which decisions runner.py
+records, and when it commits them — are covered in
+test_decision_event_wiring.py.
 """
 from __future__ import annotations
 
@@ -53,6 +54,7 @@ def test_record_decision_event_round_trips_every_field(tmp_path):
         conn, detection_id,
         stage="alert_budget", decision="send", reason="under_daily_cap",
         detail={"cap": 6, "sent_today": 2}, ts_utc=TS, code_version_str="abc123",
+        run_id="run-abc", run_mode=journal.RUN_MODE_LIVE,
     )
 
     assert seq == 1
@@ -67,6 +69,8 @@ def test_record_decision_event_round_trips_every_field(tmp_path):
     assert event.reason == "under_daily_cap"
     assert event.detail == {"cap": 6, "sent_today": 2}
     assert event.code_version == "abc123"
+    assert event.run_id == "run-abc"
+    assert event.run_mode == "live"
 
 
 def test_record_decision_event_optional_fields_default_to_none(tmp_path):
@@ -79,6 +83,66 @@ def test_record_decision_event_optional_fields_default_to_none(tmp_path):
     assert event.reason is None
     assert event.detail is None
     assert event.code_version is None
+    # A caller that isn't a run records that it isn't one, rather than
+    # getting a run identity invented for it.
+    assert event.run_id is None
+    assert event.run_mode is None
+
+
+# ---------------------------------------------------------------------------
+# commit=False — the caller owns the transaction
+# ---------------------------------------------------------------------------
+
+
+def test_commit_defaults_to_true_and_makes_the_row_immediately_durable(tmp_path):
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)
+    conn.commit()
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS)
+
+    observer = connect(db_path)  # separate connection: sees only committed rows
+    assert observer.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 1
+
+
+def test_commit_false_writes_the_row_but_leaves_durability_to_the_caller(tmp_path):
+    """What runner.py's process_new_bar needs: the event is in the
+    transaction, but the decision of WHEN that transaction closes stays
+    with the code that orders its commits against an irreversible send.
+    """
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)
+    conn.commit()
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS, commit=False)
+
+    # Visible on the writing connection...
+    assert len(decision_events_for_detection(conn, detection_id)) == 1
+    # ...and to nobody else, until the caller says so.
+    observer = connect(db_path)
+    assert observer.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 0
+
+    conn.commit()
+
+    after = connect(db_path)
+    assert after.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 1
+
+
+def test_commit_false_events_are_lost_with_the_transaction_they_rode_in_on(tmp_path):
+    """The accepted consequence, asserted rather than assumed: a decision
+    whose transaction rolled back is a decision that didn't end up
+    happening, and the ledger should not claim otherwise."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)
+    conn.commit()
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS, commit=False)
+    conn.rollback()
+
+    assert decision_events_for_detection(conn, detection_id) == []
 
 
 def test_record_decision_event_commits_without_caller_commit(tmp_path):
@@ -354,5 +418,85 @@ def test_connect_adds_the_ledger_to_a_pre_existing_db_without_disturbing_it(tmp_
     assert migrated.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 0
     seq = record_decision_event(migrated, detection_id, stage="dedup", decision="pass", ts_utc=TS)
     assert seq == 1
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        migrated.execute("DELETE FROM decision_events")
+
+
+# The ledger's first release had no run_id/run_mode. This is the exact
+# shape a journal.db written by it has on disk.
+_LEDGER_WITHOUT_RUN_COLUMNS = """
+CREATE TABLE decision_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    detection_id TEXT NOT NULL,
+    ts_utc TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    detail_json TEXT,
+    code_version TEXT
+);
+"""
+
+
+def test_connect_adds_the_run_columns_to_a_ledger_that_predates_them(tmp_path):
+    """The migration that cannot be done with CREATE TABLE IF NOT EXISTS:
+    the table already exists, so only ALTER TABLE reaches it. The row
+    written before the columns existed keeps saying exactly what it said
+    — NULL, meaning nobody recorded a run, which is true of it."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)
+    conn.execute("DROP TRIGGER decision_events_no_update")
+    conn.execute("DROP TRIGGER decision_events_no_delete")
+    conn.execute("DROP TABLE decision_events")
+    conn.executescript(_LEDGER_WITHOUT_RUN_COLUMNS)
+    conn.execute(
+        "INSERT INTO decision_events (detection_id, ts_utc, stage, decision) VALUES (?, ?, ?, ?)",
+        (detection_id, TS.isoformat(), "dedup", "pass"),
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = connect(db_path)
+
+    columns = {row[1] for row in migrated.execute("PRAGMA table_info(decision_events)")}
+    assert {"run_id", "run_mode"} <= columns
+
+    record_decision_event(
+        migrated, detection_id, stage="alert_decision", decision="send", ts_utc=TS,
+        run_id="run-1", run_mode=journal.RUN_MODE_REPLAY,
+    )
+    old_event, new_event = decision_events_for_detection(migrated, detection_id)
+    assert (old_event.run_id, old_event.run_mode) == (None, None)
+    assert (new_event.run_id, new_event.run_mode) == ("run-1", "replay")
+
+
+def test_connect_indexes_run_id_without_aborting_the_rest_of_the_schema(tmp_path):
+    """The index on run_id cannot live in SCHEMA: executescript runs
+    before the ALTER TABLEs, so a CREATE INDEX on a column an existing
+    file doesn't have yet would raise and take every later statement in
+    SCHEMA down with it. This asserts both halves — the index exists, and
+    a table created by a statement further down SCHEMA does too."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    conn.execute("DROP TRIGGER decision_events_no_update")
+    conn.execute("DROP TRIGGER decision_events_no_delete")
+    conn.execute("DROP TABLE decision_events")
+    conn.executescript(_LEDGER_WITHOUT_RUN_COLUMNS)
+    conn.commit()
+    conn.close()
+
+    migrated = connect(db_path)
+
+    indexes = {row[0] for row in migrated.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'decision_events'"
+    )}
+    assert "idx_decision_events_run" in indexes
+    # SCHEMA ran to completion: the triggers declared after the table are
+    # back, so the ledger is append-only again on this migrated file. The
+    # row matters -- a BEFORE DELETE trigger fires per row deleted, so on
+    # an empty table this assertion would pass with no triggers at all.
+    detection_id = _write_detection(migrated)
+    record_decision_event(migrated, detection_id, stage="dedup", decision="pass", ts_utc=TS)
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         migrated.execute("DELETE FROM decision_events")

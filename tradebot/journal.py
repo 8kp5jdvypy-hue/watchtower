@@ -161,10 +161,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
 -- time." One detection has many decision_events; a decision_event is
 -- never revised, only superseded by a later one appended after it.
 --
--- Nothing writes to this table yet -- foundation only (see
--- record_decision_event). Wiring the pipeline's real decision points into
--- it is deliberately a separate change, so that change is reviewable as
--- "behavior now records X" rather than as a schema change too.
+-- runner.py's process_new_bar is the writer -- see record_decision_event
+-- and the call sites there.
 CREATE TABLE IF NOT EXISTS decision_events (
     -- AUTOINCREMENT (not bare rowid): guarantees a strictly increasing
     -- seq that is never reused, so ordering by seq is a real append
@@ -178,7 +176,23 @@ CREATE TABLE IF NOT EXISTS decision_events (
     decision TEXT NOT NULL,
     reason TEXT,
     detail_json TEXT,
-    code_version TEXT
+    code_version TEXT,
+    -- Which invocation of the scanner produced this event, and whether
+    -- that invocation was the live loop or a replay of a cached session.
+    -- The ledger is append-only, so a replay's decisions sit permanently
+    -- alongside live ones in the same table and there is no later pass
+    -- that could go back and label them; without these two columns a
+    -- reader some months from now has no way to tell "the system decided
+    -- this during Tuesday's session" from "someone re-ran Tuesday from
+    -- cache on Friday to test a detector change." run_id also groups one
+    -- run's decisions together across every symbol it touched, which
+    -- neither ts_utc (two runs can overlap in time) nor code_version
+    -- (the same build runs many times) can do.
+    --
+    -- Both NULL on rows written by a caller that didn't identify its run
+    -- -- never back-filled or inferred, same discipline as code_version.
+    run_id TEXT,
+    run_mode TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_decision_events_detection ON decision_events(detection_id, seq);
 CREATE INDEX IF NOT EXISTS idx_decision_events_ts ON decision_events(ts_utc);
@@ -279,6 +293,22 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
+    # NULL on any row appended before these shipped -- see the columns'
+    # own comment in SCHEMA. ALTER TABLE ADD COLUMN is not an UPDATE or a
+    # DELETE, so the ledger's append-only triggers don't (and shouldn't)
+    # block a migration; what they protect is the content of rows already
+    # written, and adding a column leaves every one of those rows saying
+    # exactly what it said before.
+    _add_column_if_missing(conn, "decision_events", "run_id", "TEXT")
+    _add_column_if_missing(conn, "decision_events", "run_mode", "TEXT")
+    # Deliberately NOT in SCHEMA with the table's other indexes: an
+    # existing journal.db has a decision_events table without run_id, and
+    # executescript(SCHEMA) runs above these ALTERs -- a CREATE INDEX on
+    # run_id up there would raise "no such column" and abort the whole
+    # script, taking every later statement in SCHEMA down with it. It has
+    # to come after the column it indexes exists.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_decision_events_run ON decision_events(run_id, seq)")
+    conn.commit()
     return conn
 
 
@@ -1049,11 +1079,19 @@ def get_contract_outcome(conn: sqlite3.Connection, detection_id: str) -> Contrac
 # fired didn't. This table answers that, and answers it the same way
 # afterwards as it did at the time, because nothing here is ever rewritten.
 #
-# FOUNDATION ONLY: nothing in the pipeline calls record_decision_event yet.
-# Adding the real call sites is a separate change on purpose.
+# runner.py's process_new_bar writes to this — see its call sites for which
+# decision points are recorded and which deliberately are not.
 # --------------------------------------------------------------------------
 
 MAX_DECISION_DETAIL_JSON_LEN = 2000
+
+# The two values run_mode takes. Spelled here rather than in runner.py so
+# that a reader of the ledger and a writer of it share one vocabulary: a
+# query filtering out replays is only correct if it knows the exact string
+# the writer used, and a second spelling of "replay" somewhere else would
+# silently return the wrong rows rather than fail.
+RUN_MODE_LIVE = "live"
+RUN_MODE_REPLAY = "replay"
 
 
 @dataclass(frozen=True)
@@ -1071,6 +1109,8 @@ class DecisionEvent:
     reason: str | None
     detail: dict | None
     code_version: str | None
+    run_id: str | None
+    run_mode: str | None
 
 
 def record_decision_event(
@@ -1083,6 +1123,9 @@ def record_decision_event(
     detail: dict | None = None,
     ts_utc: datetime | None = None,
     code_version_str: str | None = None,
+    run_id: str | None = None,
+    run_mode: str | None = None,
+    commit: bool = True,
 ) -> int:
     """Append one decision event. Returns its `seq`.
 
@@ -1110,7 +1153,25 @@ def record_decision_event(
     frozen-at-write-time discipline as write_cluster's. None (the default)
     means the caller didn't record one — never back-filled from a later
     code_version() call, which would attribute a decision to code that
-    didn't make it."""
+    didn't make it.
+
+    run_id/run_mode: which invocation of the scanner took this decision,
+    and whether it was RUN_MODE_LIVE or RUN_MODE_REPLAY. See the columns'
+    comment in SCHEMA for why an append-only ledger needs them at write
+    time: nothing can label these rows later. Both default to None, which
+    records honestly that the caller didn't say — a script or a test
+    appending an event is not a run.
+
+    commit: True (the default) commits immediately, for a caller whose
+    event is the whole of its transaction. Pass False when this append is
+    part of a larger unit of work the caller commits itself — which is
+    what runner.py's process_new_bar does, because committing here would
+    flush that function's still-pending detection writes at a moment it
+    did not choose. See _commit_then_send there: journal.db's commit
+    points are ordered against an irreversible send on another database,
+    and a helper that commits whenever it feels like it silently takes
+    that ordering away from the code responsible for it. The row is
+    written to the connection either way; only durability waits."""
     if ts_utc is None:
         ts_utc = datetime.now(timezone.utc)
     elif ts_utc.tzinfo is None:
@@ -1131,12 +1192,16 @@ def record_decision_event(
     cursor = conn.execute(
         """
         INSERT INTO decision_events
-            (detection_id, ts_utc, stage, decision, reason, detail_json, code_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (detection_id, ts_utc, stage, decision, reason, detail_json, code_version, run_id, run_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (detection_id, ts_utc.isoformat(), stage, decision, reason, detail_json, code_version_str),
+        (
+            detection_id, ts_utc.isoformat(), stage, decision, reason, detail_json,
+            code_version_str, run_id, run_mode,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.lastrowid
 
 
@@ -1146,7 +1211,8 @@ def decision_events_for_detection(conn: sqlite3.Connection, detection_id: str) -
     is what a shell, a test, or a future consumer reads the ledger with."""
     rows = conn.execute(
         """
-        SELECT seq, detection_id, ts_utc, stage, decision, reason, detail_json, code_version
+        SELECT seq, detection_id, ts_utc, stage, decision, reason, detail_json, code_version,
+               run_id, run_mode
         FROM decision_events WHERE detection_id = ? ORDER BY seq
         """,
         (detection_id,),
@@ -1155,7 +1221,7 @@ def decision_events_for_detection(conn: sqlite3.Connection, detection_id: str) -
         DecisionEvent(
             seq=seq, detection_id=det_id, ts_utc=ts, stage=stage, decision=decision,
             reason=reason, detail=json.loads(detail_json) if detail_json else None,
-            code_version=code_ver,
+            code_version=code_ver, run_id=run_id, run_mode=run_mode,
         )
-        for seq, det_id, ts, stage, decision, reason, detail_json, code_ver in rows
+        for seq, det_id, ts, stage, decision, reason, detail_json, code_ver, run_id, run_mode in rows
     ]
