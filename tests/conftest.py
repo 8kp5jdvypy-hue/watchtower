@@ -27,6 +27,7 @@ from __future__ import annotations
 import pytest
 
 from tradebot import metrics as metrics_mod
+from tradebot import evaluations as evaluations_mod
 from tradebot import universe as universe_mod
 
 
@@ -69,6 +70,16 @@ def _isolate_universe_db(monkeypatch, tmp_path):
     which tests reach it is not a property any individual test author can
     be expected to track."""
     monkeypatch.setattr(universe_mod, "DEFAULT_DB_PATH", tmp_path / "_universe" / "universe.db")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_evaluations_db(monkeypatch, tmp_path):
+    """Third file, same leak: tradebot.evaluations.connect() defaults to
+    the real data/evaluations.db, and run_live opens it for Stage 2
+    observability. Redirected for the same reason as metrics and
+    universe -- which tests reach it is not a property any individual
+    test author can be expected to track."""
+    monkeypatch.setattr(evaluations_mod, "DEFAULT_DB_PATH", tmp_path / "_evaluations" / "evaluations.db")
 
 
 def _snapshot(path):
