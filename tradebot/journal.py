@@ -178,6 +178,27 @@ CREATE TABLE IF NOT EXISTS decision_events (
     -- detections.id. Loose reference, no SQLite FK constraint -- same
     -- style as marks.detection_id / contract_selections.detection_id.
     detection_id TEXT NOT NULL,
+    -- EXECUTION time, not market time: when this run took and recorded
+    -- the decision. Deliberately a different clock from
+    -- detections.ts_utc, which is the market/bar time the detection is
+    -- about. The two answer different questions and must not be read as
+    -- the same one:
+    --
+    --   detections.ts_utc     -- WHEN IN THE MARKET. The bar's own
+    --                            timestamp (CLAUDE.md: the OPEN of the
+    --                            bar, UTC). Identical across every run
+    --                            that ever evaluates that bar.
+    --   decision_events.ts_utc -- WHEN THIS EXECUTION RAN. Wall clock at
+    --                            the moment the decision was taken.
+    --
+    -- During replay this is therefore real 'now' -- the moment the
+    -- replay was executed -- NOT the historical session time being
+    -- replayed. That is the intended reading: it is a record of when
+    -- this process decided something, and a replay run in 2026 really
+    -- did decide it in 2026. Anyone asking 'what market moment was this
+    -- about' joins to detections.ts_utc, and anyone asking 'which
+    -- execution was this' reads run_mode/run_id below -- so nothing is
+    -- lost by this column meaning exactly one thing.
     ts_utc TEXT NOT NULL,
     stage TEXT NOT NULL,
     decision TEXT NOT NULL,
@@ -1152,13 +1173,20 @@ def record_decision_event(
     not a mistake to collapse — the same reasoning that keeps sub-threshold
     'log' tier clusters in the detections table rather than dropping them.
 
-    ts_utc: when the decision was actually taken. Defaults to wall clock
-    for the ordinary live caller, but is a parameter so a caller that
-    already knows the decision's real timestamp passes it rather than
-    letting it drift to "whenever the write happened", and so tests are
-    deterministic — same injectable-clock discipline as runner.py's
-    validation_now_fn. Stored as ISO-8601; naive datetimes are assumed UTC
-    and stamped as such rather than silently recorded without an offset.
+    ts_utc: EXECUTION time — when this run took and recorded the
+    decision — not the market time the decision was about. Defaults to
+    wall clock, which is what every current caller uses, replay included:
+    a replay executed today really did take its decisions today, and
+    stamping them with the historical session's clock would claim
+    otherwise. The market side of the question is answered by
+    detections.ts_utc (the bar's own timestamp), and 'which execution was
+    this' by run_mode/run_id — so this column is left meaning exactly one
+    thing rather than two. It stays a parameter so a caller that knows a
+    decision's real recording time passes it rather than letting it drift
+    to "whenever the write happened", and so tests are deterministic —
+    same injectable-clock discipline as runner.py's validation_now_fn.
+    Stored as ISO-8601; naive datetimes are assumed UTC and stamped as
+    such rather than silently recorded without an offset.
 
     detail: structured context for this one decision (thresholds compared,
     values seen). Serialized to JSON; dropped rather than truncated if it

@@ -525,6 +525,10 @@ def _record_decision(
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
     subscriber_hook=None, validation_now_fn=None, market_bars=None, data_feed=None, origin="watchlist",
+    # Defaults for direct/test/legacy callers only -- run_live() and
+    # run_replay() always pass both explicitly. 'unknown' means the
+    # caller did not say, and is never to be read as live. See the
+    # docstring's run_mode/run_id paragraphs.
     run_mode=RUN_MODE_UNKNOWN, run_id=UNATTRIBUTED_RUN_ID,
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
@@ -565,12 +569,25 @@ def process_new_bar(
     appends, so a replay's decisions can never be mistaken for the live
     ones from the same session (the detection_id is a hash of
     symbol/session/ts/kinds and is therefore identical across runs —
-    these two columns are the only thing that separates them). Resolved
-    once per run_live()/run_replay() call and passed in, same as
-    data_feed/origin. The defaults are the deliberately loud
-    'unknown'/'unattributed' pair, for a caller — in practice a test —
-    that has no run to attribute events to; they are never a stand-in
-    for live. Nothing else about this function's behavior reads them."""
+    these two columns are the only thing that separates them). The
+    production entry points both resolve them once per call and pass them
+    explicitly — run_live() sends RUN_MODE_LIVE, run_replay() sends
+    RUN_MODE_REPLAY, each with its own new_run_id() — exactly the way
+    they already pass data_feed/origin. No production path relies on the
+    defaults.
+
+    The defaults exist for the other kind of caller: a direct one — a
+    test, a script, a REPL session, anything predating these parameters —
+    that has no run to attribute its events to. For those,
+    'unknown'/'unattributed' is the honest answer, and it is deliberately
+    a loud one rather than a NULL or an empty string.
+
+    Read them as 'this row did not say', NEVER as live. An event stamped
+    RUN_MODE_UNKNOWN is not evidence of a live decision and must not be
+    counted as one; the only rows that assert live are the ones that say
+    RUN_MODE_LIVE. Nothing else about this function's behavior reads
+    either parameter — they are carried to the ledger and nowhere
+    else."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
