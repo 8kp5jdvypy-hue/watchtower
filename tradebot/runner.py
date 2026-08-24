@@ -48,6 +48,7 @@ from tradebot.config import MARKET_PROXY_SYMBOLS, WATCHLIST
 from tradebot.costs import select_contract
 from tradebot import dedup
 from tradebot.events import active_event_window, events_for_date, has_earnings_before
+from tradebot import evaluations as evaluations_mod
 from tradebot.rendering import templates
 from tradebot.guard import extreme_mover_evidence, validate_alert_data
 from tradebot import metrics
@@ -524,6 +525,85 @@ def _record_decision(
         metrics.increment("decision_event_write_failed", stage=stage)
 
 
+def _anchors_as_dict(anchors) -> dict | None:
+    """DailyAnchors as plain JSON-able data.
+
+    Frozen for the session (CLAUDE.md), so this is written once per
+    symbol-session and is the other half of what a detector needs to be
+    re-run offline against a stored bar -- rvol_spike in particular is
+    unreproducible without avg_cum_volume_by_bar. Its int keys become
+    strings in JSON, which is a lossless round trip for a reader that
+    expects it."""
+    try:
+        return {
+            "symbol": anchors.symbol,
+            "session_date": anchors.session_date.isoformat(),
+            "prior_close": anchors.prior_close,
+            "prior_high": anchors.prior_high,
+            "prior_low": anchors.prior_low,
+            "opening_range_high": anchors.opening_range_high,
+            "opening_range_low": anchors.opening_range_low,
+            "opening_range_volume": anchors.opening_range_volume,
+            "swing_high": anchors.swing_high,
+            "swing_low": anchors.swing_low,
+            "avg_cum_volume_by_bar": dict(anchors.avg_cum_volume_by_bar),
+        }
+    except Exception:
+        return None
+
+
+def _record_evaluation(
+    eval_conn, bars, *, symbol, session_date, outcome, run_mode, run_id, version,
+    anchors=None, origin=None, atr14=None, kinds=None, cluster_score=None,
+    tier=None, detection_id=None, error=None,
+) -> None:
+    """Record one Stage 2 bar evaluation. Instrumentation, and
+    instrumentation only.
+
+    eval_conn=None means recording is off, and returns before doing any
+    work at all -- the default for every caller that doesn't opt in,
+    which is every existing test and every replay. So this layer is
+    completely inert unless run_live hands it a connection.
+
+    Swallows its own failures, like _record_decision: knowing what the
+    detectors saw must never change what they decided, and must never
+    turn a bar that would have alerted into a bar that raised.
+
+    Writes to evaluations.db on its own connection. Two of the outcomes
+    are recorded BEFORE process_new_bar opens its journal.db
+    transaction, so writing them into journal.db would leave one open
+    that this function then abandons -- a separate file makes that
+    impossible rather than merely avoided, and keeps _commit_then_send's
+    ordering untouchable from here.
+
+    atr14 is computed here, lazily, only when a caller didn't already
+    have one: on the NO_DETECTION path evaluate_bar returned None and so
+    resolved no ATR, but "how big was this bar really" is the first
+    question anyone asks of a missed mover. Inside the guard, so a
+    failure costs the row, never the bar."""
+    if eval_conn is None:
+        return
+    try:
+        last = bars[-1]
+        if atr14 is None:
+            atr14 = atr(bars)
+        evaluations_mod.record_bar_evaluation(
+            eval_conn,
+            session=session_date.isoformat(), symbol=symbol,
+            run_id=run_id, run_mode=run_mode,
+            now_utc=datetime.now(timezone.utc).isoformat(),
+            bar_ts_utc=last.ts.isoformat(), outcome=outcome,
+            open=last.open, high=last.high, low=last.low, close=last.close, volume=last.volume,
+            atr14=atr14, kinds=kinds, cluster_score=cluster_score, tier=tier,
+            detection_id=detection_id, error=error,
+            code_version=version, origin=origin,
+            anchors=_anchors_as_dict(anchors) if anchors is not None else None,
+        )
+    except Exception:
+        logger.error("bar evaluation write failed: symbol=%s outcome=%s", symbol, outcome, exc_info=True)
+        metrics.increment("evaluation_write_failed", outcome=outcome)
+
+
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
     subscriber_hook=None, validation_now_fn=None, market_bars=None, data_feed=None, origin="watchlist",
@@ -532,6 +612,10 @@ def process_new_bar(
     # caller did not say, and is never to be read as live. See the
     # docstring's run_mode/run_id paragraphs.
     run_mode=RUN_MODE_UNKNOWN, run_id=UNATTRIBUTED_RUN_ID,
+    # Stage 2 observability. None (the default) disables recording
+    # entirely, so every existing caller and test is unaffected;
+    # run_live opens the connection once and passes it in.
+    eval_conn=None,
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
     called right after a HIGH alert is sent to the ops channel/console —
@@ -591,17 +675,51 @@ def process_new_bar(
     either parameter — they are carried to the ledger and nowhere
     else."""
     last = bars[-1]
-    if is_halted_bar(last):
-        stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
-        metrics.increment("data_health_suppression", reason="halted")
-        return
-    if is_bar_gap(bars):
-        stats.data_gaps.append(f"{symbol}: bar gap ({bar_gap_minutes(bars):.0f}min) at {last.ts.isoformat()}")
-        metrics.increment("data_health_suppression", reason="bar_gap")
-        return
 
-    result = evaluate_bar(symbol, bars, anchors, market_bars)
+    def _evaluation(outcome, **fields):
+        """Stage 2 observability for THIS bar. Every field it needs about
+        the call is already fixed by this point; only the outcome and the
+        detection details vary."""
+        _record_evaluation(
+            eval_conn, bars, symbol=symbol, session_date=session_date, outcome=outcome,
+            run_mode=run_mode, run_id=run_id, version=version, anchors=anchors,
+            origin=origin, **fields,
+        )
+
+    # Two flat try blocks rather than nested ones, so each outcome is
+    # recorded exactly once: a detector crash is DETECTOR_ERROR and is
+    # never also relabelled EVALUATION_ERROR on its way out.
+    try:
+        if is_halted_bar(last):
+            stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
+            metrics.increment("data_health_suppression", reason="halted")
+            _evaluation(evaluations_mod.OUTCOME_HALTED_BAR)
+            return
+        if is_bar_gap(bars):
+            stats.data_gaps.append(f"{symbol}: bar gap ({bar_gap_minutes(bars):.0f}min) at {last.ts.isoformat()}")
+            metrics.increment("data_health_suppression", reason="bar_gap")
+            _evaluation(evaluations_mod.OUTCOME_BAR_GAP)
+            return
+    except Exception as exc:
+        # A data-health guard itself failed. Recorded and RE-RAISED
+        # unchanged -- before this layer existed the exception propagated
+        # to the caller's own handler, and swallowing it here would be a
+        # behavior change, not instrumentation.
+        _evaluation(evaluations_mod.OUTCOME_EVALUATION_ERROR, error=f"{type(exc).__name__}: {exc}"[:500])
+        raise
+
+    try:
+        result = evaluate_bar(symbol, bars, anchors, market_bars)
+    except Exception as exc:
+        # A detector crashed, or the lookahead assertion tripped. Same
+        # discipline: record, then re-raise untouched.
+        _evaluation(evaluations_mod.OUTCOME_DETECTOR_ERROR, error=f"{type(exc).__name__}: {exc}"[:500])
+        raise
+
     if result is None:
+        # The black hole this layer exists for: every detector ran, none
+        # fired, and until now nothing anywhere recorded that it happened.
+        _evaluation(evaluations_mod.OUTCOME_NO_DETECTION)
         return
 
     detection_id = journal_write_cluster(
@@ -629,6 +747,15 @@ def process_new_bar(
     )
     tier = tier_for_score(result["score"]).value
     raw_tier_is_high = tier == "high"
+    # Recorded too, so the funnel is complete: "was this bar evaluated at
+    # all?" becomes a direct lookup rather than an inference from absence,
+    # and detection_id makes the join to journal.db's detections total.
+    # The tier here is the true score-based one, before any event-window
+    # routing downgrade -- same ground truth detections.tier holds.
+    _evaluation(
+        evaluations_mod.OUTCOME_DETECTED, atr14=result["atr14"], kinds=result["kinds"],
+        cluster_score=result["score"], tier=tier, detection_id=detection_id,
+    )
 
     # News/macro tagging — see tradebot.events module docstring: news is
     # suppression and context, never an alert source. Any overlapping
@@ -1890,6 +2017,23 @@ def run_live(
 
     history_by_symbol = _build_history_by_symbol(CACHE_DIR, WATCHLIST, session_date, stats)
 
+    # Stage 2 observability (tradebot.evaluations). Opened once for the
+    # session and passed to process_new_bar, which records what the
+    # detectors saw on every bar -- including the bars where nothing
+    # fired, which until now left no trace anywhere.
+    #
+    # A failure to open it costs the observability and nothing else:
+    # eval_conn stays None, process_new_bar's recording is then inert,
+    # and the session scans exactly as it did before this existed. Same
+    # never-fatal treatment as the universe connection above.
+    eval_conn = None
+    try:
+        from tradebot import evaluations as evaluations_module
+
+        eval_conn = evaluations_module.connect()
+    except Exception:
+        stats.errors.append(traceback.format_exc())
+
     md = {symbol: LiveMarketData(symbol, session_date) for symbol in WATCHLIST}
     anchors: dict[str, DailyAnchors] = {}
     rth_bar_count = {symbol: 0 for symbol in WATCHLIST}
@@ -2061,6 +2205,7 @@ def run_live(
                     market_bars=shared_market_bars,
                     data_feed=DETECTOR_DATA_FEED, origin=origin,
                     run_mode=RUN_MODE_LIVE, run_id=run_id,
+                    eval_conn=eval_conn,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
             except Exception:

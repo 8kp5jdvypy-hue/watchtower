@@ -142,8 +142,13 @@ CREATE INDEX IF NOT EXISTS idx_screening_events_tick ON screening_events(tick_id
 MAX_SCREENING_JSON_LEN = 2000
 
 
-def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    db_path = Path(db_path)
+def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
+    """db_path=None resolves DEFAULT_DB_PATH at CALL time. It used to be
+    a signature default, which is bound at definition -- so the test
+    suite's isolation fixture for this path was silently ineffective and
+    only happened not to leak because no test calls connect() bare. Same
+    call-time discipline as tradebot.metrics."""
+    db_path = Path(db_path if db_path is not None else DEFAULT_DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.executescript(SCHEMA)
