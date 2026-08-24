@@ -2959,7 +2959,15 @@ def _proxy_test_bar(symbol: str, open_time: datetime, close: float = 100.0) -> B
     return Bar(symbol, open_time, close, close + 0.1, close - 0.1, close, volume=1000)
 
 
-def _drive_one_live_iteration(monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls):
+# Distinguishes "the caller didn't say" from a deliberate db_path=None,
+# which is itself the case one test below needs to exercise.
+_HARNESS_DEFAULT_DB = object()
+
+
+def _drive_one_live_iteration(
+    monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls,
+    db_path=_HARNESS_DEFAULT_DB,
+):
     """session_bars_by_symbol[symbol] is either a list[Bar] (returned on
     every call) or a zero-arg callable (invoked fresh each call -- lets a
     test raise on the first call and succeed on a later one, e.g. test 6
@@ -3020,7 +3028,12 @@ def _drive_one_live_iteration(monkeypatch, tmp_path, watchlist, session_bars_by_
 
     monkeypatch.setattr(runner_mod, "process_new_bar", _spy_process_new_bar)
 
-    stats = runner_mod.run_live(ConsoleAlerter(), db_path=tmp_path / "journal.db")
+    # db_path=None is a real case, not a missing argument: it is how
+    # main() invokes run_live for an ordinary live run, and the only way
+    # to exercise run_live's own default-journal selection.
+    if db_path is _HARNESS_DEFAULT_DB:
+        db_path = tmp_path / "journal.db"
+    stats = runner_mod.run_live(ConsoleAlerter(), db_path=db_path)
     return session_bars_calls, process_new_bar_calls, stats
 
 
@@ -3063,6 +3076,44 @@ def test_run_live_stamps_live_mode_and_one_run_id_across_the_whole_session(monke
     run_ids = {c["run_id"] for c in process_new_bar_calls}
     assert len(run_ids) == 1  # one execution, one id
     assert run_ids != {None} and "" not in run_ids
+
+
+def test_run_live_without_a_db_path_opens_the_default_production_journal(monkeypatch, tmp_path):
+    """The replay production-journal boundary (PR #76) is replay-only:
+    run_live must still land on journal.DEFAULT_DB_PATH, and must not be
+    routed through resolve_replay_db_path.
+
+    Behavioral, not source-reading: run_live is actually driven with
+    db_path=None (exactly how main() calls it for a live run) and the
+    connection it opens is captured. `connect()` with no argument is the
+    observable that means "journal.py's own default", i.e. data/journal.db
+    -- test_connect_itself_still_defaults_to_production in
+    tests/test_replay_production_boundary.py pins the other half.
+    Redirecting the real default here isn't possible: connect()'s default
+    is bound at def time, so a monkeypatched DEFAULT_DB_PATH wouldn't be
+    honoured -- which is exactly why the call shape is the thing to
+    assert."""
+    opened = []
+    real_connect = runner_mod.connect
+
+    def _spy_connect(*args, **kwargs):
+        opened.append({"args": args, "kwargs": kwargs})
+        return real_connect(tmp_path / "captured.db")
+
+    monkeypatch.setattr(runner_mod, "connect", _spy_connect)
+
+    watchlist = ["AAA"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, {s: closed for s in watchlist},
+        halt_after_session_bars_calls=3, db_path=None,
+    )
+
+    assert opened, "run_live never opened a journal connection"
+    # No path passed -> connect() falls through to its own default.
+    assert opened[0] == {"args": (), "kwargs": {}}
+    # And it was never sent through the replay resolver.
+    assert all("journal_replay" not in str(call["args"]) for call in opened)
 
 
 def test_shared_proxy_fetch_does_not_happen_when_no_symbol_advances(monkeypatch, tmp_path):
