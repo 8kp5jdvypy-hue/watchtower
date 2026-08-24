@@ -478,3 +478,165 @@ def test_an_unattributed_scan_says_so_rather_than_claiming_live():
     run_mode, run_id = conn.execute("SELECT run_mode, run_id FROM screening_ticks").fetchone()
     assert run_mode != "live"
     assert run_id == "unattributed"
+
+
+# ---------------------------------------------------------------------------
+# MIN_HISTORY_BARS is a pure extraction
+# ---------------------------------------------------------------------------
+
+
+def test_min_history_bars_is_the_same_value_the_inline_default_was():
+    """The constant was extracted from build_snapshots_from_daily_bars'
+    inline `min_history: int = 6`. Pinning both the constant and the
+    signature default against the literal means a later edit to either
+    one alone -- the only way this extraction could become a behavior
+    change -- fails here."""
+    import inspect
+
+    from tradebot.broad_scan import build_snapshots_from_daily_bars
+
+    assert MIN_HISTORY_BARS == 6
+    assert inspect.signature(build_snapshots_from_daily_bars).parameters["min_history"].default == 6
+
+
+@pytest.mark.parametrize("bar_count,expected_snapshots", [
+    (0, 0), (1, 0), (5, 0),   # below the floor -- skipped, as before
+    (6, 1), (7, 1), (12, 1),  # at and above -- built, as before
+])
+def test_the_history_floor_behaves_identically_across_the_boundary(bar_count, expected_snapshots):
+    """Behavioral half of the extraction proof: the skip boundary sits in
+    exactly the same place. Verified against origin/main's own module at
+    review time for every count 0-12; this pins the boundary permanently."""
+    from tradebot.broad_scan import build_snapshots_from_daily_bars
+
+    payload = {"S": _bars("S", days=bar_count)} if bar_count else {"S": []}
+
+    snapshots = build_snapshots_from_daily_bars(payload)
+
+    assert len(snapshots) == expected_snapshots
+
+
+def test_broad_scan_output_is_unchanged_by_the_extraction():
+    """End-to-end regression: the screen's actual product -- which
+    symbols get promoted -- over a universe that straddles the history
+    floor. An off-by-one in the extraction would move S6 across the line
+    and change this list."""
+    conn = universe_mod.connect(":memory:")
+    loud = int(RVOL_THRESHOLD * 1000 * 3)
+    symbols = [f"S{n}" for n in (4, 5, 6, 7)]
+    _universe_with(conn, symbols)
+
+    def fake_bars(requested, lookback_days):
+        return {f"S{n}": _bars(f"S{n}", days=n, last_volume=loud) for n in (4, 5, 6, 7)}
+
+    promoted = runner_mod.run_broad_scan(conn, fetch_bars_fn=fake_bars)
+
+    # S4/S5 are below MIN_HISTORY_BARS and never become Snapshots at all;
+    # S6/S7 clear it and are loud enough to promote.
+    assert promoted == ["S6", "S7"] or promoted == ["S7", "S6"]
+    outcomes = {
+        sym: out for sym, out in conn.execute("SELECT symbol, outcome FROM screening_events")
+    }
+    assert outcomes["S4"] == OUTCOME_INSUFFICIENT_HISTORY
+    assert outcomes["S5"] == OUTCOME_INSUFFICIENT_HISTORY
+    assert outcomes["S6"] == OUTCOME_PROMOTED
+    assert outcomes["S7"] == OUTCOME_PROMOTED
+
+
+def test_the_recorded_history_floor_matches_the_one_actually_applied():
+    """thresholds_json is the safety net against a forgotten
+    SCREEN_VERSION bump, so it has to be the value the screen really
+    used, not a second copy."""
+    conn = universe_mod.connect(":memory:")
+    _universe_with(conn, ["SHORT"])
+
+    runner_mod.run_broad_scan(conn, fetch_bars_fn=lambda s, d: {"SHORT": _bars("SHORT", days=3)})
+
+    recorded = json.loads(conn.execute("SELECT thresholds_json FROM screening_ticks").fetchone()[0])
+    assert recorded["min_history_bars"] == MIN_HISTORY_BARS == 6
+
+
+# ---------------------------------------------------------------------------
+# Conservation invariant over a full synthetic tick
+# ---------------------------------------------------------------------------
+
+
+def test_conservation_invariant_holds_over_a_full_synthetic_tick():
+    """Every outcome the classifier can produce, in one tick, with both
+    conservation equations checked explicitly rather than trusting
+    invariant_ok's own arithmetic:
+
+        requested = missing + insufficient + snapshot
+        snapshot  = invalid + quiet + candidate
+
+    This is what licenses the aggregated-QUIET design: with per-symbol
+    quiet rows switched off, "was X screened and quiet?" is answered by
+    subtracting the recorded buckets from the universe, and that
+    subtraction is only sound while these equations hold."""
+    snapshots = [
+        _loud("PROM1", 9.0), _loud("PROM2", 8.0),   # promoted
+        _loud("NEAR1", 4.0), _loud("NEAR2", 3.0),   # candidates beaten by the cap
+        _snapshot("QUIET1"), _snapshot("QUIET2"), _snapshot("QUIET3"),
+        _snapshot("INVALID1", avg_volume=0.0), _snapshot("INVALID2", prior_close=0.0),
+        _snapshot("SURPRISE"),                       # never requested
+    ]
+    requested = ["PROM1", "PROM2", "NEAR1", "NEAR2", "QUIET1", "QUIET2", "QUIET3",
+                 "INVALID1", "INVALID2", "SHORT1", "SHORT2", "MISSING1"]
+    bars = {s.symbol: [1] * 7 for s in snapshots}
+    bars["SHORT1"] = [1] * 3
+    bars["SHORT2"] = [1] * 2
+
+    tick, events = classify_screen_outcomes(
+        requested, bars, snapshots,
+        *(lambda scored: (scored, scored[:2]))(
+            promote_candidates([c for c in (screen_snapshot(s) for s in snapshots) if c is not None])
+        ),
+        2, verbose_audit=True,
+    )
+
+    c = tick.counts
+    assert c["requested"] == len(requested) == 12
+    assert c["missing_from_fetch"] + c["insufficient_history"] + c["requested_snapshot"] == c["requested"]
+    assert c["invalid_baseline"] + c["quiet"] + c["requested_candidate"] == c["requested_snapshot"]
+    assert tick.invariant_ok
+    assert tick.universe_count == 12
+
+    # Each bucket populated, so the equations aren't satisfied trivially.
+    assert c["missing_from_fetch"] == 1
+    assert c["insufficient_history"] == 2
+    assert c["invalid_baseline"] == 2
+    assert c["quiet"] == 3
+    assert c["requested_candidate"] == 4
+    assert c["selected_top_n"] == 2
+    assert c["unexpected_from_fetch"] == 1
+
+    # Every requested symbol classified exactly once (SURPRISE is extra,
+    # counted separately and never folded into the requested buckets).
+    by_symbol = {}
+    for e in events:
+        assert e.symbol not in by_symbol, f"{e.symbol} classified twice"
+        by_symbol[e.symbol] = e.outcome
+    assert set(by_symbol) == set(requested) | {"SURPRISE"}
+    assert by_symbol["SURPRISE"] == OUTCOME_UNEXPECTED_FROM_FETCH
+    assert sorted(s for s, o in by_symbol.items() if o == OUTCOME_PROMOTED) == ["PROM1", "PROM2"]
+    assert sorted(s for s, o in by_symbol.items() if o == OUTCOME_CANDIDATE_NOT_PROMOTED) == ["NEAR1", "NEAR2"]
+
+
+def test_the_invariant_is_recorded_so_a_reader_can_trust_the_subtraction():
+    conn = universe_mod.connect(":memory:")
+    tick, events = _classify([_loud("L", 2.0), _snapshot("Q")])
+
+    _record(conn, tick, events)
+
+    invariant_ok, counts = conn.execute(
+        "SELECT invariant_ok, counts_json FROM screening_ticks"
+    ).fetchone()
+    assert invariant_ok == 1
+    parsed = json.loads(counts)
+    # The quiet symbol has no row of its own -- it is recoverable only
+    # from these counts, which is exactly why they are stored.
+    assert parsed["quiet"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM screening_events WHERE outcome = ?", (OUTCOME_QUIET,)
+    ).fetchone()[0] == 0
+
