@@ -1320,9 +1320,47 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
 
 def run_replay(
     session_date: date, alerter, db_path=None, cache_dir: Path = None,
+    allow_production_db: bool = False, metrics_path=None,
+) -> HeartbeatStats:
+    """Replay one cached session. This is the boundary: it decides where
+    this run's side effects land, then does the work.
+
+    metrics_path: which counter file this replay writes. None (the
+    default) means metrics.REPLAY_METRICS_PATH -- data/metrics_replay.json
+    -- NOT the live data/metrics.json. process_new_bar increments thirteen
+    counters a replay can reach (validator_rejection, suppression,
+    dedup_check_failed, ...), and those exist to answer "how often is this
+    happening in production right now"; a replay of an old session adding
+    to them makes that unanswerable, invisibly, because a counter is just a
+    number with no record of who added to it.
+
+    Same boundary philosophy as db_path above: the redirect is established
+    ONCE here, where the mode is known, rather than teaching thirteen
+    increment() call sites -- and the fourteenth someone adds later -- to
+    recognise a replay. See metrics.redirect_to.
+
+    Every other argument is passed straight through; see
+    _run_replay_session for what they do."""
+    destination = Path(metrics_path) if metrics_path is not None else metrics.REPLAY_METRICS_PATH
+    logger.info("replay metrics -> %s", destination)
+    with metrics.redirect_to(destination):
+        return _run_replay_session(
+            session_date, alerter, db_path=db_path, cache_dir=cache_dir,
+            allow_production_db=allow_production_db,
+        )
+
+
+def _run_replay_session(
+    session_date: date, alerter, db_path=None, cache_dir: Path = None,
     allow_production_db: bool = False,
 ) -> HeartbeatStats:
-    """db_path: which journal to write. None (the default) means
+    """The replay itself. Split from run_replay so the boundary above can
+    wrap the whole run in one metrics.redirect_to() without indenting this
+    body under it -- and so "where do this run's side effects go" is
+    answered in one short readable place instead of being buried at the top
+    of a long function.
+
+    db_path: which journal to write. None (the default) means
     journal.REPLAY_DB_PATH — data/journal_replay.db — NOT the production
     journal. A replay reproduces live detection ids exactly (cluster_id
     hashes symbol/session/ts/kinds), so a replay aimed at the live
@@ -2007,6 +2045,12 @@ def main() -> None:
         "production journal)",
     )
     parser.add_argument(
+        "--metrics-path", type=str, default=None,
+        help="override where --replay-date writes its counters (default data/metrics_replay.json -- a "
+        "replay never writes the live data/metrics.json). Ignored for a live run, which always uses "
+        "data/metrics.json",
+    )
+    parser.add_argument(
         "--allow-production-replay-db", action="store_true",
         help="DANGEROUS: permit --replay-date to write to the production journal (data/journal.db). A "
         "replay reproduces live detection ids and will overwrite the live record's decision state. "
@@ -2042,6 +2086,7 @@ def main() -> None:
             run_replay(
                 date.fromisoformat(args.replay_date), alerter, db_path=args.db_path,
                 cache_dir=cache_dir, allow_production_db=args.allow_production_replay_db,
+                metrics_path=args.metrics_path,
             )
         except ProductionJournalRefused as exc:
             parser.error(str(exc))

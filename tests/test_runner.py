@@ -3021,9 +3021,16 @@ def _drive_one_live_iteration(
     process_new_bar_calls: list[dict] = []
 
     def _spy_process_new_bar(*args, **kwargs):
+        from tradebot import metrics as _metrics
+
         process_new_bar_calls.append({
             "symbol": args[4], "market_bars": kwargs.get("market_bars"),
             "run_mode": kwargs.get("run_mode"), "run_id": kwargs.get("run_id"),
+            # Captured HERE, mid-run: this is the point at which the real
+            # process_new_bar would be incrementing counters, so it is the
+            # only place "where would a live counter have gone" is a fact
+            # rather than an inference.
+            "metrics_path": _metrics.active_path(),
         })
 
     monkeypatch.setattr(runner_mod, "process_new_bar", _spy_process_new_bar)
@@ -3114,6 +3121,35 @@ def test_run_live_without_a_db_path_opens_the_default_production_journal(monkeyp
     assert opened[0] == {"args": (), "kwargs": {}}
     # And it was never sent through the replay resolver.
     assert all("journal_replay" not in str(call["args"]) for call in opened)
+
+
+def test_run_live_writes_metrics_to_the_normal_live_path(monkeypatch, tmp_path):
+    """Characterization for the replay metrics boundary (PR #77): the
+    redirect is established by run_replay and by nothing else, so a live
+    run must still resolve to metrics.DEFAULT_METRICS_PATH.
+
+    Behavioral, and observed from the right moment: the spied
+    process_new_bar records metrics.active_path() from inside the running
+    loop -- the exact point the real one would be incrementing counters --
+    rather than checking before or after the run, when a leaked redirect
+    would already have been restored and invisible."""
+    from tradebot import metrics as metrics_mod
+
+    live_metrics = tmp_path / "live_metrics.json"
+    monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", live_metrics)
+    monkeypatch.setattr(metrics_mod, "REPLAY_METRICS_PATH", tmp_path / "metrics_replay.json")
+
+    watchlist = ["AAA"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    _, process_new_bar_calls, _ = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, {s: closed for s in watchlist},
+        halt_after_session_bars_calls=3,
+    )
+
+    assert process_new_bar_calls, "run_live never reached process_new_bar"
+    assert all(c["metrics_path"] == live_metrics for c in process_new_bar_calls)
+    # And the process is left unredirected, as it started.
+    assert metrics_mod.active_path() == live_metrics
 
 
 def test_shared_proxy_fetch_does_not_happen_when_no_symbol_advances(monkeypatch, tmp_path):
