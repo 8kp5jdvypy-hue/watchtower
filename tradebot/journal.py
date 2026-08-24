@@ -67,6 +67,65 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "journal.db"
 DEFAULT_CACHE_DIR = REPO_ROOT / "data" / "cache"
 
+# Where a replay writes when it wasn't told where to write. A sibling of
+# the production journal rather than a temp dir: replay output is meant to
+# be kept and queried (the SIP Phase 1 backtest and compare_replay both
+# read theirs back), it just isn't meant to land on top of the live
+# record. data/ is gitignored wholesale, so this needs no new ignore rule.
+REPLAY_DB_PATH = REPO_ROOT / "data" / "journal_replay.db"
+
+
+class ProductionJournalRefused(ValueError):
+    """Raised when a replay asks to write to the production journal
+    without saying so explicitly.
+
+    A ValueError subclass so a caller that only knows it passed a bad
+    path still catches it, and a distinct type so the two CLIs can turn
+    exactly this into a parser.error() without swallowing unrelated
+    ValueErrors from the same call."""
+
+
+def resolve_replay_db_path(db_path=None, *, allow_production_db: bool = False) -> Path:
+    """Where this replay is allowed to write. Pure: resolves, validates,
+    returns a Path or raises. No printing, no exiting, no I/O — the CLIs
+    own how a refusal is presented (see runner.main / scripts/replay.py).
+
+    Replay reproduces live detection ids exactly (cluster_id hashes
+    symbol/session/ts/kinds), so a replay pointed at the production
+    journal upserts onto the live rows and then keeps mutating them
+    through the setters that run after write_cluster — set_no_trade in
+    particular ALWAYS writes no_trade=1 in replay, because
+    ReplayMarketData has no options chain. Rather than teaching every one
+    of those writes to recognise a replay, this closes the question one
+    level up: a replay writes somewhere else unless a human insists
+    otherwise.
+
+    db_path=None means "the caller didn't choose" and resolves to
+    REPLAY_DB_PATH — never DEFAULT_DB_PATH. An explicit path is honoured
+    as-is, which keeps every existing --db-path workflow (compare_replay's
+    journal_a/journal_b, the SIP cache comparison) working untouched.
+
+    allow_production_db is the deliberate escape hatch, and it is the only
+    way to reach DEFAULT_DB_PATH. Comparison is on resolved paths, so
+    'data/../data/journal.db', a relative 'data/journal.db' from the repo
+    root, and a symlink to it are all the same path as far as the guard is
+    concerned — a guard that only string-matched would be a guard in name
+    only."""
+    candidate = REPLAY_DB_PATH if db_path is None else Path(db_path)
+    if allow_production_db:
+        return candidate.resolve()
+
+    resolved = candidate.resolve()
+    if resolved == DEFAULT_DB_PATH.resolve():
+        raise ProductionJournalRefused(
+            f"refusing to replay into the production journal ({resolved}). A replay "
+            f"reproduces live detection ids and would overwrite the live record's own "
+            f"decision state. Leave the path unset to use {REPLAY_DB_PATH}, pass a "
+            f"different --db-path, or pass --allow-production-replay-db if overwriting "
+            f"the production journal is genuinely what you want."
+        )
+    return resolved
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS detections (
     id TEXT PRIMARY KEY,

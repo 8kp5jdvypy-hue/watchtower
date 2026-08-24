@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tradebot.config import WATCHLIST
+from tradebot.journal import ProductionJournalRefused, resolve_replay_db_path
 from tradebot.detectors import DETECTORS, Bar, atr, bar_close_ts, build_anchors, score_cluster
 from tradebot.features import pct_from_prior_close
 from tradebot.journal import backfill_marks, code_version, connect, write_cluster
@@ -164,8 +165,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-path", type=Path, default=None,
-        help="override the journal DB path (default data/journal.db) -- pair with --cache-dir to run "
-        "the same session set against two data sources into two separate journals",
+        help="override the journal DB path (default data/journal_replay.db -- this script never "
+        "defaults to the production journal) -- pair with --cache-dir to run the same session set "
+        "against two data sources into two separate journals",
+    )
+    parser.add_argument(
+        "--allow-production-replay-db", action="store_true",
+        help="DANGEROUS: permit writing to the production journal (data/journal.db). This script "
+        "reproduces live detection ids and would upsert onto the live rows. Without this, naming "
+        "the production journal is refused",
     )
     parser.add_argument(
         "--out", type=Path, default=OUT_PATH,
@@ -202,7 +210,20 @@ def main() -> None:
         writer.writerows(all_rows)
     print(f"\nwrote {len(all_rows)} cluster rows to {out_path}")
 
-    conn = connect(args.db_path) if args.db_path else connect()
+    # Same policy as tradebot.runner's --replay-date, from the same pure
+    # helper: an unset path goes to the replay journal, never the live
+    # one, and naming the live one takes an explicit flag. This script is
+    # the widest-blast-radius replay in the repo -- it walks EVERY cached
+    # session, so pointed at the production journal it upserts onto every
+    # live row it can reproduce.
+    try:
+        db_path = resolve_replay_db_path(
+            args.db_path, allow_production_db=args.allow_production_replay_db,
+        )
+    except ProductionJournalRefused as exc:
+        parser.error(str(exc))
+    print(f"journaling to {db_path}")
+    conn = connect(db_path)
     version = code_version()
     for r in all_rows:
         write_cluster(

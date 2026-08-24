@@ -68,6 +68,7 @@ from tradebot.detectors import (
 from tradebot.journal import (
     CLOSE_MARK_OFFSET_MIN,
     OUTCOME_OFFSETS_MIN,
+    ProductionJournalRefused,
     RUN_MODE_LIVE,
     RUN_MODE_REPLAY,
     RUN_MODE_UNKNOWN,
@@ -87,6 +88,7 @@ from tradebot.journal import (
     record_contract_selection,
     record_decision_event,
     record_iv_sample,
+    resolve_replay_db_path,
     set_extreme_mover,
     set_news_driven,
     set_no_trade,
@@ -1316,13 +1318,35 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
 # --------------------------------------------------------------------------
 
 
-def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None) -> HeartbeatStats:
-    """db_path: override the journal DB path (default DEFAULT_DB_PATH).
-    Used by scripts/compare_replay.py to run two versions of the
-    detection logic against the same historical session into two
-    separate DB files, without touching the real journal — see that
+def run_replay(
+    session_date: date, alerter, db_path=None, cache_dir: Path = None,
+    allow_production_db: bool = False,
+) -> HeartbeatStats:
+    """db_path: which journal to write. None (the default) means
+    journal.REPLAY_DB_PATH — data/journal_replay.db — NOT the production
+    journal. A replay reproduces live detection ids exactly (cluster_id
+    hashes symbol/session/ts/kinds), so a replay aimed at the live
+    journal upserts onto the live rows and then keeps mutating them
+    through the writes that follow write_cluster: lifecycle_state,
+    suppress_reason/category, news_driven, alerted, and set_no_trade —
+    which in replay ALWAYS writes no_trade=1, since ReplayMarketData has
+    no options chain to select from. Rather than teach each of those
+    writes to recognise a replay, the boundary is the connection itself;
+    see journal.resolve_replay_db_path.
+
+    An explicit path is honoured unchanged, which is what
+    scripts/compare_replay.py uses to run two versions of the detection
+    logic against the same session into two separate DB files (see that
     script's module docstring for why this is a separate-file design
-    rather than an in-place A/B split.
+    rather than an in-place A/B split), and what the SIP Phase 1 backtest
+    used for its IEX-vs-SIP pair.
+
+    allow_production_db: the deliberate escape hatch, and the only way to
+    reach DEFAULT_DB_PATH. Off by default here and not merely in the CLI,
+    because run_replay is called programmatically too and a guard that
+    lived only in argparse would leave every other caller unprotected.
+    Passing the production path without it raises
+    journal.ProductionJournalRefused.
 
     cache_dir: override which cache tree (see scripts/fetch_cache.py) is
     replayed against (default CACHE_DIR, i.e. data/cache/). Used the
@@ -1335,7 +1359,12 @@ def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None
     cache_dir = cache_dir if cache_dir is not None else CACHE_DIR
     open_ts, _close_ts = session_bounds(session_date)
 
-    conn = connect(db_path) if db_path is not None else connect()
+    # Enforced here, not only in main(): run_replay is called
+    # programmatically (tests, scripts, a REPL), and a guard that lived
+    # only in argparse would protect the command line while leaving every
+    # other caller pointed at the production journal. db_path=None
+    # resolves to journal.REPLAY_DB_PATH, never DEFAULT_DB_PATH.
+    conn = connect(resolve_replay_db_path(db_path, allow_production_db=allow_production_db))
     version = code_version()
     # One id for this replay, generated per call: replaying a session
     # more than once is normal, the decision ledger is append-only, and
@@ -1972,8 +2001,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-path", type=str, default=None,
-        help="override the journal DB path (default data/journal.db) — for running two versions of the "
-        "detection logic against the same --replay-date into separate files, see scripts/compare_replay.py",
+        help="override the journal DB path — for running two versions of the detection logic against the "
+        "same --replay-date into separate files, see scripts/compare_replay.py. Default: data/journal.db "
+        "for a live run, data/journal_replay.db for --replay-date (a replay never defaults to the "
+        "production journal)",
+    )
+    parser.add_argument(
+        "--allow-production-replay-db", action="store_true",
+        help="DANGEROUS: permit --replay-date to write to the production journal (data/journal.db). A "
+        "replay reproduces live detection ids and will overwrite the live record's decision state. "
+        "Without this, naming the production journal is refused",
     )
     parser.add_argument(
         "--cache-dir", type=str, default=None,
@@ -1982,12 +2019,34 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    alerter = TelegramAlerter() if args.live else ConsoleAlerter()
-
+    # The alerter is deliberately NOT built before this branch. Replaying
+    # a historical session must never be able to select the live Telegram
+    # alerter -- a replay's alerts are hours or days stale, and
+    # run_replay() opens by sending a morning briefing and pre-open card,
+    # so a --replay-date --live run would push those to real subscribers
+    # before evaluating a single bar. Rejecting the combination here, and
+    # constructing ConsoleAlerter inside the replay branch rather than
+    # from args.live above it, means "a replay holding a TelegramAlerter"
+    # is not a state this function can reach. There is deliberately no
+    # override: --no-personal-alerts only skips the per-user DM fan-out
+    # and still pushes the ops channel, so it is not one either.
     if args.replay_date:
+        if args.live:
+            parser.error(
+                "--replay-date cannot be combined with --live: a replay of a historical session "
+                "must not push real alerts to Telegram. Drop --live to replay to the console."
+            )
+        alerter = ConsoleAlerter()
         cache_dir = Path(args.cache_dir) if args.cache_dir else None
-        run_replay(date.fromisoformat(args.replay_date), alerter, db_path=args.db_path, cache_dir=cache_dir)
+        try:
+            run_replay(
+                date.fromisoformat(args.replay_date), alerter, db_path=args.db_path,
+                cache_dir=cache_dir, allow_production_db=args.allow_production_replay_db,
+            )
+        except ProductionJournalRefused as exc:
+            parser.error(str(exc))
     else:
+        alerter = TelegramAlerter() if args.live else ConsoleAlerter()
         subscriber_hook = None
         medium_fanout_fn = None
         if args.live and not args.no_personal_alerts:
