@@ -1,7 +1,7 @@
-"""The replay/production boundary.
+"""The replay production-journal and live-alerter boundaries.
 
-Two ways a replay could reach production, closed at the boundary rather
-than by teaching individual writes to recognise a replay:
+Two specific replay/production paths, closed at the boundary rather than
+by teaching individual writes to recognise a replay:
 
   1. The journal it writes. A replay reproduces live detection ids
      exactly (cluster_id hashes symbol/session/ts/kinds), so a replay
@@ -15,11 +15,23 @@ than by teaching individual writes to recognise a replay:
      pushed hours-stale alerts to real subscribers before evaluating a
      single bar.
 
-Note what is NOT claimed: replay can still write the production journal
-if a human passes --allow-production-replay-db. That override exists on
-purpose. The claim is that replay no longer targets production by
-default or by accident, and that historical replay cannot select the
-live Telegram alerter at all.
+Exactly what is and isn't claimed, because the difference matters:
+
+  CLAIMED — replay no longer targets the production journal by default
+  or by accident, and historical replay cannot select TelegramAlerter.
+
+  NOT CLAIMED — that replay can never write production. It still can,
+  via --allow-production-replay-db. That override is deliberate, and
+  test_positive_control_the_override_really_does_corrupt_the_live_row
+  exercises it doing exactly the damage the default now prevents.
+
+  NOT CLAIMED, AND KNOWN OUTSTANDING — that these are the ONLY
+  replay/production side effects. They are not. process_new_bar calls
+  metrics.increment() eleven times, and tradebot.metrics resolves
+  DEFAULT_METRICS_PATH (data/metrics.json) at call time with no path
+  passed, so a replay still increments the production counters. That is
+  a separate, unaddressed side effect — deliberately out of scope here,
+  and nothing in this module should be read as covering it.
 """
 from __future__ import annotations
 
@@ -450,16 +462,11 @@ def test_live_mode_still_builds_the_telegram_alerter(monkeypatch, cli):
 # ---------------------------------------------------------------------------
 
 
-def test_run_live_still_defaults_to_the_production_journal():
-    """The boundary is replay-only. run_live must keep resolving its
-    connection the old way -- bare connect(), i.e. DEFAULT_DB_PATH."""
-    import inspect
-
-    source = inspect.getsource(runner_mod.run_live)
-
-    assert "connect(db_path) if db_path is not None else connect()" in source
-    assert "resolve_replay_db_path" not in source
-    assert "allow_production_db" not in source
+# run_live's own half of this lives in tests/test_runner.py --
+# test_run_live_without_a_db_path_opens_the_default_production_journal --
+# where the harness that can actually drive run_live already exists. It
+# asserts behaviorally that run_live opens connect() with no path; the
+# test below pins what "no path" resolves to.
 
 
 def test_connect_itself_still_defaults_to_production():

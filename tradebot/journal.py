@@ -96,9 +96,14 @@ def resolve_replay_db_path(db_path=None, *, allow_production_db: bool = False) -
     through the setters that run after write_cluster — set_no_trade in
     particular ALWAYS writes no_trade=1 in replay, because
     ReplayMarketData has no options chain. Rather than teaching every one
-    of those writes to recognise a replay, this closes the question one
-    level up: a replay writes somewhere else unless a human insists
-    otherwise.
+    of those writes to recognise a replay, this settles WHICH JOURNAL a
+    replay writes, one level up: it writes somewhere else unless a human
+    insists otherwise.
+
+    Scoped to the journal, and to nothing else. A replay still has other
+    production side effects that this function neither sees nor claims to
+    address — most concretely metrics.increment(), which process_new_bar
+    calls throughout and which writes data/metrics.json by default.
 
     db_path=None means "the caller didn't choose" and resolves to
     REPLAY_DB_PATH — never DEFAULT_DB_PATH. An explicit path is honoured
