@@ -382,11 +382,47 @@ def write_cluster(
     suppress_reason: str | None = None,
     primary_kind: str | None = None,
     data_feed: str | None = None,
-    origin: str = "watchlist",
+    origin: str | None = None,
     pct_from_prior_close: float | None = None,
     pct_from_prior_close_status: str | None = None,
 ) -> str:
-    """symbol_class (deep/thin liquidity, see tradebot.config) is derived
+    """Upserts by cluster identity: re-writing the same
+    (symbol, session, ts_utc, kinds) refreshes the row rather than
+    duplicating it — see cluster_id(). What that refresh may touch is
+    deliberately narrow, because the same identity is reproduced exactly
+    by any replay of a session that already ran live (scripts/replay.py
+    defaults to the production journal and re-runs every cached session):
+
+      REFRESHED — detector-derived facts this call recomputed from bars
+      (ts_utc, kinds, headlines, score, tier, close, atr14, trend,
+      context_json, pct_from_prior_close*), plus the provenance of that
+      recomputation (code_version, symbol_class). Refreshing these is the
+      point of the upsert; scripts/compare_replay.py's header documents
+      A/B replay relying on it.
+
+      PRESERVED — everything the pipeline decided or delivered, which this
+      function is never the author of: alerted, suppress_reason,
+      suppress_category, lifecycle_state, related_detection_id, no_trade,
+      news_driven, event_kind, event_severity, extreme_mover*. Those are
+      written by their own setters (set_no_trade, set_news_driven, and
+      runner.py's own UPDATEs) and must survive a later replay of the same
+      bar. `alerted` in particular gates the entire public track record
+      (/performance, the weekly recap, api/app.py), so letting a replay
+      reset it to 0 would silently delete the record that an alert really
+      fired. alerted/suppress_reason stay settable on the INSERT path,
+      where there is no prior state to destroy.
+
+      PRESERVED-IF-OMITTED — primary_kind, data_feed, origin. Omitting an
+      argument is not the same as recomputing it to nothing, and a caller
+      that never computed one (scripts/replay.py passes none of the three)
+      must not null out what the row already knows.
+
+    Scope note: this covers corruption through THIS function only. A
+    run_replay() pass also reaches the same row via set_no_trade,
+    set_news_driven and runner.py's direct UPDATEs, none of which are
+    affected by anything here.
+
+    symbol_class (deep/thin liquidity, see tradebot.config) is derived
     and frozen here at write time, not looked up later — the watchlist's
     classification could change in the future, and a historical row
     should keep reporting what was true when the alert actually fired,
@@ -398,11 +434,17 @@ def write_cluster(
     (the default) matches every pre-Decision-B caller/test, same as the
     other columns added after this function's first release.
 
-    origin: 'watchlist' (default) or 'screening' — whether `symbol` was in
-    the fixed watchlist or promoted in by broad_scan for this session. The
+    origin: 'watchlist' or 'screening' — whether `symbol` was in the
+    fixed watchlist or promoted in by broad_scan for this session. The
     only place this fact is knowable is the caller's own merge point
     (tradebot.runner's `scan_symbols` construction), so it must be passed
     in, not derived here. See docs/broad-scan-honesty-proposal.md.
+    Defaults to None, meaning "the caller didn't say" — which a fresh
+    INSERT still stores as 'watchlist' (unchanged from before), but which
+    an upsert now treats as "leave the existing value alone" rather than
+    as an assertion that this row is a watchlist row. The default is None
+    rather than 'watchlist' precisely so those two cases are still
+    distinguishable by the time the SQL runs.
 
     pct_from_prior_close/pct_from_prior_close_status: the caller's own
     tradebot.features.pct_from_prior_close(close, anchors.prior_close)
@@ -423,22 +465,40 @@ def write_cluster(
              close, atr14, trend, context_json, code_version, alerted, suppress_reason,
              primary_kind, symbol_class, data_feed, origin,
              pct_from_prior_close, pct_from_prior_close_status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE(?, 'watchlist'), ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             ts_utc=excluded.ts_utc, kinds=excluded.kinds, headlines=excluded.headlines,
             score=excluded.score, tier=excluded.tier, close=excluded.close,
             atr14=excluded.atr14, trend=excluded.trend, context_json=excluded.context_json,
-            code_version=excluded.code_version, alerted=excluded.alerted,
-            suppress_reason=excluded.suppress_reason, primary_kind=excluded.primary_kind,
-            symbol_class=excluded.symbol_class, data_feed=excluded.data_feed,
-            origin=excluded.origin, pct_from_prior_close=excluded.pct_from_prior_close,
-            pct_from_prior_close_status=excluded.pct_from_prior_close_status
+            code_version=excluded.code_version,
+            symbol_class=excluded.symbol_class,
+            pct_from_prior_close=excluded.pct_from_prior_close,
+            pct_from_prior_close_status=excluded.pct_from_prior_close_status,
+            -- Omission is not recomputation. A caller that never computed
+            -- one of these (scripts/replay.py passes neither) would
+            -- otherwise overwrite a known value with its parameter
+            -- default, erasing it. COALESCE keeps what the row already
+            -- knows when the incoming value is NULL, and still refreshes
+            -- it whenever the caller actually supplied one.
+            primary_kind=COALESCE(excluded.primary_kind, detections.primary_kind),
+            data_feed=COALESCE(excluded.data_feed, detections.data_feed),
+            -- origin can't use excluded.origin: its INSERT expression
+            -- above already collapsed "omitted" to 'watchlist' for
+            -- backwards compatibility, so by the time it reaches
+            -- `excluded` the two are indistinguishable. The raw argument
+            -- is bound a second time here, still NULL when omitted, so
+            -- the conflict path can tell them apart -- an explicit
+            -- 'watchlist' updates, an omitted one preserves whatever the
+            -- row already had (e.g. 'screening').
+            origin=COALESCE(?, detections.origin)
         """,
         (
             detection_id, ts_utc, session, symbol, kinds, headlines, score, tier,
             close, atr14, trend, context_json, code_version_str, int(alerted), suppress_reason,
             primary_kind, symbol_class, data_feed, origin,
             pct_from_prior_close, pct_from_prior_close_status,
+            origin,  # again, for the DO UPDATE SET's own COALESCE above
         ),
     )
     return detection_id
