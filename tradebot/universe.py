@@ -17,6 +17,7 @@ deep analysis applied only to whatever Stage 1 promotes.
 """
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -56,7 +57,89 @@ CREATE TABLE IF NOT EXISTS assets (
     delisted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_assets_active ON assets(is_active);
+
+-- Stage 1 observability. What the cheap screen (tradebot.broad_scan) did
+-- with every symbol, so "why did Perch miss this mover?" has an answer
+-- for the widest part of the funnel -- thousands of symbols down to a
+-- couple of dozen, which is where a miss is most likely to happen and
+-- where, until now, nothing was recorded at all.
+--
+-- Here rather than in journal.db on purpose. journal.db is "what Perch
+-- detected"; these rows are about symbols that mostly produced no
+-- detection whatever, at universe cardinality, and would swamp the file
+-- the track record lives in. They also sit next to `assets`, the table
+-- they join to. A consequence accepted deliberately: correlating these
+-- with detections means an ATTACH, the same as the existing
+-- journal.db/users.db split.
+--
+-- Deliberately NOT decision_events: that ledger is keyed on
+-- detection_id, and a symbol screened out at Stage 1 has no detection to
+-- key on. Minting a synthetic id would destroy the one property that
+-- table has -- every row refers to a real detection.
+
+-- One row per scan tick. Home for the funnel counts, the thresholds
+-- actually applied, and the conservation invariant.
+CREATE TABLE IF NOT EXISTS screening_ticks (
+    tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session TEXT NOT NULL,
+    tick_utc TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    run_mode TEXT NOT NULL,
+    -- Bumped when the screen's MEANING changes (broad_scan.SCREEN_VERSION).
+    -- Rows with different values are not comparable; a cross-session query
+    -- should filter on it.
+    screen_version INTEGER NOT NULL,
+    code_version TEXT,
+    -- Whether per-symbol QUIET rows were written for this tick. Without
+    -- it, a reader cannot tell a 200-row session from a 185,000-row one
+    -- except by guessing.
+    audit_mode INTEGER NOT NULL DEFAULT 0,
+    universe_count INTEGER NOT NULL,
+    thresholds_json TEXT NOT NULL,
+    counts_json TEXT NOT NULL,
+    invariant_ok INTEGER NOT NULL,
+    promotion_limit INTEGER NOT NULL,
+    latency_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_screening_ticks_session ON screening_ticks(session, tick_utc);
+
+-- One row per interesting per-symbol outcome. QUIET -- roughly 99% of
+-- the universe -- is counted in the tick's counts_json rather than
+-- written here, unless that tick ran in verbose audit mode.
+CREATE TABLE IF NOT EXISTS screening_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- screening_ticks.tick_id. Loose reference, no FK constraint --
+    -- same style as marks.detection_id / decision_events.detection_id.
+    tick_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    -- STAGE 1 UNITS ONLY. Named screen_score, not score, because the one
+    -- thing a reader must never do is compare it with detections.score:
+    -- that is an ATR-based detector score, this is a ratio-of-thresholds
+    -- rank used only to order candidates within a single pass, and it is
+    -- never shown to a user. See broad_scan's module docstring.
+    screen_score REAL,
+    rank INTEGER,
+    reasons_json TEXT,
+    detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_screening_events_symbol ON screening_events(symbol);
+CREATE INDEX IF NOT EXISTS idx_screening_events_tick ON screening_events(tick_id, outcome);
 """
+
+# Retention, DOCUMENTED BUT NOT ENFORCED -- nothing in this module
+# deletes. Shipping a deleter in the same change that first creates the
+# data would mean the first bug in it destroys the only copy.
+#
+#   interesting outcomes  ~hundreds/session   keep ~90 days
+#   aggregated quiet      1 row/tick          keep with the tick
+#   verbose audit         ~185k rows/session  bounded investigation only,
+#                                             roughly 25-30 MB/session
+#
+# A pruning job is a separate change. Until it exists, verbose audit mode
+# is the only setting that grows this file quickly, and it is off by
+# default.
+MAX_SCREENING_JSON_LEN = 2000
 
 
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -198,3 +281,122 @@ def active_symbols(conn: sqlite3.Connection, require_options: bool = False) -> l
 
 def asset_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM assets WHERE is_active = 1").fetchone()[0]
+
+
+# --------------------------------------------------------------------------
+# Stage 1 observability — persistence.
+#
+# The classification itself is pure and lives in
+# broad_scan.classify_screen_outcomes; this only writes what it decided.
+# --------------------------------------------------------------------------
+
+
+def _encode(value: dict | tuple | list | None) -> str | None:
+    """Same all-or-nothing discipline as journal.record_decision_event:
+    an oversized document is dropped rather than truncated, because half
+    a JSON document is not a smaller fact, it is an unparseable one."""
+    if value is None or value == () or value == [] or value == {}:
+        return None
+    encoded = json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
+    if len(encoded) > MAX_SCREENING_JSON_LEN:
+        logger.warning("screening JSON is %d bytes (limit %d) -- recording without it",
+                       len(encoded), MAX_SCREENING_JSON_LEN)
+        return None
+    return encoded
+
+
+def record_screening_tick(
+    conn: sqlite3.Connection,
+    tick,
+    events,
+    *,
+    session: str,
+    tick_utc: str,
+    run_id: str,
+    run_mode: str,
+    screen_version: int,
+    code_version: str | None = None,
+    audit_mode: bool = False,
+    latency_ms: int | None = None,
+) -> int:
+    """Append one Stage 1 tick and its per-symbol outcomes. Returns
+    tick_id.
+
+    tick/events are exactly what broad_scan.classify_screen_outcomes
+    returned — this function decides nothing about what happened, it only
+    stores it. One transaction: a tick's counts and its rows are true
+    together or not at all, since the counts are what makes the
+    aggregated-quiet subtraction valid.
+
+    run_mode/run_id carry the same meaning as in journal.decision_events:
+    which execution produced these rows. Stage 1 is live-only today
+    (--broad-scan requires --live), so replay attribution is
+    forward-looking rather than load-bearing — recorded anyway because a
+    row that cannot say which run wrote it is the problem those columns
+    exist to prevent."""
+    cursor = conn.execute(
+        """
+        INSERT INTO screening_ticks
+            (session, tick_utc, run_id, run_mode, screen_version, code_version,
+             audit_mode, universe_count, thresholds_json, counts_json,
+             invariant_ok, promotion_limit, latency_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            session, tick_utc, run_id, run_mode, screen_version, code_version,
+            int(audit_mode), tick.universe_count,
+            json.dumps(tick.thresholds, separators=(",", ":"), sort_keys=True),
+            json.dumps(tick.counts, separators=(",", ":"), sort_keys=True),
+            int(tick.invariant_ok), tick.promotion_limit, latency_ms,
+        ),
+    )
+    tick_id = cursor.lastrowid
+    conn.executemany(
+        """
+        INSERT INTO screening_events
+            (tick_id, symbol, outcome, screen_score, rank, reasons_json, detail_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (tick_id, e.symbol, e.outcome, e.screen_score, e.rank,
+             _encode(list(e.reasons)), _encode(e.detail))
+            for e in events
+        ],
+    )
+    conn.commit()
+    return tick_id
+
+
+def screening_history_for_symbol(conn: sqlite3.Connection, symbol: str, session: str) -> list[dict]:
+    """Every Stage 1 outcome recorded for one symbol in one session, in
+    tick order — the "why was this missed?" query.
+
+    Returns the tick's context alongside each row, because an outcome is
+    not interpretable without it: CANDIDATE_NOT_PROMOTED means nothing
+    without the promotion_limit it lost to, and no screen_score is
+    comparable across a screen_version change."""
+    rows = conn.execute(
+        """
+        SELECT t.tick_utc, e.outcome, e.screen_score, e.rank, e.reasons_json,
+               e.detail_json, t.promotion_limit, t.screen_version, t.counts_json,
+               t.invariant_ok, t.audit_mode, t.run_id, t.run_mode
+        FROM screening_events e
+        JOIN screening_ticks t ON t.tick_id = e.tick_id
+        WHERE e.symbol = ? AND t.session = ?
+        ORDER BY t.tick_utc, e.seq
+        """,
+        (symbol, session),
+    ).fetchall()
+    return [
+        {
+            "tick_utc": tick_utc, "outcome": outcome, "screen_score": screen_score,
+            "rank": rank, "reasons": json.loads(reasons) if reasons else [],
+            "detail": json.loads(detail) if detail else None,
+            "promotion_limit": promotion_limit, "screen_version": screen_version,
+            "counts": json.loads(counts), "invariant_ok": bool(invariant_ok),
+            "audit_mode": bool(audit_mode), "run_id": run_id, "run_mode": run_mode,
+        }
+        for (tick_utc, outcome, screen_score, rank, reasons, detail, promotion_limit,
+             screen_version, counts, invariant_ok, audit_mode, run_id, run_mode) in rows
+    ]
+
