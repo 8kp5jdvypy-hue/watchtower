@@ -25,13 +25,16 @@ Exactly what is and isn't claimed, because the difference matters:
   test_positive_control_the_override_really_does_corrupt_the_live_row
   exercises it doing exactly the damage the default now prevents.
 
-  NOT CLAIMED, AND KNOWN OUTSTANDING — that these are the ONLY
-  replay/production side effects. They are not. process_new_bar calls
-  metrics.increment() eleven times, and tradebot.metrics resolves
-  DEFAULT_METRICS_PATH (data/metrics.json) at call time with no path
-  passed, so a replay still increments the production counters. That is
-  a separate, unaddressed side effect — deliberately out of scope here,
-  and nothing in this module should be read as covering it.
+  ALSO CLAIMED, since the metrics boundary landed — a replay driven
+  through run_replay() writes its counters to data/metrics_replay.json,
+  not the live data/metrics.json.
+
+  STILL NOT CLAIMED — that data/metrics.json is cleaned of counters an
+  earlier replay already contaminated (nothing here rewrites history),
+  or that a unit test calling process_new_bar DIRECTLY is redirected. It
+  is not: the redirect is established by run_replay, so a direct caller
+  writes wherever tradebot.metrics currently points. The test suite's own
+  pollution of data/metrics.json is a known separate item.
 """
 from __future__ import annotations
 
@@ -44,6 +47,7 @@ from pathlib import Path
 import pytest
 
 from tradebot import journal as journal_mod
+from tradebot import metrics as metrics_mod
 from tradebot.alerts import ConsoleAlerter
 from tradebot.detectors import Detection
 from tradebot.journal import (
@@ -64,10 +68,17 @@ def paths(tmp_path, monkeypatch):
     can reach the developer's real data/ tree even if the guard breaks."""
     production = tmp_path / "data" / "journal.db"
     replay = tmp_path / "data" / "journal_replay.db"
+    live_metrics = tmp_path / "data" / "metrics.json"
+    replay_metrics = tmp_path / "data" / "metrics_replay.json"
     production.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(journal_mod, "DEFAULT_DB_PATH", production)
     monkeypatch.setattr(journal_mod, "REPLAY_DB_PATH", replay)
-    return {"production": production, "replay": replay, "tmp": tmp_path}
+    monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", live_metrics)
+    monkeypatch.setattr(metrics_mod, "REPLAY_METRICS_PATH", replay_metrics)
+    return {
+        "production": production, "replay": replay, "tmp": tmp_path,
+        "live_metrics": live_metrics, "replay_metrics": replay_metrics,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +568,132 @@ def test_replay_script_honours_an_explicit_non_production_path(paths, replay_scr
 
     assert target.exists()
     assert not paths["production"].exists()
+
+
+# ---------------------------------------------------------------------------
+# Metrics: a replay's counters must not land in the live file
+# ---------------------------------------------------------------------------
+
+
+def test_a_default_replay_does_not_touch_the_live_metrics_file(
+    paths, replay_env, forced_detection,
+):
+    """The counters process_new_bar writes -- validator_rejection,
+    suppression, dedup_check_failed and the rest -- exist to answer "how
+    often is this happening in production right now". A replay of an old
+    session adding to them makes that unanswerable, and invisibly: a
+    counter is a bare number with no record of who incremented it."""
+    metrics_mod.increment("pre_existing_live_counter")
+    before = metrics_mod.read_all(paths["live_metrics"])
+    assert before == {"pre_existing_live_counter": 1}
+
+    runner_mod.run_replay(SESSION, ConsoleAlerter(), cache_dir=replay_env)
+
+    assert metrics_mod.read_all(paths["live_metrics"]) == before
+
+
+def test_the_replay_metrics_file_receives_the_replay_counters(
+    paths, replay_env, forced_detection,
+):
+    """Anti-vacuity for the test above: the replay really does increment
+    counters, they just land somewhere else. Without this, "live file
+    unchanged" would also pass if the replay wrote nothing at all."""
+    runner_mod.run_replay(SESSION, ConsoleAlerter(), cache_dir=replay_env)
+
+    replayed = metrics_mod.read_all(paths["replay_metrics"])
+    assert replayed, "the replay wrote no counters at all -- test proves nothing"
+    assert not paths["live_metrics"].exists()
+
+
+def test_an_explicit_metrics_path_override_is_honoured(paths, replay_env, forced_detection):
+    target = paths["tmp"] / "metrics_sip.json"
+
+    runner_mod.run_replay(SESSION, ConsoleAlerter(), cache_dir=replay_env, metrics_path=target)
+
+    assert metrics_mod.read_all(target)
+    assert not paths["live_metrics"].exists()
+    assert not paths["replay_metrics"].exists()
+
+
+def test_the_redirect_is_restored_after_a_successful_replay(paths, replay_env, forced_detection):
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+    runner_mod.run_replay(SESSION, ConsoleAlerter(), cache_dir=replay_env)
+
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+
+def test_the_redirect_is_restored_after_a_replay_raises(paths, replay_env, monkeypatch):
+    """A replay that dies partway through must not leave the process
+    permanently pointed at the replay file -- which, in a long-lived
+    process that later ran something live, would silently swallow live
+    counters."""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("replay exploded")
+
+    monkeypatch.setattr(runner_mod, "_run_replay_session", _boom)
+
+    with pytest.raises(RuntimeError, match="replay exploded"):
+        runner_mod.run_replay(SESSION, ConsoleAlerter(), cache_dir=replay_env)
+
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+
+def test_a_refused_production_journal_also_restores_the_redirect(paths, replay_env):
+    """The journal guard raises from inside the redirect block."""
+    with pytest.raises(ProductionJournalRefused):
+        runner_mod.run_replay(
+            SESSION, ConsoleAlerter(), db_path=paths["production"], cache_dir=replay_env,
+        )
+
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+
+def test_an_explicit_path_argument_still_beats_an_active_redirect(paths):
+    """Resolution order: explicit argument > redirect > module default. A
+    caller that names a file means it -- which is what keeps
+    broad_scan's metrics_path parameter working unchanged."""
+    named = paths["tmp"] / "named.json"
+
+    with metrics_mod.redirect_to(paths["replay_metrics"]):
+        metrics_mod.increment("redirected")
+        metrics_mod.increment("explicit", path=named)
+
+    assert metrics_mod.read_all(paths["replay_metrics"]) == {"redirected": 1}
+    assert metrics_mod.read_all(named) == {"explicit": 1}
+
+
+def test_redirects_nest_and_unwind_in_order(paths):
+    outer, inner = paths["tmp"] / "outer.json", paths["tmp"] / "inner.json"
+
+    with metrics_mod.redirect_to(outer):
+        assert metrics_mod.active_path() == outer
+        with metrics_mod.redirect_to(inner):
+            assert metrics_mod.active_path() == inner
+        assert metrics_mod.active_path() == outer  # restored, not reset to None
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+
+def test_monkeypatching_the_default_still_works_with_no_redirect_active(paths):
+    """The property tradebot.metrics has always promised, and which three
+    existing tests in test_runner.py rely on: with no redirect active, a
+    monkeypatched DEFAULT_METRICS_PATH is honoured by every caller that
+    didn't pass a path."""
+    metrics_mod.increment("plain")
+
+    assert metrics_mod.read_all(paths["live_metrics"]) == {"plain": 1}
+    assert metrics_mod.active_path() == paths["live_metrics"]
+
+
+def test_the_cli_threads_the_metrics_path_override(cli, monkeypatch, paths):
+    target = paths["tmp"] / "cli_metrics.json"
+
+    _run_cli(monkeypatch, "--replay-date", "2026-07-23", "--metrics-path", str(target))
+
+    assert cli[0]["metrics_path"] == str(target)
+
+
+def test_the_cli_defaults_replay_metrics_to_no_override(cli, monkeypatch):
+    _run_cli(monkeypatch, "--replay-date", "2026-07-23")
+
+    assert cli[0]["metrics_path"] is None  # -> REPLAY_METRICS_PATH
