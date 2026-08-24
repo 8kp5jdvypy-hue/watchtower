@@ -1,8 +1,9 @@
 """Tests for the append-only decision_events ledger in tradebot.journal.
 
-Foundation only: nothing in the pipeline writes to this table yet, so
-these tests exercise the helper and the table's append-only guarantee
-directly rather than through the runner.
+These exercise the helper and the table's append-only guarantee directly.
+The runner's own call sites — which branches record an event, in what
+order, and under which run attribution — are covered separately in
+tests/test_runner_decision_events.py.
 """
 from __future__ import annotations
 
@@ -15,8 +16,13 @@ from tradebot import journal
 from tradebot.detectors import Detection
 from tradebot.journal import (
     MAX_DECISION_DETAIL_JSON_LEN,
+    RUN_MODE_LIVE,
+    RUN_MODE_REPLAY,
+    RUN_MODE_UNKNOWN,
+    UNATTRIBUTED_RUN_ID,
     connect,
     decision_events_for_detection,
+    new_run_id,
     record_decision_event,
     record_iv_sample,
     set_news_driven,
@@ -82,9 +88,11 @@ def test_record_decision_event_optional_fields_default_to_none(tmp_path):
 
 
 def test_record_decision_event_commits_without_caller_commit(tmp_path):
-    """The helper commits itself (same as record_iv_sample /
-    record_contract_selection), so a crash after the decision is taken
-    can't lose the record of it."""
+    """The helper commits itself by default (same as record_iv_sample /
+    record_contract_selection), so a standalone caller — one not already
+    inside a transaction of its own — can't lose the record of a decision
+    to a crash right after taking it. See the commit=False tests below
+    for the caller that owns its own boundary."""
     db_path = tmp_path / "journal.db"
     conn = connect(db_path)
     detection_id = _write_detection(conn)
@@ -356,3 +364,177 @@ def test_connect_adds_the_ledger_to_a_pre_existing_db_without_disturbing_it(tmp_
     assert seq == 1
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         migrated.execute("DELETE FROM decision_events")
+
+
+# ---------------------------------------------------------------------------
+# commit=False — for a caller that already owns a transaction boundary
+# ---------------------------------------------------------------------------
+
+
+def test_commit_false_leaves_the_row_invisible_until_the_caller_commits(tmp_path):
+    """An uncommitted SQLite transaction is invisible to every other
+    connection, and is exactly what a SIGKILL discards — so a second
+    connection seeing nothing here is precisely 'the helper did not
+    commit on its own'."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)
+    conn.commit()
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS, commit=False)
+
+    other = sqlite3.connect(db_path)
+    assert other.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 0
+
+    conn.commit()
+    assert other.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 1
+
+
+def test_commit_false_does_not_flush_the_callers_own_pending_writes(tmp_path):
+    """The property runner.process_new_bar depends on: recording a
+    decision must not commit the detection the caller is deliberately
+    still holding open (see runner._commit_then_send)."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    detection_id = _write_detection(conn)  # write_cluster does NOT commit
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS, commit=False)
+
+    other = sqlite3.connect(db_path)
+    assert other.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 0
+    assert other.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 0
+
+
+def test_commit_false_rows_roll_back_with_the_caller(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_id = _write_detection(conn)
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS, commit=False)
+    conn.rollback()
+
+    assert conn.execute("SELECT COUNT(*) FROM decision_events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM detections").fetchone()[0] == 0
+
+
+def test_commit_true_remains_the_default(tmp_path):
+    """Nothing about the standalone contract changed."""
+    import inspect
+
+    assert inspect.signature(record_decision_event).parameters["commit"].default is True
+
+
+# ---------------------------------------------------------------------------
+# run_mode / run_id
+# ---------------------------------------------------------------------------
+
+
+def test_run_mode_and_run_id_round_trip(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_id = _write_detection(conn)
+    run_id = new_run_id()
+
+    record_decision_event(
+        conn, detection_id, stage="dedup", decision="pass", ts_utc=TS,
+        run_mode=RUN_MODE_REPLAY, run_id=run_id,
+    )
+
+    event = decision_events_for_detection(conn, detection_id)[0]
+    assert event.run_mode == RUN_MODE_REPLAY
+    assert event.run_id == run_id
+
+
+def test_an_omitted_run_is_recorded_as_unattributed_never_as_live(tmp_path):
+    """'this row did not say' is a fact the ledger states out loud. A NULL
+    would leave a reader free to assume live, which is the one reading
+    that must never be available."""
+    conn = connect(tmp_path / "journal.db")
+    detection_id = _write_detection(conn)
+
+    record_decision_event(conn, detection_id, stage="dedup", decision="pass", ts_utc=TS)
+
+    event = decision_events_for_detection(conn, detection_id)[0]
+    assert event.run_mode == RUN_MODE_UNKNOWN
+    assert event.run_id == UNATTRIBUTED_RUN_ID
+    assert event.run_mode != RUN_MODE_LIVE
+
+    stored = conn.execute("SELECT run_mode, run_id FROM decision_events").fetchone()
+    assert stored == (RUN_MODE_UNKNOWN, UNATTRIBUTED_RUN_ID)  # not NULL in the column either
+
+
+@pytest.mark.parametrize("empty", [None, ""])
+def test_a_falsy_run_attribution_collapses_to_the_loud_default(tmp_path, empty):
+    conn = connect(tmp_path / "journal.db")
+    detection_id = _write_detection(conn)
+
+    record_decision_event(
+        conn, detection_id, stage="dedup", decision="pass", ts_utc=TS,
+        run_mode=empty, run_id=empty,
+    )
+
+    event = decision_events_for_detection(conn, detection_id)[0]
+    assert event.run_mode == RUN_MODE_UNKNOWN
+    assert event.run_id == UNATTRIBUTED_RUN_ID
+
+
+def test_replayed_events_never_read_as_a_later_revision_of_the_live_ones(tmp_path):
+    """detection_id is a hash of symbol/session/ts/kinds, so a replay of a
+    live session appends to the SAME detection's history, after it. Only
+    run_mode/run_id separate them."""
+    conn = connect(tmp_path / "journal.db")
+    detection_id = _write_detection(conn)
+    live_id, replay_id = new_run_id(), new_run_id()
+
+    record_decision_event(
+        conn, detection_id, stage="alert_routing", decision="send", ts_utc=TS,
+        run_mode=RUN_MODE_LIVE, run_id=live_id,
+    )
+    record_decision_event(
+        conn, detection_id, stage="alert_routing", decision="daily_cap_reached", ts_utc=TS,
+        run_mode=RUN_MODE_REPLAY, run_id=replay_id,
+    )
+
+    events = decision_events_for_detection(conn, detection_id)
+    assert [e.run_mode for e in events] == [RUN_MODE_LIVE, RUN_MODE_REPLAY]
+    assert [e.run_id for e in events] == [live_id, replay_id]
+    # The replay's row is the later one in the ledger — which is exactly
+    # why a reader must filter on run_mode rather than take the last row.
+    assert events[-1].run_mode == RUN_MODE_REPLAY
+
+
+def test_new_run_id_is_unique_per_call():
+    assert len({new_run_id() for _ in range(100)}) == 100
+
+
+def test_run_columns_are_added_to_a_ledger_created_before_they_existed(tmp_path):
+    """decision_events shipped one release before anything wrote to it, so
+    a journal.db from that window has the table but neither run column."""
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    conn.execute("DROP TRIGGER decision_events_no_update")
+    conn.execute("DROP TRIGGER decision_events_no_delete")
+    conn.execute("DROP TABLE decision_events")
+    conn.execute(
+        """
+        CREATE TABLE decision_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            detection_id TEXT NOT NULL,
+            ts_utc TEXT NOT NULL,
+            stage TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            reason TEXT,
+            detail_json TEXT,
+            code_version TEXT
+        )
+        """
+    )
+    conn.execute("INSERT INTO decision_events (detection_id, ts_utc, stage, decision) VALUES ('old','x','s','d')")
+    conn.commit()
+    conn.close()
+
+    migrated = connect(db_path)
+
+    columns = {row[1] for row in migrated.execute("PRAGMA table_info(decision_events)")}
+    assert {"run_mode", "run_id"} <= columns
+    assert migrated.execute("SELECT run_mode, run_id FROM decision_events").fetchone() == (
+        RUN_MODE_UNKNOWN, UNATTRIBUTED_RUN_ID,
+    )

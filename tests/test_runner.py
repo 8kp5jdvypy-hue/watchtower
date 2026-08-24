@@ -3013,7 +3013,10 @@ def _drive_one_live_iteration(monkeypatch, tmp_path, watchlist, session_bars_by_
     process_new_bar_calls: list[dict] = []
 
     def _spy_process_new_bar(*args, **kwargs):
-        process_new_bar_calls.append({"symbol": args[4], "market_bars": kwargs.get("market_bars")})
+        process_new_bar_calls.append({
+            "symbol": args[4], "market_bars": kwargs.get("market_bars"),
+            "run_mode": kwargs.get("run_mode"), "run_id": kwargs.get("run_id"),
+        })
 
     monkeypatch.setattr(runner_mod, "process_new_bar", _spy_process_new_bar)
 
@@ -3038,6 +3041,28 @@ def test_shared_proxy_fetch_happens_exactly_once_per_iteration_when_symbols_adva
     assert session_bars_calls.count("QQQ") == 2
     assert [c["symbol"] for c in process_new_bar_calls] == watchlist
     assert stats.errors == []
+
+
+def test_run_live_stamps_live_mode_and_one_run_id_across_the_whole_session(monkeypatch, tmp_path):
+    """The decision ledger's run attribution (PR #73) is resolved once per
+    run_live() call and passed down, the same way data_feed/origin are —
+    every symbol in the session shares it, and it says 'live', never the
+    'unknown' default a bare caller would get."""
+    from tradebot.journal import RUN_MODE_LIVE
+
+    watchlist = ["AAA", "BBB"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+    session_bars_by_symbol = {s: closed for s in watchlist}
+
+    _, process_new_bar_calls, _ = _drive_one_live_iteration(
+        monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls=4,
+    )
+
+    assert len(process_new_bar_calls) == 2
+    assert {c["run_mode"] for c in process_new_bar_calls} == {RUN_MODE_LIVE}
+    run_ids = {c["run_id"] for c in process_new_bar_calls}
+    assert len(run_ids) == 1  # one execution, one id
+    assert run_ids != {None} and "" not in run_ids
 
 
 def test_shared_proxy_fetch_does_not_happen_when_no_symbol_advances(monkeypatch, tmp_path):
