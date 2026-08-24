@@ -14,6 +14,7 @@ import os
 import sqlite3
 import statistics
 import subprocess
+import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -161,10 +162,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
 -- time." One detection has many decision_events; a decision_event is
 -- never revised, only superseded by a later one appended after it.
 --
--- Nothing writes to this table yet -- foundation only (see
--- record_decision_event). Wiring the pipeline's real decision points into
--- it is deliberately a separate change, so that change is reviewable as
--- "behavior now records X" rather than as a schema change too.
+-- runner.process_new_bar writes the five decisions it takes that the
+-- `detections` snapshot cannot express on its own: a dedup lookup that
+-- failed and forced WATCH, a HIGH routed down to MEDIUM by an event
+-- window, the resolved alert-routing outcome, a data-guard rejection,
+-- and the contract-selection outcome. Deliberately NOT a record of
+-- everything that happened: no row for a guard that passed, a dedup that
+-- agreed, a bar with no detection, or a window that didn't apply. A
+-- ledger of non-events buries the ones that are.
 CREATE TABLE IF NOT EXISTS decision_events (
     -- AUTOINCREMENT (not bare rowid): guarantees a strictly increasing
     -- seq that is never reused, so ordering by seq is a real append
@@ -173,12 +178,47 @@ CREATE TABLE IF NOT EXISTS decision_events (
     -- detections.id. Loose reference, no SQLite FK constraint -- same
     -- style as marks.detection_id / contract_selections.detection_id.
     detection_id TEXT NOT NULL,
+    -- EXECUTION time, not market time: when this run took and recorded
+    -- the decision. Deliberately a different clock from
+    -- detections.ts_utc, which is the market/bar time the detection is
+    -- about. The two answer different questions and must not be read as
+    -- the same one:
+    --
+    --   detections.ts_utc     -- WHEN IN THE MARKET. The bar's own
+    --                            timestamp (CLAUDE.md: the OPEN of the
+    --                            bar, UTC). Identical across every run
+    --                            that ever evaluates that bar.
+    --   decision_events.ts_utc -- WHEN THIS EXECUTION RAN. Wall clock at
+    --                            the moment the decision was taken.
+    --
+    -- During replay this is therefore real 'now' -- the moment the
+    -- replay was executed -- NOT the historical session time being
+    -- replayed. That is the intended reading: it is a record of when
+    -- this process decided something, and a replay run in 2026 really
+    -- did decide it in 2026. Anyone asking 'what market moment was this
+    -- about' joins to detections.ts_utc, and anyone asking 'which
+    -- execution was this' reads run_mode/run_id below -- so nothing is
+    -- lost by this column meaning exactly one thing.
     ts_utc TEXT NOT NULL,
     stage TEXT NOT NULL,
     decision TEXT NOT NULL,
     reason TEXT,
     detail_json TEXT,
-    code_version TEXT
+    code_version TEXT,
+    -- Which execution wrote this row. Without them a replay of an old
+    -- session appends events that read exactly like the live ones from
+    -- that day: same detection_id (cluster_id is a hash of
+    -- symbol/session/ts/kinds, so it is stable across runs), same
+    -- stages, same decisions, appended after them and therefore looking
+    -- like the later, superseding truth. Replaying a session is a normal
+    -- thing to do repeatedly, and the ledger is append-only by design, so
+    -- there is no cleanup afterwards -- the only defence is that every
+    -- row states which run it came from. NOT NULL with a default rather
+    -- than nullable: 'this row did not say' is a fact the ledger should
+    -- state out loud ('unknown'/'unattributed'), never a NULL that a
+    -- reader is free to assume means live.
+    run_mode TEXT NOT NULL DEFAULT 'unknown',
+    run_id TEXT NOT NULL DEFAULT 'unattributed'
 );
 CREATE INDEX IF NOT EXISTS idx_decision_events_detection ON decision_events(detection_id, seq);
 CREATE INDEX IF NOT EXISTS idx_decision_events_ts ON decision_events(ts_utc);
@@ -279,6 +319,13 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     _add_column_if_missing(conn, "contract_selections", "mid_close", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_low", "REAL")
     _add_column_if_missing(conn, "contract_selections", "day_high", "REAL")
+    # decision_events shipped one release before anything wrote to it, so
+    # a journal.db created in that window has the table but not these two
+    # columns. NOT NULL is safe on ADD COLUMN here precisely because a
+    # non-null DEFAULT is supplied, and no existing row can conflict with
+    # it: nothing has ever written to this table.
+    _add_column_if_missing(conn, "decision_events", "run_mode", "TEXT NOT NULL DEFAULT 'unknown'")
+    _add_column_if_missing(conn, "decision_events", "run_id", "TEXT NOT NULL DEFAULT 'unattributed'")
     return conn
 
 
@@ -1049,11 +1096,40 @@ def get_contract_outcome(conn: sqlite3.Connection, detection_id: str) -> Contrac
 # fired didn't. This table answers that, and answers it the same way
 # afterwards as it did at the time, because nothing here is ever rewritten.
 #
-# FOUNDATION ONLY: nothing in the pipeline calls record_decision_event yet.
-# Adding the real call sites is a separate change on purpose.
+# The pipeline's call sites live in runner.process_new_bar, behind
+# runner._record_decision -- which pins commit=False (this function's
+# default commit would break process_new_bar's journal-before-send
+# ordering) and swallows write failures (instrumentation must never
+# change the decision it is recording).
 # --------------------------------------------------------------------------
 
 MAX_DECISION_DETAIL_JSON_LEN = 2000
+
+# Which kind of execution appended a row. "at least live vs replay" is the
+# requirement; these three are the complete set of answers the writer can
+# actually give, and UNKNOWN is one of them on purpose — see
+# UNATTRIBUTED_RUN_ID.
+RUN_MODE_LIVE = "live"
+RUN_MODE_REPLAY = "replay"
+RUN_MODE_UNKNOWN = "unknown"
+
+# The run_id for a caller that didn't state one. A literal, not a NULL and
+# not a fresh uuid: a NULL invites a reader to assume live, and a fresh
+# uuid per unattributed write would manufacture the appearance of many
+# distinct runs. "unattributed" says the one true thing — this row cannot
+# be tied to a run — and says it identically every time.
+UNATTRIBUTED_RUN_ID = "unattributed"
+
+
+def new_run_id() -> str:
+    """One opaque id per execution of run_live()/run_replay().
+
+    Random, not derived from session_date/start time: two replays of the
+    same session started in the same second must not collide, and that is
+    the exact case this exists to separate. Nothing parses it — run_mode
+    is its own column, and the session is reachable through
+    detections.session — so it carries no encoded fields to go stale."""
+    return uuid.uuid4().hex
 
 
 @dataclass(frozen=True)
@@ -1071,6 +1147,8 @@ class DecisionEvent:
     reason: str | None
     detail: dict | None
     code_version: str | None
+    run_mode: str
+    run_id: str
 
 
 def record_decision_event(
@@ -1083,6 +1161,9 @@ def record_decision_event(
     detail: dict | None = None,
     ts_utc: datetime | None = None,
     code_version_str: str | None = None,
+    run_mode: str | None = None,
+    run_id: str | None = None,
+    commit: bool = True,
 ) -> int:
     """Append one decision event. Returns its `seq`.
 
@@ -1092,13 +1173,20 @@ def record_decision_event(
     not a mistake to collapse — the same reasoning that keeps sub-threshold
     'log' tier clusters in the detections table rather than dropping them.
 
-    ts_utc: when the decision was actually taken. Defaults to wall clock
-    for the ordinary live caller, but is a parameter so a caller that
-    already knows the decision's real timestamp passes it rather than
-    letting it drift to "whenever the write happened", and so tests are
-    deterministic — same injectable-clock discipline as runner.py's
-    validation_now_fn. Stored as ISO-8601; naive datetimes are assumed UTC
-    and stamped as such rather than silently recorded without an offset.
+    ts_utc: EXECUTION time — when this run took and recorded the
+    decision — not the market time the decision was about. Defaults to
+    wall clock, which is what every current caller uses, replay included:
+    a replay executed today really did take its decisions today, and
+    stamping them with the historical session's clock would claim
+    otherwise. The market side of the question is answered by
+    detections.ts_utc (the bar's own timestamp), and 'which execution was
+    this' by run_mode/run_id — so this column is left meaning exactly one
+    thing rather than two. It stays a parameter so a caller that knows a
+    decision's real recording time passes it rather than letting it drift
+    to "whenever the write happened", and so tests are deterministic —
+    same injectable-clock discipline as runner.py's validation_now_fn.
+    Stored as ISO-8601; naive datetimes are assumed UTC and stamped as
+    such rather than silently recorded without an offset.
 
     detail: structured context for this one decision (thresholds compared,
     values seen). Serialized to JSON; dropped rather than truncated if it
@@ -1110,7 +1198,28 @@ def record_decision_event(
     frozen-at-write-time discipline as write_cluster's. None (the default)
     means the caller didn't record one — never back-filled from a later
     code_version() call, which would attribute a decision to code that
-    didn't make it."""
+    didn't make it.
+
+    run_mode/run_id: which execution is appending this row (RUN_MODE_LIVE
+    / RUN_MODE_REPLAY, and a new_run_id() held for the life of that one
+    execution). Neither is ever stored as NULL or empty: omitted or falsy
+    collapses to RUN_MODE_UNKNOWN / UNATTRIBUTED_RUN_ID, so an
+    unattributed row says so in the same column a reader is already
+    checking, rather than being silently readable as live. See the
+    columns' own comment in SCHEMA for why the ledger needs this at all.
+
+    commit: whether to commit before returning. True (the default) keeps
+    the standalone-caller behavior — same as record_iv_sample /
+    record_contract_selection — so a decision taken outside any wider
+    transaction can't be lost. False is for a caller that is already
+    inside one and owns its boundary: process_new_bar orders its writes
+    so that everything about a detection is committed before any alert
+    referencing it is sent (see runner._commit_then_send), and a commit
+    fired from in here would flush that pending state early, at a point
+    the caller deliberately hasn't reached. The event still lands in the
+    caller's transaction and is durable at its next commit — which for
+    every alerting path is _commit_then_send's, i.e. still before the
+    alert goes out."""
     if ts_utc is None:
         ts_utc = datetime.now(timezone.utc)
     elif ts_utc.tzinfo is None:
@@ -1131,12 +1240,17 @@ def record_decision_event(
     cursor = conn.execute(
         """
         INSERT INTO decision_events
-            (detection_id, ts_utc, stage, decision, reason, detail_json, code_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (detection_id, ts_utc, stage, decision, reason, detail_json, code_version,
+             run_mode, run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (detection_id, ts_utc.isoformat(), stage, decision, reason, detail_json, code_version_str),
+        (
+            detection_id, ts_utc.isoformat(), stage, decision, reason, detail_json, code_version_str,
+            run_mode or RUN_MODE_UNKNOWN, run_id or UNATTRIBUTED_RUN_ID,
+        ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.lastrowid
 
 
@@ -1146,7 +1260,8 @@ def decision_events_for_detection(conn: sqlite3.Connection, detection_id: str) -
     is what a shell, a test, or a future consumer reads the ledger with."""
     rows = conn.execute(
         """
-        SELECT seq, detection_id, ts_utc, stage, decision, reason, detail_json, code_version
+        SELECT seq, detection_id, ts_utc, stage, decision, reason, detail_json, code_version,
+               run_mode, run_id
         FROM decision_events WHERE detection_id = ? ORDER BY seq
         """,
         (detection_id,),
@@ -1155,7 +1270,7 @@ def decision_events_for_detection(conn: sqlite3.Connection, detection_id: str) -
         DecisionEvent(
             seq=seq, detection_id=det_id, ts_utc=ts, stage=stage, decision=decision,
             reason=reason, detail=json.loads(detail_json) if detail_json else None,
-            code_version=code_ver,
+            code_version=code_ver, run_mode=run_mode, run_id=run_id,
         )
-        for seq, det_id, ts, stage, decision, reason, detail_json, code_ver in rows
+        for seq, det_id, ts, stage, decision, reason, detail_json, code_ver, run_mode, run_id in rows
     ]

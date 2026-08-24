@@ -68,18 +68,24 @@ from tradebot.detectors import (
 from tradebot.journal import (
     CLOSE_MARK_OFFSET_MIN,
     OUTCOME_OFFSETS_MIN,
+    RUN_MODE_LIVE,
+    RUN_MODE_REPLAY,
+    RUN_MODE_UNKNOWN,
+    UNATTRIBUTED_RUN_ID,
     backfill_marks,
     code_version,
     connect,
     detected_symbols_for_session,
     historical_performance,
     iv_rank,
+    new_run_id,
     pending_contract_backfills,
     pending_contract_close_backfills,
     pending_contract_day_range_backfills,
     record_contract_day_range,
     record_contract_forward_mid,
     record_contract_selection,
+    record_decision_event,
     record_iv_sample,
     set_extreme_mover,
     set_news_driven,
@@ -477,9 +483,53 @@ def _commit_then_send(conn, alerter, text: str, *, priority: int, alert_id: str 
     alerter.send(text, priority=priority, alert_id=alert_id)
 
 
+def _record_decision(
+    conn, detection_id, *, stage, decision, run_mode, run_id, version,
+    reason=None, detail=None,
+) -> None:
+    """Append one decision_events row for a decision process_new_bar has
+    already taken. Instrumentation, and instrumentation only.
+
+    Two properties this wrapper exists to guarantee at every call site,
+    rather than leaving each of them to remember:
+
+    commit=False. process_new_bar owns a transaction whose boundary is
+    load-bearing: _commit_then_send() commits precisely so that a
+    detection is durable before any alert referencing it exists, and
+    nothing before that point may commit on its own (see that function's
+    docstring for the bug that produced the rule). journal's helper
+    commits by default; every call from here overrides it. The events
+    still land — flushed by whichever commit the caller was already
+    going to make, which on the alerting path is _commit_then_send's,
+    i.e. still ahead of the send.
+
+    Swallowed failures. Recording that a decision was taken must never
+    change which decision was taken, and must never turn a bar that
+    would have alerted into a bar that raised instead. A broken ledger
+    write is worth an ERROR line and a counter; it is not worth the
+    alert. (SQLite doesn't roll back a transaction over one failed
+    statement, so the pending detection writes survive this too.)"""
+    try:
+        record_decision_event(
+            conn, detection_id, stage=stage, decision=decision, reason=reason, detail=detail,
+            code_version_str=version, run_mode=run_mode, run_id=run_id, commit=False,
+        )
+    except Exception:
+        logger.error(
+            "decision event write failed: stage=%s decision=%s detection_id=%s",
+            stage, decision, detection_id, exc_info=True,
+        )
+        metrics.increment("decision_event_write_failed", stage=stage)
+
+
 def process_new_bar(
     conn, budget, alerter, version, symbol, session_date, bars, anchors, quote_fn, chain_fn, stats,
     subscriber_hook=None, validation_now_fn=None, market_bars=None, data_feed=None, origin="watchlist",
+    # Defaults for direct/test/legacy callers only -- run_live() and
+    # run_replay() always pass both explicitly. 'unknown' means the
+    # caller did not say, and is never to be read as live. See the
+    # docstring's run_mode/run_id paragraphs.
+    run_mode=RUN_MODE_UNKNOWN, run_id=UNATTRIBUTED_RUN_ID,
 ) -> None:
     """subscriber_hook(cluster, rendered_text, entry_mid), if given, is
     called right after a HIGH alert is sent to the ops channel/console —
@@ -513,7 +563,31 @@ def process_new_bar(
     data_feed/origin: passed straight through to journal.write_cluster()
     and the Cluster this builds — see that function's docstring. Both
     callers (run_replay/run_live) resolve these once per invocation/tick
-    and pass them in; this function has no way to know either on its own."""
+    and pass them in; this function has no way to know either on its own.
+
+    run_mode/run_id: stamped onto every decision_events row this function
+    appends, so a replay's decisions can never be mistaken for the live
+    ones from the same session (the detection_id is a hash of
+    symbol/session/ts/kinds and is therefore identical across runs —
+    these two columns are the only thing that separates them). The
+    production entry points both resolve them once per call and pass them
+    explicitly — run_live() sends RUN_MODE_LIVE, run_replay() sends
+    RUN_MODE_REPLAY, each with its own new_run_id() — exactly the way
+    they already pass data_feed/origin. No production path relies on the
+    defaults.
+
+    The defaults exist for the other kind of caller: a direct one — a
+    test, a script, a REPL session, anything predating these parameters —
+    that has no run to attribute its events to. For those,
+    'unknown'/'unattributed' is the honest answer, and it is deliberately
+    a loud one rather than a NULL or an empty string.
+
+    Read them as 'this row did not say', NEVER as live. An event stamped
+    RUN_MODE_UNKNOWN is not evidence of a live decision and must not be
+    counted as one; the only rows that assert live are the ones that say
+    RUN_MODE_LIVE. Nothing else about this function's behavior reads
+    either parameter — they are carried to the ledger and nowhere
+    else."""
     last = bars[-1]
     if is_halted_bar(last):
         stats.data_gaps.append(f"{symbol} zero-volume bar at {last.ts.isoformat()} (halted?)")
@@ -574,10 +648,19 @@ def process_new_bar(
     # than silently zero out all HIGH alerting on a transient bug here.
     try:
         dedup_result = dedup.evaluate_dedup(conn, symbol, result["ts"], result["score"])
-    except Exception:
+    except Exception as exc:
         logger.error("dedup check failed: symbol=%s detection_id=%s", symbol, detection_id, exc_info=True)
         metrics.increment("dedup_check_failed")
         dedup_result = dedup.DedupResult(dedup.LifecycleState.WATCH, None, False)
+        # The forced WATCH above is indistinguishable, in `detections`,
+        # from a WATCH the dedup logic actually decided on: both write
+        # lifecycle_state='watch' and related_detection_id=NULL. Only
+        # the ledger can say which one this row was.
+        _record_decision(
+            conn, detection_id, stage="dedup", decision="WATCH_ON_LOOKUP_FAILURE",
+            reason="dedup_lookup_failed", run_mode=run_mode, run_id=run_id, version=version,
+            detail={"error_type": type(exc).__name__, "error": str(exc)[:500], "symbol": symbol},
+        )
     conn.execute(
         "UPDATE detections SET lifecycle_state=?, related_detection_id=? WHERE id=?",
         (dedup_result.lifecycle_state.value, dedup_result.related_detection_id, detection_id),
@@ -597,6 +680,19 @@ def process_new_bar(
         )
         metrics.increment("event_window_downgrade", kind=event_window.kind)
         tier = "medium"
+        # detections.tier keeps the true score-based tier (see the block
+        # comment above) — deliberately not mutated here. So the fact
+        # that THIS alert was routed as medium instead of high, and why,
+        # exists nowhere in the journal but this row.
+        _record_decision(
+            conn, detection_id, stage="event_window_routing", decision="DOWNGRADE_HIGH_TO_MEDIUM",
+            reason=event_window.kind, run_mode=run_mode, run_id=run_id, version=version,
+            detail={
+                "journaled_tier": "high", "routed_tier": "medium", "score": result["score"],
+                "event_kind": event_window.kind, "event_severity": event_window.severity,
+                "event_detail": event_window.detail, "event_source": event_window.source,
+            },
+        )
 
     cluster = Cluster(
         id=detection_id,
@@ -617,6 +713,7 @@ def process_new_bar(
 
     if raw_tier_is_high and news_driven and event_window.severity == "suppress":
         decision = Decision.SUPPRESS_NEWS_BLACKOUT
+        decided_by = "event_window"
         logger.info(
             "HIGH alert suppressed by event window: symbol=%s kind=%s detail=%s source=%s",
             symbol, event_window.kind, event_window.detail, event_window.source,
@@ -628,6 +725,7 @@ def process_new_bar(
         and not dedup_result.is_escalation
     ):
         decision = Decision.SUPPRESS_DUPLICATE
+        decided_by = "dedup"
         logger.info(
             "HIGH alert suppressed as duplicate: symbol=%s related_id=%s",
             symbol, dedup_result.related_detection_id,
@@ -635,7 +733,20 @@ def process_new_bar(
         metrics.increment("duplicate_suppression", symbol=symbol)
     else:
         decision = budget.evaluate(cluster)
+        decided_by = "alert_budget"
     stats.record_cluster(tier, decision)
+    # The routing decision, recorded once, whichever of the three
+    # branches above produced it. AlertBudget itself stays pure — it is
+    # handed no connection and gains no I/O; this is its caller writing
+    # down the answer it already returned. `decided_by` is carried
+    # because SUPPRESS_NEWS_BLACKOUT/SUPPRESS_DUPLICATE never reach
+    # budget.evaluate() at all, and a ledger that implied they did would
+    # be wrong about where the decision came from.
+    _record_decision(
+        conn, detection_id, stage="alert_routing", decision=decision.value,
+        reason=decided_by, run_mode=run_mode, run_id=run_id, version=version,
+        detail={"tier": tier, "journaled_tier": tier_for_score(result["score"]).value, "score": result["score"]},
+    )
 
     if decision in (Decision.SEND, Decision.CAP_REACHED_NOTICE):
         quote = quote_fn(symbol)
@@ -679,6 +790,29 @@ def process_new_bar(
                 iv_rank_fn=bound_iv_rank_fn, earnings_check_fn=bound_earnings_check_fn,
             )
             set_no_trade(conn, detection_id, not selection.is_tradable)
+            # detections.no_trade is a bare 0/1: it records THAT there
+            # was no tradable contract, never which gate refused it.
+            # select_contract() already returns that reason and detail;
+            # this is the only place either is written down.
+            _record_decision(
+                conn, detection_id,
+                stage="contract_selection",
+                decision="TRADABLE" if selection.is_tradable else "NO_TRADE",
+                reason=None if selection.is_tradable else (
+                    selection.no_trade.reason if selection.no_trade else "unknown"
+                ),
+                run_mode=run_mode, run_id=run_id, version=version,
+                detail={
+                    "expiry": selection.expiry.isoformat() if selection.expiry else None,
+                    "dte": selection.dte,
+                    "similar_setups_sample": selection.similar_setups_sample,
+                    "insufficient_sample": selection.insufficient_sample,
+                    "no_trade_detail": selection.no_trade.detail if selection.no_trade else None,
+                    "is_vertical": selection.breakeven.is_vertical if selection.breakeven else None,
+                    "strike": selection.breakeven.legs[0].contract.strike if selection.breakeven else None,
+                    "right": selection.breakeven.legs[0].contract.right if selection.breakeven else None,
+                },
+            )
 
             entry_mid = None  # stays None on a NO TRADE — nothing to size a position against
             if selection.breakeven is not None:
@@ -734,6 +868,16 @@ def process_new_bar(
             conn.execute(
                 "UPDATE detections SET suppress_reason=?, suppress_category=? WHERE id=?",
                 (f"data_integrity_failed: {guard_reason}", SuppressionCategory.DATA_INTEGRITY.value, detection_id),
+            )
+            # Rejections only. There is deliberately no matching event
+            # for a guard that passed: a ledger of everything that did
+            # not happen buries the decisions that did, and "the guard
+            # raised no objection" is already implied by the routing
+            # event above being followed by a send.
+            _record_decision(
+                conn, detection_id, stage="data_guard", decision="REJECT",
+                reason=guard_reason, run_mode=run_mode, run_id=run_id, version=version,
+                detail={"rule": rule_name, "category": SuppressionCategory.DATA_INTEGRITY.value},
             )
         if decision == Decision.CAP_REACHED_NOTICE:
             # Carries no detection_id, so it can't dangle the way the
@@ -1193,6 +1337,13 @@ def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None
 
     conn = connect(db_path) if db_path is not None else connect()
     version = code_version()
+    # One id for this replay, generated per call: replaying a session
+    # more than once is normal, the decision ledger is append-only, and
+    # detection ids repeat across runs (cluster_id hashes
+    # symbol/session/ts/kinds). This is what keeps the second replay's
+    # events from reading as a later revision of the first's — or of the
+    # live session's.
+    run_id = new_run_id()
     clock = {"t": open_ts}
     budget = AlertBudget(now=lambda: clock["t"])
     stats = HeartbeatStats(start_time=open_ts, session_date=session_date)
@@ -1256,6 +1407,7 @@ def run_replay(session_date: date, alerter, db_path=None, cache_dir: Path = None
                     conn, budget, alerter, version, symbol, session_date, rth_bars,
                     anchors[symbol], quote_fn, chain_fn, stats, market_bars=market_bars,
                     data_feed=DETECTOR_DATA_FEED,
+                    run_mode=RUN_MODE_REPLAY, run_id=run_id,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, clock["t"])
             except Exception:
@@ -1574,6 +1726,11 @@ def run_live(
 
     conn = connect(db_path) if db_path is not None else connect()
     version = code_version()
+    # Per call, not per process and not per session date: a restart
+    # mid-session starts a genuinely separate execution, and the ledger
+    # should say so rather than blur the two together. See run_replay's
+    # matching comment.
+    run_id = new_run_id()
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
     stats = HeartbeatStats(start_time=now, session_date=session_date)
 
@@ -1754,6 +1911,7 @@ def run_live(
                     validation_now_fn=lambda: datetime.now(timezone.utc),
                     market_bars=shared_market_bars,
                     data_feed=DETECTOR_DATA_FEED, origin=origin,
+                    run_mode=RUN_MODE_LIVE, run_id=run_id,
                 )
                 send_medium_digest_if_due(budget, alerter, conn, loop_start, medium_fanout_fn)
             except Exception:
