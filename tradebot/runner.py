@@ -1652,7 +1652,71 @@ def _log_broad_scan_shadow_counts(
         logger.error("broad_scan shadow-count instrumentation failed (non-fatal): %s", traceback.format_exc())
 
 
-def run_broad_scan(universe_conn, fetch_bars_fn=None, promotion_limit: int = BROAD_SCAN_PROMOTION_LIMIT) -> list[str]:
+def _screening_audit_enabled() -> bool:
+    """Verbose Stage 1 audit — per-symbol QUIET rows as well as the
+    interesting ones. Off unless WATCHTOWER_SCREEN_AUDIT is set.
+
+    An env var rather than a CLI flag on purpose: this is an
+    investigation setting, and threading a flag through run_live() would
+    mean editing the live loop for something that is not a live
+    behavior. A --screen-audit flag is a cheap follow-up if it needs to
+    be discoverable; it is deliberately not in the change that first
+    creates the table.
+
+    Volume is why it is opt-in: roughly 185k rows and 25-30 MB per
+    session at full universe size, against a few hundred rows with it
+    off. Meant for a bounded window while chasing a specific miss."""
+    return os.environ.get("WATCHTOWER_SCREEN_AUDIT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _persist_broad_scan_screening(
+    universe_conn, symbols, bars_by_symbol, snapshots, promoted, selected,
+    promotion_limit, *, session_date, tick_utc, run_id, run_mode, latency_ms,
+) -> None:
+    """Persist this Stage 1 pass — the sibling of
+    _log_broad_scan_shadow_counts, which stays log-only and untouched.
+
+    Same inputs, same read-only discipline, same swallow-everything
+    guard: every value is read off objects run_broad_scan already holds,
+    nothing is recomputed, no vendor is called again, and a failure here
+    is exactly as harmless to the returned selection as a failed
+    metrics.increment. The classification is done by the PURE
+    broad_scan.classify_screen_outcomes; this only hands the result to
+    universe.record_screening_tick.
+
+    Writes to universe.db on its own connection, so it cannot interact
+    with journal.db's transaction boundary -- process_new_bar's
+    commit-then-send ordering is untouchable from here by construction.
+
+    Deliberately duplicates the bucket derivation that
+    _log_broad_scan_shadow_counts already does, rather than rewriting
+    that proven-inert function to share one. The duplication is guarded
+    by a test asserting the two agree, so a future edit that made them
+    disagree fails loudly instead of drifting."""
+    try:
+        from tradebot import broad_scan
+        from tradebot import universe as universe_mod
+
+        tick, events = broad_scan.classify_screen_outcomes(
+            symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit,
+            verbose_audit=_screening_audit_enabled(),
+        )
+        universe_mod.record_screening_tick(
+            universe_conn, tick, events,
+            session=session_date.isoformat(), tick_utc=tick_utc.isoformat(),
+            run_id=run_id, run_mode=run_mode,
+            screen_version=broad_scan.SCREEN_VERSION, code_version=code_version(),
+            audit_mode=_screening_audit_enabled(), latency_ms=latency_ms,
+        )
+    except Exception:
+        logger.error("screening_events persistence failed (non-fatal): %s", traceback.format_exc())
+        metrics.increment("screening_persist_failed")
+
+
+def run_broad_scan(
+    universe_conn, fetch_bars_fn=None, promotion_limit: int = BROAD_SCAN_PROMOTION_LIMIT,
+    *, session_date=None, tick_utc=None, run_id=None, run_mode=RUN_MODE_UNKNOWN,
+) -> list[str]:
     """One Stage 1 pass: the active universe (tradebot.universe) -> one
     bulk daily-bars fetch -> the cheap screen (tradebot.broad_scan) ->
     the strongest `promotion_limit` symbols. fetch_bars_fn defaults to
@@ -1672,11 +1736,26 @@ def run_broad_scan(universe_conn, fetch_bars_fn=None, promotion_limit: int = BRO
 
         fetch_bars_fn = fetch_daily_bars_bulk
 
+    scan_started = time.monotonic()
     symbols = universe_mod.active_symbols(universe_conn)
     bars_by_symbol = fetch_bars_fn(symbols, BROAD_SCAN_LOOKBACK_DAYS)
     snapshots = broad_scan.build_snapshots_from_daily_bars(bars_by_symbol)
     promoted = broad_scan.run_stage1_screen(snapshots)
     selected = promoted[:promotion_limit]
+    latency_ms = int((time.monotonic() - scan_started) * 1000)
+
+    # Stage 1 observability. Both calls are instrumentation only, both
+    # swallow their own failures, and both run AFTER `selected` is final
+    # -- the returned list below is computed from it and cannot be
+    # affected by either.
+    now = datetime.now(timezone.utc)
+    _persist_broad_scan_screening(
+        universe_conn, symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit,
+        session_date=session_date if session_date is not None else now.astimezone(ET).date(),
+        tick_utc=tick_utc if tick_utc is not None else now,
+        run_id=run_id if run_id is not None else UNATTRIBUTED_RUN_ID,
+        run_mode=run_mode, latency_ms=latency_ms,
+    )
 
     try:
         _log_broad_scan_shadow_counts(symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit)
@@ -1851,7 +1930,10 @@ def run_live(
             last_broad_scan is None or (loop_start - last_broad_scan).total_seconds() >= BROAD_SCAN_INTERVAL_MINUTES * 60
         ):
             try:
-                dynamic_symbols = run_broad_scan(universe_conn)
+                dynamic_symbols = run_broad_scan(
+                    universe_conn, session_date=session_date, tick_utc=loop_start,
+                    run_id=run_id, run_mode=RUN_MODE_LIVE,
+                )
                 for symbol in dynamic_symbols:
                     if symbol not in md:
                         md[symbol] = LiveMarketData(symbol, session_date)

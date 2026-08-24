@@ -27,6 +27,7 @@ from __future__ import annotations
 import pytest
 
 from tradebot import metrics as metrics_mod
+from tradebot import universe as universe_mod
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +55,20 @@ def _isolate_metrics(monkeypatch, tmp_path):
     metrics_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(metrics_mod, "DEFAULT_METRICS_PATH", metrics_dir / "metrics.json")
     monkeypatch.setattr(metrics_mod, "REPLAY_METRICS_PATH", metrics_dir / "metrics_replay.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_universe_db(monkeypatch, tmp_path):
+    """Same leak, different file: tradebot.universe.connect() defaults to
+    the real data/universe.db, and Stage 1 observability (screening_ticks
+    / screening_events) writes there. A test that reaches run_broad_scan
+    without naming a path would otherwise append to the developer's real
+    universe database for exactly the reason metrics did.
+
+    Redirected here rather than per-test for the same reason as metrics:
+    which tests reach it is not a property any individual test author can
+    be expected to track."""
+    monkeypatch.setattr(universe_mod, "DEFAULT_DB_PATH", tmp_path / "_universe" / "universe.db")
 
 
 def _snapshot(path):
