@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -27,6 +28,7 @@ from tradebot.broad_scan import (
     OUTCOME_MISSING_FROM_FETCH,
     OUTCOME_PROMOTED,
     OUTCOME_QUIET,
+    OUTCOME_STALE_SESSION_BAR,
     OUTCOME_UNEXPECTED_FROM_FETCH,
     RVOL_THRESHOLD,
     SCREEN_VERSION,
@@ -115,6 +117,24 @@ def test_every_symbol_lands_in_exactly_one_bucket_and_the_invariant_holds():
     assert by_symbol["SHORT"] == OUTCOME_INSUFFICIENT_HISTORY
     assert by_symbol["INVALID"] == OUTCOME_INVALID_BASELINE
     assert "QUIET" not in by_symbol  # aggregated, not written
+
+
+def test_stale_session_bar_is_explicit_and_preserves_conservation():
+    stale_bars = [
+        Bar("STALE", datetime(2026, 8, day, tzinfo=timezone.utc), 100, 101, 99, 100, 1000)
+        for day in range(17, 23)
+    ]
+    tick, events = classify_screen_outcomes(
+        ["STALE"], {"STALE": stale_bars}, [], [], [], 25,
+        session_date=SESSION,
+    )
+
+    assert tick.invariant_ok
+    assert tick.counts["stale_session_bar"] == 1
+    assert tick.counts["insufficient_history"] == 0
+    assert [(event.symbol, event.outcome) for event in events] == [
+        ("STALE", OUTCOME_STALE_SESSION_BAR)
+    ]
 
 
 def test_quiet_symbols_are_counted_but_not_written_by_default():
@@ -380,8 +400,13 @@ def test_run_broad_scan_persists_a_tick_and_still_returns_the_same_selection():
     _universe_with(conn, ["LOUD", "QUIET"])
 
     def fake_bars(symbols, lookback_days):
-        return {"LOUD": _bars("LOUD", last_volume=int(RVOL_THRESHOLD * 1000 * 3)),
-                "QUIET": _bars("QUIET")}
+        loud = _bars("LOUD", last_volume=int(RVOL_THRESHOLD * 1000 * 3))
+        quiet = _bars("QUIET")
+        shift = timedelta(days=(SESSION - date(2026, 8, 7)).days, hours=13, minutes=30)
+        return {
+            "LOUD": [replace(bar, ts=bar.ts + shift) for bar in loud],
+            "QUIET": [replace(bar, ts=bar.ts + shift) for bar in quiet],
+        }
 
     promoted = runner_mod.run_broad_scan(
         conn, fetch_bars_fn=fake_bars, session_date=SESSION, tick_utc=TICK,
@@ -639,4 +664,3 @@ def test_the_invariant_is_recorded_so_a_reader_can_trust_the_subtraction():
     assert conn.execute(
         "SELECT COUNT(*) FROM screening_events WHERE outcome = ?", (OUTCOME_QUIET,)
     ).fetchone()[0] == 0
-

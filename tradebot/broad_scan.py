@@ -22,7 +22,9 @@ the two scores are on the same scale.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from tradebot import metrics
 
@@ -54,7 +56,9 @@ MIN_HISTORY_BARS = 6
 # differ with no way to tell whether the difference mattered. The safety
 # net against a forgotten bump is that every tick records the thresholds
 # it actually applied, so the ground truth is in the data either way.
-SCREEN_VERSION = 1
+SCREEN_VERSION = 2
+
+ET = ZoneInfo("America/New_York")
 
 
 def screen_thresholds() -> dict:
@@ -129,7 +133,12 @@ def screen_snapshot(snapshot: Snapshot) -> CandidateScore | None:
     return CandidateScore(symbol=snapshot.symbol, score=score, reasons=reasons)
 
 
-def build_snapshots_from_daily_bars(bars_by_symbol: dict, min_history: int = MIN_HISTORY_BARS) -> list[Snapshot]:
+def build_snapshots_from_daily_bars(
+    bars_by_symbol: dict,
+    min_history: int = MIN_HISTORY_BARS,
+    *,
+    session_date: date | None = None,
+) -> list[Snapshot]:
     """Turns bulk-fetched daily bars (see
     vendors.alpaca.fetch_daily_bars_bulk — one bulk call across the whole
     universe, not per symbol) into Stage 1 Snapshots. The LAST bar is
@@ -138,12 +147,22 @@ def build_snapshots_from_daily_bars(bars_by_symbol: dict, min_history: int = MIN
     bar (never including today's own still-forming volume in its own
     baseline). Skips a symbol with fewer than min_history bars rather
     than computing an average on too little history — same
-    never-a-stat-on-too-little-data discipline as tradebot.journal."""
+    never-a-stat-on-too-little-data discipline as tradebot.journal.
+
+    When session_date is supplied (the live runner always supplies it),
+    a symbol is also skipped unless its newest daily bar belongs to that
+    US-market session.  This prevents a premarket/prior-session daily bar
+    from being treated as "today" and carried into intraday Stage 2.
+    Keeping the argument optional preserves the pure helper's historical
+    and ad-hoc use cases, where the caller may intentionally screen an
+    older fixture without claiming it is live data."""
     snapshots = []
     for symbol, bars in bars_by_symbol.items():
         if len(bars) < min_history:
             continue
         ordered = sorted(bars, key=lambda b: b.ts)
+        if session_date is not None and ordered[-1].ts.astimezone(ET).date() != session_date:
+            continue
         last, prior = ordered[-1], ordered[-2]
         history = ordered[:-1]
         avg_volume = sum(b.volume for b in history) / len(history)
@@ -209,6 +228,9 @@ def run_stage1_screen(
 OUTCOME_MISSING_FROM_FETCH = "MISSING_FROM_FETCH"
 # Present, but fewer than MIN_HISTORY_BARS bars, so no Snapshot was built.
 OUTCOME_INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+# Present with enough history, but the newest daily bar is from a prior
+# US-market session. It is never eligible for live Stage 2.
+OUTCOME_STALE_SESSION_BAR = "STALE_SESSION_BAR"
 # A real Snapshot whose baseline screen_snapshot refuses to score.
 OUTCOME_INVALID_BASELINE = "INVALID_BASELINE"
 # Scored, and nothing crossed a threshold. The ~99% case -- aggregated by
@@ -281,6 +303,7 @@ def classify_screen_outcomes(
     selected,
     promotion_limit: int,
     verbose_audit: bool = False,
+    session_date: date | None = None,
 ) -> tuple[ScreeningTick, list[ScreeningOutcome]]:
     """What happened to every symbol in one Stage 1 pass.
 
@@ -304,7 +327,13 @@ def classify_screen_outcomes(
 
     snapshot_by_symbol = {s.symbol: s for s in snapshots}
     requested_snapshots = {sym: s for sym, s in snapshot_by_symbol.items() if sym in requested}
-    insufficient = requested_fetched - set(requested_snapshots)
+    stale_session = {
+        sym for sym in requested_fetched - set(requested_snapshots)
+        if session_date is not None
+        and len(bars_by_symbol[sym]) >= MIN_HISTORY_BARS
+        and max(bars_by_symbol[sym], key=lambda b: b.ts).ts.astimezone(ET).date() != session_date
+    }
+    insufficient = requested_fetched - set(requested_snapshots) - stale_session
 
     invalid = {
         sym for sym, snap in requested_snapshots.items()
@@ -337,6 +366,17 @@ def classify_screen_outcomes(
             detail={"bar_count": len(bars_by_symbol[symbol])},
         ))
 
+    for symbol in sorted(stale_session):
+        latest = max(bars_by_symbol[symbol], key=lambda b: b.ts)
+        events.append(ScreeningOutcome(
+            symbol=symbol, outcome=OUTCOME_STALE_SESSION_BAR,
+            detail={
+                "bar_count": len(bars_by_symbol[symbol]),
+                "latest_session_date": latest.ts.astimezone(ET).date().isoformat(),
+                "required_session_date": session_date.isoformat(),
+            },
+        ))
+
     for symbol in sorted(invalid):
         events.append(ScreeningOutcome(
             symbol=symbol, outcome=OUTCOME_INVALID_BASELINE,
@@ -361,6 +401,7 @@ def classify_screen_outcomes(
         "fetched": len(requested_fetched),
         "missing_from_fetch": len(missing),
         "insufficient_history": len(insufficient),
+        "stale_session_bar": len(stale_session),
         "requested_snapshot": len(requested_snapshots),
         "invalid_baseline": len(invalid),
         "quiet": len(quiet),
@@ -371,7 +412,8 @@ def classify_screen_outcomes(
     }
 
     invariant_ok = (
-        counts["missing_from_fetch"] + counts["insufficient_history"] + counts["requested_snapshot"]
+        counts["missing_from_fetch"] + counts["insufficient_history"]
+        + counts["stale_session_bar"] + counts["requested_snapshot"]
         == counts["requested"]
     ) and (
         counts["invalid_baseline"] + counts["quiet"] + requested_candidate_count
@@ -386,4 +428,3 @@ def classify_screen_outcomes(
         promotion_limit=promotion_limit,
     )
     return tick, events
-

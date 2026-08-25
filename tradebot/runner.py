@@ -1659,6 +1659,28 @@ BROAD_SCAN_PROMOTION_LIMIT = 25
 BROAD_SCAN_LOOKBACK_DAYS = 30
 
 
+def _broad_scan_due(
+    loop_start: datetime,
+    session_open: datetime,
+    last_broad_scan: datetime | None,
+) -> bool:
+    """True only after the first RTH bar closes and then on cadence.
+
+    Stage 1 consumes a still-forming daily aggregate. Before RTH that
+    aggregate can still be the prior session, so a premarket promotion
+    can survive into the opening Stage-2 pass. Waiting for the first
+    closed bar removes that carry path; run_broad_scan independently
+    enforces the daily bar's session date before promotion.
+    """
+    first_safe_scan = session_open + timedelta(minutes=BAR_MINUTES)
+    if loop_start < first_safe_scan:
+        return False
+    return (
+        last_broad_scan is None
+        or (loop_start - last_broad_scan).total_seconds() >= BROAD_SCAN_INTERVAL_MINUTES * 60
+    )
+
+
 def _log_broad_scan_shadow_counts(
     symbols: list[str],
     bars_by_symbol: dict,
@@ -1666,6 +1688,8 @@ def _log_broad_scan_shadow_counts(
     promoted: list,
     selected: list,
     promotion_limit: int,
+    *,
+    session_date: date | None = None,
 ) -> None:
     """Decision Ledger measurement gate — SHADOW COUNTS ONLY. Read-only
     instrumentation: computes and logs the Stage-1 funnel's
@@ -1706,9 +1730,10 @@ def _log_broad_scan_shadow_counts(
         first one
       - insufficient_history: a REQUESTED symbol present in the fetch
         response but dropped by broad_scan.build_snapshots_from_daily_bars's
-        own min_history skip (broad_scan.py:111-112) — derived by set
-        difference against the snapshots it actually returned, never by
-        re-checking a bar count against a hardcoded threshold
+        own min_history skip
+      - stale_session_bar: enough history was returned, but the newest
+        daily bar is not from the requested live session, so the symbol
+        is barred from Stage 2 rather than screening prior-session data
       - invalid_baseline: a REQUESTED symbol's Snapshot that would fail
         screen_snapshot's own guard (broad_scan.py:69-70) — the one
         deliberate, small duplication of that single boolean condition
@@ -1731,7 +1756,19 @@ def _log_broad_scan_shadow_counts(
 
         snapshot_symbols = {s.symbol for s in snapshots}
         requested_snapshot_symbols = snapshot_symbols & requested_symbols
-        insufficient_history_count = len(requested_fetched_symbols - requested_snapshot_symbols)
+        excluded_snapshot_symbols = requested_fetched_symbols - requested_snapshot_symbols
+        if session_date is None:
+            stale_session_symbols: set[str] = set()
+        else:
+            from tradebot import broad_scan
+
+            stale_session_symbols = {
+                symbol for symbol in excluded_snapshot_symbols
+                if len(bars_by_symbol[symbol]) >= broad_scan.MIN_HISTORY_BARS
+                and max(bars_by_symbol[symbol], key=lambda b: b.ts).ts.astimezone(ET).date() != session_date
+            }
+        stale_session_count = len(stale_session_symbols)
+        insufficient_history_count = len(excluded_snapshot_symbols - stale_session_symbols)
         requested_snapshot_count = len(requested_snapshot_symbols)
         unexpected_snapshot_count = len(snapshot_symbols - requested_symbols)
 
@@ -1757,19 +1794,22 @@ def _log_broad_scan_shadow_counts(
         unexpected_selected_count = sum(1 for c in selected if c.symbol not in requested_symbols)
 
         requested_universe_count = len(requested_symbols)
-        requested_check = missing_from_fetch_count + insufficient_history_count + requested_snapshot_count
+        requested_check = (
+            missing_from_fetch_count + insufficient_history_count
+            + stale_session_count + requested_snapshot_count
+        )
         snapshot_check = invalid_baseline_count + evaluated_quiet_count + requested_candidate_count
         invariant_ok = (requested_check == requested_universe_count) and (snapshot_check == requested_snapshot_count)
 
         logger.info(
             "broad_scan_shadow_counts requested=%d fetched=%d missing_from_fetch=%d "
-            "insufficient_history=%d requested_snapshot=%d invalid_baseline=%d "
+            "insufficient_history=%d stale_session_bar=%d requested_snapshot=%d invalid_baseline=%d "
             "evaluated_quiet=%d requested_candidate=%d candidate=%d "
             "eligible_for_top_n=%d selected_top_n=%d promotion_limit=%d "
             "unexpected_from_fetch=%d unexpected_snapshot=%d unexpected_candidate=%d "
             "unexpected_selected=%d invariant_ok=%s",
             requested_universe_count, fetched_count, missing_from_fetch_count,
-            insufficient_history_count, requested_snapshot_count, invalid_baseline_count,
+            insufficient_history_count, stale_session_count, requested_snapshot_count, invalid_baseline_count,
             evaluated_quiet_count, requested_candidate_count, candidate_count,
             eligible_for_top_n_count, selected_top_n_count, promotion_limit,
             unexpected_from_fetch_count, unexpected_snapshot_count, unexpected_candidate_count,
@@ -1827,6 +1867,7 @@ def _persist_broad_scan_screening(
         tick, events = broad_scan.classify_screen_outcomes(
             symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit,
             verbose_audit=_screening_audit_enabled(),
+            session_date=session_date,
         )
         universe_mod.record_screening_tick(
             universe_conn, tick, events,
@@ -1866,7 +1907,9 @@ def run_broad_scan(
     scan_started = time.monotonic()
     symbols = universe_mod.active_symbols(universe_conn)
     bars_by_symbol = fetch_bars_fn(symbols, BROAD_SCAN_LOOKBACK_DAYS)
-    snapshots = broad_scan.build_snapshots_from_daily_bars(bars_by_symbol)
+    snapshots = broad_scan.build_snapshots_from_daily_bars(
+        bars_by_symbol, session_date=session_date,
+    )
     promoted = broad_scan.run_stage1_screen(snapshots)
     selected = promoted[:promotion_limit]
     latency_ms = int((time.monotonic() - scan_started) * 1000)
@@ -1885,7 +1928,10 @@ def run_broad_scan(
     )
 
     try:
-        _log_broad_scan_shadow_counts(symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit)
+        _log_broad_scan_shadow_counts(
+            symbols, bars_by_symbol, snapshots, promoted, selected, promotion_limit,
+            session_date=session_date,
+        )
     except Exception:
         # Belt-and-suspenders: _log_broad_scan_shadow_counts already
         # guards its own body, but this outer boundary means a future
@@ -2070,9 +2116,7 @@ def run_live(
             alerter.send(templates.render_system_notice("Halt requested. Stopping the live session.", loop_start), priority=outbox.PRIORITY_HIGH)
             break
 
-        if universe_conn is not None and (
-            last_broad_scan is None or (loop_start - last_broad_scan).total_seconds() >= BROAD_SCAN_INTERVAL_MINUTES * 60
-        ):
+        if universe_conn is not None and _broad_scan_due(loop_start, open_ts, last_broad_scan):
             try:
                 dynamic_symbols = run_broad_scan(
                     universe_conn, session_date=session_date, tick_utc=loop_start,
