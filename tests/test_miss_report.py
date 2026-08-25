@@ -121,10 +121,13 @@ def _users(tmp_path, det_id, statuses):
     return path
 
 
+DEFAULT_WINDOW = mr.EventWindow(event_time=TICK, minutes=60)
+
+
 def _report(*, symbol=SYMBOL, universe=None, evaluations=None, journal=None, users=None,
-            move_pct=9.2, run_id=None):
+            move_pct=9.2, run_id=None, window=DEFAULT_WINDOW):
     return mr.build_report(
-        symbol=symbol, session=SESSION, move_pct=move_pct, run_id=run_id,
+        symbol=symbol, session=SESSION, move_pct=move_pct, run_id=run_id, window=window,
         universe=mr.open_readonly(universe), evaluations=mr.open_readonly(evaluations),
         journal=mr.open_readonly(journal), users=mr.open_readonly(users))
 
@@ -528,3 +531,346 @@ def test_cli_uppercases_the_symbol(tmp_path, capsys):
     cli.main(["--symbol", SYMBOL.lower(), "--session", SESSION, "--universe-db", str(upath)])
 
     assert SYMBOL in capsys.readouterr().out
+
+
+
+# ===========================================================================
+# TEMPORAL SCOPING — the reproduced failure and its neighbours
+# ===========================================================================
+
+
+def T(h, m):
+    return datetime(2026, 8, 24, h, m, tzinfo=timezone.utc)
+
+
+def _multi_tick_universe(tmp_path, ticks):
+    """ticks: [(when, [(outcome, score, rank)])]"""
+    return _multi_tick_universe_on(_universe(tmp_path), ticks)
+
+
+def _multi_tick_universe_on(path, ticks):
+    conn = universe_mod.connect(path)
+    for when, events in ticks:
+        conn.execute(
+            "INSERT INTO screening_ticks (session, tick_utc, run_id, run_mode, screen_version, "
+            "code_version, audit_mode, universe_count, thresholds_json, counts_json, invariant_ok, "
+            "promotion_limit, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (SESSION, when.isoformat(), "scan-1", "live", 1, "sha", 0, 100, "{}",
+             json.dumps({"quiet": 99}), 1, 25, 10))
+        tick_id = conn.execute("SELECT MAX(tick_id) FROM screening_ticks").fetchone()[0]
+        for outcome, score, rank in events:
+            conn.execute(
+                "INSERT INTO screening_events (tick_id, symbol, outcome, screen_score, rank, "
+                "reasons_json, detail_json) VALUES (?,?,?,?,?,?,?)",
+                (tick_id, SYMBOL, outcome, score, rank, json.dumps(["unusual_volume"]), None))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _bars(tmp_path, rows, *, symbol=SYMBOL, run_id="runA", run_mode="live", path=None):
+    """rows: [(when, outcome, extra)] -- `when` is the bar's OPEN."""
+    path = path or (tmp_path / "evaluations.db")
+    conn = ev.connect(path)
+    for when, outcome, extra in rows:
+        ev.record_bar_evaluation(
+            conn, session=SESSION, symbol=symbol, run_id=run_id, run_mode=run_mode,
+            now_utc=when.isoformat(), bar_ts_utc=when.isoformat(), outcome=outcome,
+            open=100.0, high=104.0, low=99.0, close=103.0, volume=800_000, **extra)
+    conn.close()
+    return path
+
+
+def _detection_at(tmp_path, when, *, score=9.0, alerted=True, path=None):
+    path = path or (tmp_path / "journal.db")
+    conn = journal_connect(path)
+    det_id = write_cluster(
+        conn, session=SESSION, symbol=SYMBOL, ts_utc=when.isoformat(), kinds="gap", headlines="h",
+        score=score, close=103.0, atr14=1.0, trend="up",
+        detections=[Detection(SYMBOL, "gap", when, score, "h", {})], code_version_str="sha",
+        alerted=alerted)
+    conn.commit()
+    conn.close()
+    return path, det_id
+
+
+def _delivery(tmp_path, det_id, rows, *, path=None):
+    """rows: [(status, delivered_at|None)]"""
+    path = path or (tmp_path / "users.db")
+    conn = users_db.connect(path)
+    for i, (status, delivered_at) in enumerate(rows):
+        conn.execute(
+            "INSERT INTO outbox (id, alert_id, chat_id, priority, text, status, attempts, "
+            "next_attempt_at, created_at, delivered_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (f"o{det_id[:4]}{i}", det_id, 1000 + i, 1, "t", status, 0, TICK.isoformat(),
+             TICK.isoformat(), delivered_at.isoformat() if delivered_at else None))
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _full_timeline(tmp_path):
+    """The exact reproduced failure from the review:
+        10:00 quiet | 10:30 CANDIDATE_NOT_PROMOTED | 11:00 PROMOTED
+        11:05 NO_DETECTION | 14:30 DETECTED | 14:31 delivered
+    """
+    upath = _multi_tick_universe(tmp_path, [
+        (T(10, 0), []),
+        (T(10, 30), [("CANDIDATE_NOT_PROMOTED", 4.1, 27)]),
+        (T(11, 0), [("PROMOTED", 8.4, 3)]),
+    ])
+    epath = _bars(tmp_path, [
+        (T(11, 5), "NO_DETECTION", {"atr14": 2.9}),
+        (T(14, 30), "DETECTED", {"kinds": "gap", "cluster_score": 9.0, "tier": "high"}),
+    ])
+    jpath, det_id = _detection_at(tmp_path, T(14, 35))
+    ppath = _delivery(tmp_path, det_id, [("delivered", T(14, 36))])
+    return upath, epath, jpath, ppath
+
+
+def test_regression_a_1035_move_is_not_exonerated_by_a_1430_alert(tmp_path):
+    """THE bug. Session-wide selection returned ALERTED / 'No failure
+    point' for a move Perch missed at 10:35."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict != mr.ALERTED
+    assert "No failure point" not in text
+    # The governing tick at 10:35 is 10:30 -- the near-miss, not the 11:00 promotion.
+    assert report.verdict == mr.CANDIDATE_NOT_PROMOTED
+    assert "rank=27" in text
+    assert "governing tick 2026-08-24T10:30" in text
+
+
+def test_regression_a_the_same_symbol_at_1430_does_see_the_detection(tmp_path):
+    """Case A: the later detection/delivery must still be reportable when
+    that IS the moment under investigation."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=T(14, 30), minutes=60))
+
+    assert report.verdict == mr.ALERTED
+    assert "delivery_latency_from_event_time" in mr.render(report)
+
+
+def test_regression_b_same_run_earlier_miss_survives_a_later_detection(tmp_path):
+    """Case B: the within-run DETECTED short-circuit."""
+    upath = _multi_tick_universe(tmp_path, [(T(11, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [
+        (T(11, 5), "NO_DETECTION", {"atr14": 2.9}),
+        (T(14, 30), "DETECTED", {"kinds": "gap", "tier": "high"}),
+    ])
+
+    report = _report(universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(11, 5), minutes=30))
+    text = mr.render(report)
+
+    assert report.verdict == mr.NO_DETECTION
+    assert "cannot bear on this move" in text  # the 14:30 detection is context only
+
+
+def test_regression_c_a_later_restart_does_not_erase_an_earlier_run(tmp_path):
+    """Case C: per-run separation under temporal scoping."""
+    upath = _multi_tick_universe(tmp_path, [(T(11, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(T(11, 5), "NO_DETECTION", {"atr14": 2.9})], run_id="runA")
+    _bars(tmp_path, [(T(11, 5), "DETECTED", {"kinds": "gap", "tier": "high"})],
+          run_id="runB", path=epath)
+
+    report = _report(universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(11, 5), minutes=30))
+    stage2 = [f for f in report.findings if f.stage.startswith("stage2[")]
+
+    assert len(stage2) == 2
+    assert report.verdict == mr.NO_DETECTION  # runA's miss still explains
+    assert "scoped to that run" in report.conclusion
+
+
+def test_regression_d_a_later_promotion_does_not_overwrite_an_earlier_state(tmp_path):
+    """Case D: Stage 1 governing-tick semantics."""
+    upath = _multi_tick_universe(tmp_path, [
+        (T(10, 0), []), (T(10, 30), []), (T(15, 30), [("PROMOTED", 9.0, 1)])])
+
+    report = _report(universe=upath, window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+
+    assert report.verdict == mr.SCREENED_QUIET  # quiet at 10:30, the governing tick
+    assert report.conclusion_evidence == mr.INFERRED
+
+
+def test_regression_e_a_watchlist_symbol_bypasses_stage1_but_is_time_scoped(tmp_path):
+    """Case E."""
+    upath = _universe(tmp_path, symbols=(SYMBOL, WATCHED))
+    upath = _multi_tick_universe_on(upath, [(T(10, 0), [])])
+    epath = _bars(tmp_path, [
+        (T(10, 35), "NO_DETECTION", {"atr14": 3.0}),
+        (T(14, 30), "DETECTED", {"kinds": "gap", "tier": "high"}),
+    ], symbol=WATCHED)
+
+    report = _report(symbol=WATCHED, universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=30))
+    text = mr.render(report)
+
+    assert "does not apply" in text          # Stage 1 bypassed
+    assert report.verdict == mr.NO_DETECTION  # and Stage 2 still time-scoped
+    assert report.verdict != mr.NOT_SCREENED
+
+
+def test_regression_f_no_event_time_refuses_a_verdict(tmp_path):
+    """Case F: timeline only, no explanatory verdict."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath, window=None)
+    text = mr.render(report)
+
+    assert report.verdict == mr.INCONCLUSIVE_NO_EVENT_TIME
+    for banned in (mr.ALERTED, mr.NO_DETECTION, mr.CANDIDATE_NOT_PROMOTED, mr.SCREENED_QUIET):
+        assert report.verdict != banned
+    assert "first explainable failure point" not in text
+    assert "Event window: NONE" in text
+    # the timeline is present and ordered
+    assert "stage1   CANDIDATE_NOT_PROMOTED" in text
+    assert "stage2   NO_DETECTION" in text
+    assert "delivery delivered" in text
+
+
+def test_regression_g_delivery_is_event_scoped_with_latency(tmp_path):
+    """Case G: only the in-window detection's recipients count, and the
+    latency is visible."""
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(T(10, 30), "DETECTED", {"kinds": "gap", "tier": "high"})])
+    jpath, early = _detection_at(tmp_path, T(10, 35), alerted=True)
+    _, late = _detection_at(tmp_path, T(15, 0), alerted=True, path=jpath)
+    ppath = _delivery(tmp_path, early, [("delivered", T(10, 40)), ("failed", None)])
+    _delivery(tmp_path, late, [("delivered", T(15, 1))], path=ppath)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED
+    assert "delivered=1" in text and "failed=1" in text
+    assert "delivery_latency_from_event_time: min=+5m" in text
+    assert "cannot exonerate this move" in text  # the 15:00 detection is context only
+
+
+# ---------------------------------------------------------------------------
+# Window semantics
+# ---------------------------------------------------------------------------
+
+
+def test_the_window_is_forward_not_symmetric(tmp_path):
+    """A bar before event-time is outside the window: Perch cannot act on
+    a move that had not happened yet."""
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(T(9, 0), "NO_DETECTION", {"atr14": 3.0})])
+
+    report = _report(universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+
+    assert report.verdict == mr.NO_EVALUATION  # the 09:00 bar does not count
+    assert "no bar was evaluated inside the event window" in mr.render(report)
+
+
+def test_bar_decision_time_is_the_close_not_the_open(tmp_path):
+    """A bar OPENING at 10:32 is not knowable until 10:37, so with a
+    5-minute window from 10:35 it still counts -- while one opening at
+    10:28 (knowable 10:33) does not. Comparing opens would credit Perch
+    with information it did not have."""
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(T(10, 32), "NO_DETECTION", {"atr14": 3.0})])
+
+    report = _report(universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=5))
+
+    assert report.verdict == mr.NO_DETECTION
+
+
+def test_bar_minutes_matches_the_detector_definition():
+    """Pins the local constant against detectors.bar_close_ts."""
+    from tradebot.detectors import bar_close_ts
+    from tradebot.marketdata import Bar
+
+    bar = Bar("X", TICK, 1, 2, 0.5, 1.5, 10)
+
+    assert bar_close_ts(bar) - bar.ts == timedelta(minutes=mr.BAR_MINUTES)
+
+
+def test_no_governing_tick_before_event_time_is_inconclusive(tmp_path):
+    """Every tick ran after the move: none can establish what state was in
+    force during it."""
+    upath = _multi_tick_universe(tmp_path, [(T(15, 0), [("PROMOTED", 9.0, 1)])])
+
+    report = _report(universe=upath, window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+
+    assert report.verdict == mr.INCONCLUSIVE
+    assert "governing state unknown" in mr.render(report)
+
+
+def test_offsets_label_events_relative_to_event_time(tmp_path):
+    upath = _multi_tick_universe(tmp_path, [(T(10, 30), [("CANDIDATE_NOT_PROMOTED", 4.1, 27)])])
+
+    text = mr.render(_report(universe=upath,
+                             window=mr.EventWindow(event_time=T(10, 35), minutes=60)))
+
+    assert "-5m before event-time" in text
+
+
+def test_the_window_is_stated_in_the_report(tmp_path):
+    text = mr.render(_report(universe=_universe(tmp_path),
+                             window=mr.EventWindow(event_time=T(10, 35), minutes=45)))
+
+    assert "+45m" in text and "forward" in text
+
+
+# ---------------------------------------------------------------------------
+# CLI time parsing
+# ---------------------------------------------------------------------------
+
+
+def test_cli_accepts_hhmm(tmp_path, capsys):
+    upath = _multi_tick_universe(tmp_path, [(T(10, 30), [("CANDIDATE_NOT_PROMOTED", 4.1, 27)])])
+
+    code = cli.main(["--symbol", SYMBOL, "--session", SESSION, "--event-time", "10:35",
+                     "--universe-db", str(upath)])
+
+    assert code == 0
+    assert "CANDIDATE_NOT_PROMOTED" in capsys.readouterr().out
+
+
+def test_cli_accepts_a_full_iso_timestamp(tmp_path, capsys):
+    upath = _multi_tick_universe(tmp_path, [(T(10, 30), [("CANDIDATE_NOT_PROMOTED", 4.1, 27)])])
+
+    code = cli.main(["--symbol", SYMBOL, "--session", SESSION,
+                     "--event-time", "2026-08-24T10:35:00+00:00", "--universe-db", str(upath)])
+
+    assert code == 0
+    assert "CANDIDATE_NOT_PROMOTED" in capsys.readouterr().out
+
+
+def test_cli_rejects_a_malformed_event_time(tmp_path):
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["--symbol", SYMBOL, "--session", SESSION, "--event-time", "half past ten"])
+
+    assert excinfo.value.code != 0
+
+
+def test_cli_rejects_a_non_positive_window(tmp_path):
+    with pytest.raises(SystemExit):
+        cli.main(["--symbol", SYMBOL, "--session", SESSION, "--event-time", "10:35",
+                  "--window-minutes", "0"])
+
+
+def test_cli_without_event_time_returns_the_timeline(tmp_path, capsys):
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    code = cli.main(["--symbol", SYMBOL, "--session", SESSION, "--universe-db", str(upath),
+                     "--evaluations-db", str(epath), "--journal-db", str(jpath),
+                     "--users-db", str(ppath)])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "INCONCLUSIVE_NO_EVENT_TIME" in out
+    assert "Re-run with --event-time" in out

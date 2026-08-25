@@ -38,9 +38,24 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from tradebot.config import WATCHLIST
+
+# A 5-minute bar stamped 14:30 is not knowable until 14:35 (CLAUDE.md;
+# detectors.bar_close_ts). The stores disagree about which end they
+# record, and the difference is exactly one bar:
+#
+#   bar_evaluations.bar_ts_utc  -> the bar's OPEN
+#   detections.ts_utc           -> bar_close_ts(bar), i.e. OPEN + 5m
+#
+# So every comparison below is made on DECISION TIME -- the moment Perch
+# could first have acted on that row. Comparing a bar's open against an
+# event time would credit Perch with information it did not yet have,
+# which is the lookahead this project's whole bar discipline exists to
+# prevent. A test pins this constant against detectors.bar_close_ts.
+BAR_MINUTES = 5
 
 # --- evidence classes ------------------------------------------------------
 DIRECT_ROW = "DIRECT ROW"
@@ -64,6 +79,12 @@ ALERT_NOT_DELIVERED = "ALERT_NOT_DELIVERED"
 ALERT_PARTIALLY_DELIVERED = "ALERT_PARTIALLY_DELIVERED"
 ALERTED = "ALERTED"
 INCONCLUSIVE = "INCONCLUSIVE"
+# No --event-time was supplied. The tool prints the session timeline and
+# refuses to name a failure point: a symbol can be quiet at 10:00, a
+# near-miss at 10:30, promoted at 11:00 and alerted at 14:31, and a
+# session-wide verdict of ALERTED for a 10:35 move would be technically
+# true and completely wrong. Refusing is the only honest answer.
+INCONCLUSIVE_NO_EVENT_TIME = "INCONCLUSIVE_NO_EVENT_TIME"
 
 # Printed on every report. A reader who does not know what the tool
 # cannot see will over-trust what it does show.
@@ -78,6 +99,55 @@ LIMITATIONS = (
     "market_bars availability/alignment is NOT recorded, so a NO_DETECTION cannot "
     "distinguish relative_strength_break abstaining from it genuinely comparing.",
 )
+
+
+@dataclass(frozen=True)
+class EventWindow:
+    """When the move mattered, and how long Perch had to react.
+
+    FORWARD, not symmetric: the question is "why did Perch fail to
+    surface THIS move", and Perch can only act on bars that closed at or
+    after the move became visible. A backward window would ask what Perch
+    knew before the move existed.
+
+    Comparisons use decision time (see BAR_MINUTES), so nothing inside
+    the window depends on information that was not knowable yet."""
+
+    event_time: datetime
+    minutes: int = 60
+
+    @property
+    def end(self) -> datetime:
+        return self.event_time + timedelta(minutes=self.minutes)
+
+    def contains(self, when: datetime | None) -> bool:
+        return when is not None and self.event_time <= when <= self.end
+
+    def label(self, when: datetime | None) -> str:
+        """Downstream events are labelled by their offset, so a reader can
+        never mistake something that happened later for something that was
+        available at event-time."""
+        if when is None:
+            return ""
+        delta = (when - self.event_time).total_seconds() / 60.0
+        if abs(delta) < 0.5:
+            return " (at event-time)"
+        return f" ({delta:+.0f}m {'after' if delta > 0 else 'before'} event-time)"
+
+
+def _parse_ts(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _decision_time(bar_ts_utc: str):
+    """When a bar's evaluation could first have been acted on."""
+    ts = _parse_ts(bar_ts_utc)
+    return ts + timedelta(minutes=BAR_MINUTES) if ts else None
 
 
 @dataclass
@@ -103,6 +173,7 @@ class MissReport:
     conclusion: str
     conclusion_evidence: str
     stores: dict
+    window: "EventWindow | None" = None
 
 
 # --------------------------------------------------------------------------
@@ -169,21 +240,28 @@ def _universe_finding(universe, symbol) -> Finding:
     )
 
 
-def _screening_finding(universe, symbol, session) -> Finding:
-    """Stage 1 for a symbol that goes through it.
+def _screening_finding(universe, symbol, session, window: EventWindow) -> Finding:
+    """The Stage 1 state that GOVERNED this symbol when the move mattered.
 
-    WATCHLIST symbols do not: run_live scans WATCHLIST + whatever Stage 1
-    promoted, so a watchlist name is evaluated regardless of the screen
-    and has no screening rows by construction. Reporting that as
-    NOT_SCREENED would be flatly wrong, which is why the caller checks
-    membership first."""
+    Not the session's strongest outcome -- that was the original bug. A
+    symbol quiet at 10:00, a near-miss at 10:30 and promoted at 11:00 has
+    three different Stage 1 states, and only one of them was in force at
+    10:35. The governing tick is the latest one at or before event-time:
+    ticks are discrete (every 30 minutes) and each one's decision stands
+    until the next replaces it.
+
+    Strictly backward-looking, so no lookahead: a tick that ran after the
+    move could not have influenced whether Perch was watching during it.
+
+    WATCHLIST symbols never reach this function -- they bypass Stage 1
+    entirely, and manufacturing NOT_SCREENED for them would be wrong."""
     if universe is None:
         return Finding("stage1", "universe.db not available", NOT_INSTRUMENTED)
 
     ticks = _q(
         universe,
-        "SELECT tick_id, tick_utc, invariant_ok, promotion_limit, counts_json, screen_version, "
-        "run_id, run_mode FROM screening_ticks WHERE session = ? ORDER BY tick_utc",
+        "SELECT tick_id, tick_utc, invariant_ok, promotion_limit, screen_version "
+        "FROM screening_ticks WHERE session = ? ORDER BY tick_utc",
         (session,),
     )
     if ticks is None:
@@ -192,82 +270,73 @@ def _screening_finding(universe, symbol, session) -> Finding:
         return Finding(
             "stage1", f"no Stage 1 screening tick recorded for {session}", DIRECT_ROW,
             verdict=STAGE1_NOT_RUN, explains_miss=True,
-            lines=["Broad scan is opt-in (--broad-scan) and runs every 30 minutes; "
-                   "no tick covered this session, so the screen never considered this symbol."],
+            lines=["Broad scan is opt-in (--broad-scan) and runs every 30 minutes; no tick "
+                   "covered this session, so the screen never considered this symbol."],
         )
 
-    events = _q(
+    governing = None
+    for tick in ticks:
+        when = _parse_ts(tick[1])
+        if when is not None and when <= window.event_time:
+            governing = tick
+    if governing is None:
+        earliest = ticks[0][1]
+        return Finding(
+            "stage1", "no screening tick ran at or before event-time — governing state unknown",
+            INFERRED, verdict=INCONCLUSIVE, explains_miss=True,
+            lines=[f"{len(ticks)} tick(s) this session; earliest {earliest}"
+                   f"{window.label(_parse_ts(earliest))}",
+                   "Every recorded tick is AFTER the move, so none of them can establish what "
+                   "Stage 1 state was in force when it happened. Reporting a later tick's "
+                   "outcome would be describing a different moment."],
+        )
+
+    tick_id, tick_utc, invariant_ok, promotion_limit, screen_version = governing
+    base = [f"{len(ticks)} tick(s) this session; governing tick {tick_utc}"
+            f"{window.label(_parse_ts(tick_utc))}",
+            f"screen_version={screen_version} (Stage 1 units — never comparable to a detector score)"]
+
+    rows = _q(
         universe,
-        "SELECT t.tick_utc, e.outcome, e.screen_score, e.rank, e.reasons_json, t.promotion_limit, "
-        "t.screen_version FROM screening_events e JOIN screening_ticks t ON t.tick_id = e.tick_id "
-        "WHERE e.symbol = ? AND t.session = ? ORDER BY t.tick_utc",
-        (symbol, session),
+        "SELECT outcome, screen_score, rank, reasons_json FROM screening_events "
+        "WHERE tick_id = ? AND symbol = ?",
+        (tick_id, symbol),
     ) or []
 
-    tick_line = f"{len(ticks)} screening tick(s) recorded for {session}"
-
-    if events:
-        best = _best_screening_event(events)
-        tick_utc, outcome, score, rank, reasons_json, promotion_limit, screen_version = best
+    if rows:
+        outcome, score, rank, reasons_json = rows[0]
         reasons = json.loads(reasons_json) if reasons_json else []
-        lines = [
-            tick_line,
-            f"tick {tick_utc}: outcome={outcome}",
-            f"screen_version={screen_version} (Stage 1 units — never comparable to a detector score)",
-        ]
+        lines = base + [f"outcome={outcome}"]
         if score is not None:
             lines.append(f"screen_score={score:.3f}  rank={rank}  promotion_limit={promotion_limit}")
         if reasons:
             lines.append(f"reasons={', '.join(reasons)}")
-        if len(events) > 1:
-            lines.append(f"({len(events)} screening event(s) this session; strongest shown)")
-
         if outcome == "PROMOTED":
-            return Finding("stage1", f"{symbol} was PROMOTED to Stage 2", DIRECT_ROW, lines=lines)
+            return Finding("stage1", f"{symbol} was PROMOTED at the governing tick", DIRECT_ROW,
+                           lines=lines)
         if outcome == "CANDIDATE_NOT_PROMOTED":
-            short_by = (rank - promotion_limit) if (rank and promotion_limit) else None
-            if short_by:
-                lines.append(f"missed the cut by {short_by} place(s)")
+            if rank and promotion_limit:
+                lines.append(f"missed the cut by {rank - promotion_limit} place(s)")
             return Finding(
                 "stage1", f"{symbol} cleared the screen but lost to the promotion cap", DIRECT_ROW,
-                verdict=CANDIDATE_NOT_PROMOTED, explains_miss=True, lines=lines,
-            )
-        # MISSING_FROM_FETCH / INSUFFICIENT_HISTORY / INVALID_BASELINE / UNEXPECTED
-        return Finding(
-            "stage1", f"{symbol} was screened out: {outcome}", DIRECT_ROW,
-            verdict=NOT_SCREENED, explains_miss=True, lines=lines,
-        )
+                verdict=CANDIDATE_NOT_PROMOTED, explains_miss=True, lines=lines)
+        return Finding("stage1", f"{symbol} was screened out: {outcome}", DIRECT_ROW,
+                       verdict=NOT_SCREENED, explains_miss=True, lines=lines)
 
-    # No direct row. The only remaining reading is "screened and quiet" --
-    # and that is a subtraction, valid only while the invariant holds.
-    invariant_ok = all(t[2] for t in ticks)
-    audit_note = ("Per-symbol QUIET rows are written only in verbose audit mode; "
-                  "with it off this is a subtraction, not a row.")
+    # No row at the governing tick -> quiet, but only if the counts that
+    # license that subtraction actually add up FOR THAT TICK.
     if not invariant_ok:
         return Finding(
-            "stage1", "cannot determine Stage 1 outcome: conservation invariant did not hold", INFERRED,
-            verdict=INCONCLUSIVE, explains_miss=True,
-            lines=[tick_line,
-                   "screening_ticks.invariant_ok = 0 for at least one tick, so the counts do not add "
-                   "up and 'in the universe, in no bucket, therefore quiet' cannot be trusted."],
-        )
+            "stage1", "cannot determine Stage 1 state: the governing tick's invariant did not hold",
+            INFERRED, verdict=INCONCLUSIVE, explains_miss=True,
+            lines=base + ["screening_ticks.invariant_ok = 0 for the governing tick, so "
+                          "'in the universe, in no bucket, therefore quiet' cannot be trusted."])
     return Finding(
-        "stage1", f"{symbol} was screened and stayed quiet (no threshold crossed)", INFERRED,
+        "stage1", f"{symbol} was screened and stayed quiet at the governing tick", INFERRED,
         verdict=SCREENED_QUIET, explains_miss=True,
-        lines=[tick_line, "no screening_events row for this symbol; every tick's invariant_ok = 1",
-               audit_note],
-    )
-
-
-def _best_screening_event(events):
-    """The strongest event of the session — a symbol can be quiet at 10:00
-    and a near-miss at 14:30, and the near-miss is the one that explains
-    the day."""
-    priority = {
-        "PROMOTED": 0, "CANDIDATE_NOT_PROMOTED": 1, "INVALID_BASELINE": 2,
-        "INSUFFICIENT_HISTORY": 3, "MISSING_FROM_FETCH": 4,
-    }
-    return sorted(events, key=lambda e: (priority.get(e[1], 9), -(e[2] or 0)))[0]
+        lines=base + ["no screening_events row for this symbol at that tick; invariant_ok = 1",
+                      "Per-symbol QUIET rows are written only in verbose audit mode; with it off "
+                      "this is a subtraction, not a row."])
 
 
 # --------------------------------------------------------------------------
@@ -275,10 +344,12 @@ def _best_screening_event(events):
 # --------------------------------------------------------------------------
 
 
-def _evaluation_findings(evaluations, symbol, session, run_id_filter) -> list[Finding]:
-    """One finding per run_id. Runs are never merged: a mid-session
-    restart produces a second run over the same bars, and collapsing them
-    would present two independent evaluations as one."""
+def _evaluation_findings(evaluations, symbol, session, run_id_filter, window: EventWindow) -> list[Finding]:
+    """One finding per run_id, each scoped to the event window.
+
+    Runs are never merged: a mid-session restart evaluates the same bars
+    again, and collapsing them would present two independent evaluations
+    as one."""
     if evaluations is None:
         return [Finding("stage2", "evaluations.db not available (no live session has written it yet?)",
                         NOT_INSTRUMENTED)]
@@ -292,14 +363,13 @@ def _evaluation_findings(evaluations, symbol, session, run_id_filter) -> list[Fi
     if sessions is None:
         return [Finding("stage2", "evaluation tables not present in evaluations.db", NOT_INSTRUMENTED)]
     if run_id_filter:
-        sessions = [s for s in sessions if s[1] == run_id_filter]
+        sessions = [x for x in sessions if x[1] == run_id_filter]
     if not sessions:
         return [Finding(
             "stage2", f"no evaluation rows for {symbol} on {session}", NOT_INSTRUMENTED,
             verdict=NO_EVALUATION,
             lines=["Absence of a row is NOT evidence that the detectors ran and found nothing.",
-                   "It means nothing was recorded — the reason is not instrumented."],
-        )]
+                   "It means nothing was recorded — the reason is not instrumented."])]
 
     findings = []
     for eval_session_id, run_id, run_mode, evaluation_version in sessions:
@@ -309,63 +379,75 @@ def _evaluation_findings(evaluations, symbol, session, run_id_filter) -> list[Fi
             "detection_id, error FROM bar_evaluations WHERE eval_session_id = ? ORDER BY bar_ts_utc",
             (eval_session_id,),
         ) or []
-        findings.append(_one_run_finding(run_id, run_mode, evaluation_version, rows))
+        findings.append(_one_run_finding(run_id, run_mode, evaluation_version, rows, window))
     return findings
 
 
-def _one_run_finding(run_id, run_mode, evaluation_version, rows) -> Finding:
+def _one_run_finding(run_id, run_mode, evaluation_version, rows, window: EventWindow) -> Finding:
+    """Only bars whose DECISION TIME falls inside the window may decide
+    this run's verdict.
+
+    The original bug lived here: any DETECTED bar anywhere in the session
+    made the whole run non-explaining, so a 14:30 detection erased an
+    11:05 miss. A detection outside the window is now reported as context
+    and explicitly labelled with its offset -- it cannot exonerate a miss
+    that happened earlier."""
     stage = f"stage2[run={run_id[:8]}]"
+    in_window = [r for r in rows if window.contains(_decision_time(r[0]))]
+    outside = [r for r in rows if not window.contains(_decision_time(r[0]))]
     header = [f"run_mode={run_mode}  run_id={run_id}  evaluation_version={evaluation_version}",
-              f"{len(rows)} bar(s) evaluated"]
-    if not rows:
-        return Finding(stage, "session row exists but no bars were evaluated", NOT_INSTRUMENTED,
-                       verdict=NO_EVALUATION, lines=header)
+              f"{len(rows)} bar(s) evaluated this session, {len(in_window)} inside the event window"]
+    for r in outside:
+        if r[1] in ("DETECTED", "DETECTOR_ERROR", "EVALUATION_ERROR"):
+            header.append(f"  context (outside window): {r[1]} at {r[0]}"
+                          f"{window.label(_decision_time(r[0]))} — cannot bear on this move")
+
+    if not in_window:
+        return Finding(
+            stage, "no bar was evaluated inside the event window", NOT_INSTRUMENTED,
+            verdict=NO_EVALUATION, explains_miss=True,
+            lines=header + ["Bars exist for this run but none decidable inside the window. "
+                            "Why the window itself produced no evaluation is not instrumented."])
 
     counts = {}
-    for r in rows:
+    for r in in_window:
         counts[r[1]] = counts.get(r[1], 0) + 1
-    header.append("outcomes: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    header.append("in-window outcomes: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
 
-    # Errors outrank any downstream conclusion for this run: a crashed
-    # detector means the evaluation did not complete, so "nothing fired"
-    # is not a finding that can be made about it.
-    for outcome, verdict in ((DETECTOR_ERROR, DETECTOR_ERROR), (EVALUATION_ERROR, EVALUATION_ERROR)):
-        hits = [r for r in rows if r[1] == outcome]
+    # Errors outrank everything for this run: an evaluation that crashed
+    # did not complete, so "no detector fired" is not a claim about it.
+    for outcome in (DETECTOR_ERROR, EVALUATION_ERROR):
+        hits = [r for r in in_window if r[1] == outcome]
         if hits:
             return Finding(
-                stage, f"evaluation FAILED on {len(hits)} bar(s): {outcome}", DIRECT_ROW,
-                verdict=verdict, explains_miss=True,
-                lines=header + [f"first at {hits[0][0]}: {hits[0][9]}",
-                                "An error outranks any scoring or suppression conclusion for this run — "
-                                "the evaluation did not complete, so 'no detector fired' cannot be claimed."],
-            )
+                stage, f"evaluation FAILED on {len(hits)} in-window bar(s): {outcome}", DIRECT_ROW,
+                verdict=outcome, explains_miss=True,
+                lines=header + [f"first at {hits[0][0]}{window.label(_decision_time(hits[0][0]))}: {hits[0][9]}",
+                                "An error outranks any scoring or suppression conclusion for this run."])
 
-    detected = [r for r in rows if r[1] == "DETECTED"]
+    detected = [r for r in in_window if r[1] == "DETECTED"]
     if detected:
-        lines = header + [f"detected on {len(detected)} bar(s); first at {detected[0][0]} "
-                          f"kinds={detected[0][5]} score={detected[0][6]} tier={detected[0][7]}"]
-        return Finding(stage, f"{len(detected)} bar(s) produced a detection", DIRECT_ROW,
-                       lines=lines)
+        return Finding(
+            stage, f"{len(detected)} in-window bar(s) produced a detection", DIRECT_ROW,
+            lines=header + [f"first at {detected[0][0]}{window.label(_decision_time(detected[0][0]))} "
+                            f"kinds={detected[0][5]} score={detected[0][6]} tier={detected[0][7]}"])
 
-    no_detection = [r for r in rows if r[1] == "NO_DETECTION"]
+    no_detection = [r for r in in_window if r[1] == "NO_DETECTION"]
     if no_detection:
         sample = max(no_detection, key=lambda r: (r[4] or 0))
         return Finding(
-            stage, "every detector ran on every bar and none fired", DIRECT_ROW,
+            stage, "every detector ran on every in-window bar and none fired", DIRECT_ROW,
             verdict=NO_DETECTION, explains_miss=True,
             lines=header + [
-                f"largest-ATR bar {sample[0]}: close={sample[2]} volume={sample[3]} atr14={sample[4]}",
-                "The stored bars and the session's frozen anchors reproduce every detector decision "
-                "offline — detectors are pure, so this is a threshold question, not a data question.",
-            ],
-        )
+                f"largest-ATR in-window bar {sample[0]}{window.label(_decision_time(sample[0]))}: "
+                f"close={sample[2]} volume={sample[3]} atr14={sample[4]}",
+                "The stored bars and the session's frozen anchors reproduce every detector "
+                "decision offline — detectors are pure, so this is a threshold question."])
 
-    # Only HALTED_BAR / BAR_GAP rows.
     return Finding(
-        stage, "every evaluated bar was rejected by a data-health guard", DIRECT_ROW,
+        stage, "every in-window bar was rejected by a data-health guard", DIRECT_ROW,
         verdict=NO_EVALUATION, explains_miss=True,
-        lines=header + ["no bar reached the detectors: all rows are HALTED_BAR/BAR_GAP"],
-    )
+        lines=header + ["no in-window bar reached the detectors: all rows are HALTED_BAR/BAR_GAP"])
 
 
 def _promotion_gap_finding(stage1: Finding, stage2_findings: list[Finding]) -> Finding | None:
@@ -376,8 +458,14 @@ def _promotion_gap_finding(stage1: Finding, stage2_findings: list[Finding]) -> F
     must NOT resolve it. Reporting PROMOTED_BUT_BLOCKED as a fact would
     invent the one answer the reader came for."""
     promoted = stage1.verdict is None and "PROMOTED" in stage1.summary
-    no_eval = all(f.verdict == NO_EVALUATION or f.evidence == NOT_INSTRUMENTED for f in stage2_findings)
-    if not (promoted and no_eval):
+    # NOT_INSTRUMENTED means nothing was recorded AT ALL. A run that
+    # evaluated bars outside the window is a different thing entirely --
+    # the symbol was evaluated, just not when the move mattered -- and
+    # calling that "never evaluated" would be its own false statement.
+    nothing_recorded = all(
+        f.evidence == NOT_INSTRUMENTED and "inside the event window" not in f.summary
+        for f in stage2_findings)
+    if not (promoted and nothing_recorded):
         return None
     return Finding(
         "pre-evaluation", "promoted, but never evaluated — reason NOT RECORDED", NOT_INSTRUMENTED,
@@ -397,36 +485,56 @@ def _promotion_gap_finding(stage1: Finding, stage2_findings: list[Finding]) -> F
 # --------------------------------------------------------------------------
 
 
-def _decision_findings(journal, symbol, session) -> list[Finding]:
-    if journal is None:
-        return [Finding("decision", "journal.db not available", NOT_INSTRUMENTED)]
-    dets = _q(
+def _in_window_detections(journal, symbol, session, window: EventWindow):
+    """detections.ts_utc is already bar_close_ts -- the moment the cluster
+    became knowable -- so it is compared to the window directly, unlike
+    bar_evaluations' open timestamps."""
+    rows = _q(
         journal,
         "SELECT id, ts_utc, score, tier, alerted, suppress_reason, suppress_category "
         "FROM detections WHERE symbol = ? AND session = ? ORDER BY ts_utc",
         (symbol, session),
     )
-    if dets is None:
+    if rows is None:
+        return None, None
+    inside = [r for r in rows if window.contains(_parse_ts(r[1]))]
+    return inside, rows
+
+
+def _decision_findings(journal, symbol, session, window: EventWindow) -> list[Finding]:
+    if journal is None:
+        return [Finding("decision", "journal.db not available", NOT_INSTRUMENTED)]
+    inside, all_rows = _in_window_detections(journal, symbol, session, window)
+    if inside is None:
         return [Finding("decision", "detections table not present", NOT_INSTRUMENTED)]
-    if not dets:
-        return [Finding("decision", "no detection was journaled", DIRECT_ROW,
-                        lines=["consistent with an earlier stage explaining the miss"])]
+
+    outside_note = []
+    for det_id, ts_utc, score, tier, alerted, _sr, _sc in (all_rows or []):
+        if not window.contains(_parse_ts(ts_utc)):
+            outside_note.append(
+                f"context (outside window): detection {det_id} at {ts_utc}"
+                f"{window.label(_parse_ts(ts_utc))} tier={tier} alerted={bool(alerted)}"
+                " — cannot exonerate this move")
+
+    if not inside:
+        return [Finding(
+            "decision", "no detection was journaled inside the event window", DIRECT_ROW,
+            lines=(outside_note or ["consistent with an earlier stage explaining the miss"]))]
 
     findings = []
-    for det_id, ts_utc, score, tier, alerted, suppress_reason, suppress_category in dets:
-        lines = [f"detection {det_id} at {ts_utc}: score={score} tier={tier} alerted={bool(alerted)}"]
-        ledger = _q(
+    for det_id, ts_utc, score, tier, alerted, suppress_reason, suppress_category in inside:
+        lines = [f"detection {det_id} at {ts_utc}{window.label(_parse_ts(ts_utc))}: "
+                 f"score={score} tier={tier} alerted={bool(alerted)}"] + outside_note
+        for st, dec, reason in (_q(
             journal,
             "SELECT stage, decision, reason FROM decision_events WHERE detection_id = ? ORDER BY seq",
-            (det_id,),
-        ) or []
-        for st, dec, reason in ledger:
+            (det_id,)) or []):
             lines.append(f"  ledger: {st} -> {dec}" + (f" ({reason})" if reason else ""))
 
         if tier == "log":
             findings.append(Finding(
-                "decision", f"scored {score} — sub-threshold, journaled but never alertable", DIRECT_ROW,
-                verdict=SUB_THRESHOLD, explains_miss=True, lines=lines))
+                "decision", f"scored {score} — sub-threshold, journaled but never alertable",
+                DIRECT_ROW, verdict=SUB_THRESHOLD, explains_miss=True, lines=lines))
         elif suppress_reason:
             findings.append(Finding(
                 "decision", f"suppressed: {suppress_reason}", DIRECT_ROW,
@@ -442,41 +550,58 @@ def _decision_findings(journal, symbol, session) -> list[Finding]:
     return findings
 
 
-def _delivery_finding(users, journal, symbol, session) -> Finding:
-    """Per-recipient, never collapsed.
+def _delivery_finding(users, journal, symbol, session, window: EventWindow) -> Finding:
+    """Scoped to the detections selected for THIS window, never every
+    outbox row for the symbol/session.
 
-    One detection fans out to many outbox rows (the ops channel plus each
-    subscriber). One delivered and one failed is NOT a delivery, and it is
-    not a failure either — it is a partial, and the report says so with
-    counts rather than picking a side."""
+    Recipient granularity is preserved: one detection fans out to the ops
+    channel plus each subscriber, so one delivered and one failed is
+    neither a delivery nor a failure. Latency from event-time is reported
+    as data -- a delivery four hours late must look different from a
+    prompt one, and the product defines no 'timely' threshold for this
+    tool to invent."""
     if users is None:
         return Finding("delivery", "users.db not available", NOT_INSTRUMENTED)
     if journal is None:
         return Finding("delivery", "journal.db not available — cannot resolve detection ids",
                        NOT_INSTRUMENTED)
-    dets = _q(journal, "SELECT id FROM detections WHERE symbol = ? AND session = ?", (symbol, session)) or []
-    if not dets:
-        return Finding("delivery", "no detection to deliver", DIRECT_ROW)
+    inside, _all_rows = _in_window_detections(journal, symbol, session, window)
+    if inside is None:
+        return Finding("delivery", "detections table not present", NOT_INSTRUMENTED)
+    if not inside:
+        return Finding("delivery", "no in-window detection to deliver", DIRECT_ROW)
 
-    lines, totals = [], {}
-    for (det_id,) in dets:
-        rows = _q(users, "SELECT status, COUNT(*) FROM outbox WHERE alert_id = ? GROUP BY status", (det_id,))
+    lines, totals, latencies = [], {}, []
+    for det_id, *_rest in inside:
+        rows = _q(users,
+                  "SELECT status, delivered_at FROM outbox WHERE alert_id = ? ORDER BY id", (det_id,))
         if rows is None:
             return Finding("delivery", "outbox table not present in users.db", NOT_INSTRUMENTED)
         if not rows:
             lines.append(f"{det_id}: no outbox rows (no recipients enqueued)")
             continue
-        per = ", ".join(f"{s}={n}" for s, n in sorted(rows))
-        lines.append(f"{det_id}: {per}")
-        for s, n in rows:
-            totals[s] = totals.get(s, 0) + n
+        per = {}
+        for status, delivered_at in rows:
+            per[status] = per.get(status, 0) + 1
+            totals[status] = totals.get(status, 0) + 1
+            when = _parse_ts(delivered_at)
+            if when is not None:
+                latencies.append((when - window.event_time).total_seconds() / 60.0)
+        lines.append(f"{det_id}: " + ", ".join(f"{s}={n}" for s, n in sorted(per.items())))
+
+    if latencies:
+        lines.append(
+            f"delivery_latency_from_event_time: min={min(latencies):+.0f}m "
+            f"max={max(latencies):+.0f}m (reported as data — this tool defines no "
+            f"'timely' threshold)")
 
     if not totals:
-        return Finding("delivery", "no outbox rows for any detection this session", DIRECT_ROW, lines=lines)
+        return Finding("delivery", "no outbox rows for any in-window detection", DIRECT_ROW,
+                       lines=lines)
 
     delivered = totals.get("delivered", 0)
-    other = sum(n for s, n in totals.items() if s != "delivered")
-    summary = ", ".join(f"{s}={n}" for s, n in sorted(totals.items()))
+    other = sum(n for st, n in totals.items() if st != "delivered")
+    summary = ", ".join(f"{st}={n}" for st, n in sorted(totals.items()))
     if delivered and not other:
         return Finding("delivery", f"delivered to every recipient ({summary})", DIRECT_ROW,
                        verdict=ALERTED, lines=lines)
@@ -484,8 +609,8 @@ def _delivery_finding(users, journal, symbol, session) -> Finding:
         return Finding(
             "delivery", f"PARTIAL delivery ({summary})", DIRECT_ROW,
             verdict=ALERT_PARTIALLY_DELIVERED, explains_miss=True,
-            lines=lines + ["Some recipients received it and some did not — "
-                           "reported as counts rather than collapsed into a single state."])
+            lines=lines + ["Some recipients received it and some did not — reported as counts "
+                           "rather than collapsed into a single state."])
     return Finding("delivery", f"enqueued but never delivered ({summary})", DIRECT_ROW,
                    verdict=ALERT_NOT_DELIVERED, explains_miss=True, lines=lines)
 
@@ -495,88 +620,161 @@ def _delivery_finding(users, journal, symbol, session) -> Finding:
 # --------------------------------------------------------------------------
 
 
+def session_timeline(universe, evaluations, journal, users, symbol, session) -> list[str]:
+    """Everything recorded about this symbol on this session, in
+    chronological order — the only honest output when no event-time was
+    supplied. Timestamps are shown as stored, with the store named, so a
+    reader can see for themselves that a 14:31 delivery has nothing to do
+    with a 10:35 move."""
+    events: list[tuple[str, str]] = []
+
+    for tick_utc, outcome, score, rank in (_q(
+        universe,
+        "SELECT t.tick_utc, e.outcome, e.screen_score, e.rank FROM screening_events e "
+        "JOIN screening_ticks t ON t.tick_id = e.tick_id WHERE e.symbol = ? AND t.session = ?",
+        (symbol, session)) or []):
+        detail = f" score={score:.3f} rank={rank}" if score is not None else ""
+        events.append((tick_utc, f"stage1   {outcome}{detail}"))
+
+    for bar_ts, outcome, run_id, run_mode in (_q(
+        evaluations,
+        "SELECT b.bar_ts_utc, b.outcome, s.run_id, s.run_mode FROM bar_evaluations b "
+        "JOIN evaluation_sessions s ON s.eval_session_id = b.eval_session_id "
+        "WHERE s.symbol = ? AND s.session = ?",
+        (symbol, session)) or []):
+        decidable = _decision_time(bar_ts)
+        events.append((decidable.isoformat() if decidable else bar_ts,
+                       f"stage2   {outcome} (bar opened {bar_ts}, decidable at close) "
+                       f"run={run_id[:8]}/{run_mode}"))
+
+    detection_ids = []
+    for det_id, ts_utc, score, tier, alerted in (_q(
+        journal,
+        "SELECT id, ts_utc, score, tier, alerted FROM detections WHERE symbol = ? AND session = ?",
+        (symbol, session)) or []):
+        detection_ids.append(det_id)
+        events.append((ts_utc, f"decision detection {det_id} score={score} tier={tier} "
+                               f"alerted={bool(alerted)}"))
+
+    for det_id in detection_ids:
+        for status, delivered_at, created_at in (_q(
+            users, "SELECT status, delivered_at, created_at FROM outbox WHERE alert_id = ?",
+            (det_id,)) or []):
+            events.append((delivered_at or created_at, f"delivery {status} for {det_id}"))
+
+    return [f"  {when}  {what}" for when, what in sorted(events, key=lambda e: e[0] or "")]
+
+
 def build_report(*, symbol, session, move_pct=None, universe=None, evaluations=None,
-                 journal=None, users=None, run_id=None) -> MissReport:
+                 journal=None, users=None, run_id=None, window: EventWindow | None = None) -> MissReport:
+    """window=None means no --event-time was supplied.
+
+    In that case the tool prints the timeline and REFUSES to name a
+    failure point. A session can contain a quiet tick, a near-miss, a
+    promotion, a miss, a detection and a delivery, and any session-wide
+    verdict would be answering a question the operator did not ask. That
+    refusal is the same discipline applied to a broken invariant and to
+    the promoted/no-evaluation ambiguity."""
     findings: list[Finding] = []
+
+    if window is None:
+        timeline = session_timeline(universe, evaluations, journal, users, symbol, session)
+        findings.append(Finding(
+            "timeline", "no --event-time supplied — cannot scope a verdict to the move",
+            NOT_INSTRUMENTED, verdict=INCONCLUSIVE_NO_EVENT_TIME,
+            lines=(timeline or ["nothing recorded for this symbol on this session"])))
+        return MissReport(
+            symbol=symbol, session=session, move_pct=move_pct, findings=findings,
+            verdict=INCONCLUSIVE_NO_EVENT_TIME, conclusion_evidence=NOT_INSTRUMENTED,
+            conclusion=("No verdict: --event-time was not supplied, so no stage can be scoped to "
+                        "the move. A session-wide answer would be able to report ALERTED for a "
+                        "move that was actually missed hours earlier. Re-run with --event-time."),
+            stores=_stores(universe, evaluations, journal, users), window=None)
 
     universe_finding = _universe_finding(universe, symbol)
     findings.append(universe_finding)
     if universe_finding.explains_miss:
-        return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users)
+        return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users, window)
 
-    in_watchlist = symbol in WATCHLIST
-    if in_watchlist:
-        findings.append(Finding(
+    if symbol in WATCHLIST:
+        stage1 = Finding(
             "stage1", f"{symbol} is on the fixed WATCHLIST — Stage 1 screening does not apply",
             DIRECT_ROW,
             lines=["run_live scans WATCHLIST + whatever Stage 1 promoted, so a watchlist symbol "
-                   "reaches Stage 2 regardless of the screen and has no screening rows by design."]))
-        stage1 = findings[-1]
+                   "reaches Stage 2 regardless of the screen and has no screening rows by design."])
+        findings.append(stage1)
     else:
-        stage1 = _screening_finding(universe, symbol, session)
+        stage1 = _screening_finding(universe, symbol, session, window)
         findings.append(stage1)
         if stage1.explains_miss:
-            return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users)
+            return _finish(symbol, session, move_pct, findings, universe, evaluations, journal,
+                           users, window)
 
-    stage2 = _evaluation_findings(evaluations, symbol, session, run_id)
+    stage2 = _evaluation_findings(evaluations, symbol, session, run_id, window)
     gap = _promotion_gap_finding(stage1, stage2)
     if gap is not None:
         findings.append(gap)
         findings.extend(stage2)
-        return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users)
+        return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users, window)
     findings.extend(stage2)
 
-    decision = _decision_findings(journal, symbol, session)
-    findings.extend(decision)
-    findings.append(_delivery_finding(users, journal, symbol, session))
-    return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users)
+    findings.extend(_decision_findings(journal, symbol, session, window))
+    findings.append(_delivery_finding(users, journal, symbol, session, window))
+    return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users, window)
 
 
-def _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users) -> MissReport:
+def _stores(universe, evaluations, journal, users) -> dict:
+    return {"universe.db": universe is not None, "evaluations.db": evaluations is not None,
+            "journal.db": journal is not None, "users.db": users is not None}
+
+
+def _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users,
+            window) -> MissReport:
     explaining = [f for f in findings if f.explains_miss]
     if explaining:
         first = explaining[0]
         verdict = first.verdict or INCONCLUSIVE
-        run_scoped = first.stage.startswith("stage2[")
         conclusion = f"The first explainable failure point was {first.stage.upper()}: {first.summary}."
-        if run_scoped:
+        if first.stage.startswith("stage2["):
             conclusion += " (scoped to that run — other runs are reported separately above.)"
         evidence = first.evidence
     elif any(f.verdict == ALERTED for f in findings):
         verdict, evidence = ALERTED, DIRECT_ROW
-        conclusion = "No failure point: this symbol was detected, alerted and delivered."
+        conclusion = ("No failure point inside the event window: this move was detected, alerted "
+                      "and delivered. See the delivery latency above for how promptly.")
     else:
         verdict, evidence = INCONCLUSIVE, NOT_INSTRUMENTED
-        conclusion = ("No stage explains the miss from recorded data. This is an INCONCLUSIVE "
-                      "result, not a clean bill of health.")
+        conclusion = ("No stage explains the miss from recorded data inside the event window. "
+                      "This is an INCONCLUSIVE result, not a clean bill of health.")
     return MissReport(
-        symbol=symbol, session=session, move_pct=move_pct, findings=findings,
-        verdict=verdict, conclusion=conclusion, conclusion_evidence=evidence,
-        stores={"universe.db": universe is not None, "evaluations.db": evaluations is not None,
-                "journal.db": journal is not None, "users.db": users is not None},
-    )
+        symbol=symbol, session=session, move_pct=move_pct, findings=findings, verdict=verdict,
+        conclusion=conclusion, conclusion_evidence=evidence,
+        stores=_stores(universe, evaluations, journal, users), window=window)
 
 
 def render(report: MissReport) -> str:
     out = ["=" * 78, f"MISS REPORT — {report.symbol}, {report.session}", "=" * 78]
-    move = f"{report.move_pct:+.2f}% (supplied by operator — Perch does not retain price history " \
-           f"for most symbols)" if report.move_pct is not None else "not supplied"
-    out += [f"Move: {move}", ""]
-    out.append("Stores: " + ", ".join(
-        f"{name} {'OK' if ok else 'ABSENT'}" for name, ok in report.stores.items()))
-    out.append("")
+    move = (f"{report.move_pct:+.2f}% (supplied by operator — Perch does not retain price history "
+            f"for most symbols)") if report.move_pct is not None else "not supplied"
+    out.append(f"Move: {move}")
+    if report.window is not None:
+        out.append(f"Event window: {report.window.event_time.isoformat()} "
+                   f"+{report.window.minutes}m (forward — Perch can only act on bars that closed "
+                   f"at or after the move became visible)")
+    else:
+        out.append("Event window: NONE — no --event-time supplied")
+    out += ["", "Stores: " + ", ".join(
+        f"{name} {'OK' if ok else 'ABSENT'}" for name, ok in report.stores.items()), ""]
 
     for f in report.findings:
         marker = "**" if f.explains_miss else "  "
         out.append(f"{marker} [{f.stage}] {f.summary}")
         out.append(f"     evidence: {f.evidence}" + (f"   verdict: {f.verdict}" if f.verdict else ""))
-        for line in f.lines:
-            out.append(f"     {line}")
+        out += [f"     {line}" for line in f.lines]
         out.append("")
 
     out += ["-" * 78, f"VERDICT: {report.verdict}", f"EVIDENCE: {report.conclusion_evidence}",
             "", report.conclusion, "", "-" * 78, "KNOWN LIMITATIONS (always shown):"]
-    for lim in LIMITATIONS:
-        out.append(f"  - {lim}")
+    out += [f"  - {lim}" for lim in LIMITATIONS]
     out.append("=" * 78)
     return "\n".join(out)

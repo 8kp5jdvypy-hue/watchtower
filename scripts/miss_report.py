@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,6 +40,27 @@ from tradebot.telegram_bot.db import DEFAULT_DB_PATH as USERS_DB
 from tradebot.universe import DEFAULT_DB_PATH as UNIVERSE_DB
 
 
+def _parse_event_time(raw: str, session: str):
+    """HH:MM on --session, or a full ISO timestamp.
+
+    A bare HH:MM is treated as UTC, matching every timestamp in every
+    store (bar_ts_utc, ts_utc, tick_utc, delivered_at are all UTC). A
+    full ISO value carrying its own offset is honoured as given; one
+    without an offset is assumed UTC for the same reason."""
+    raw = raw.strip()
+    try:
+        parsed = time.fromisoformat(raw)
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        return datetime.combine(date.fromisoformat(session), parsed, tzinfo=timezone.utc)
+    try:
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -49,6 +70,18 @@ def main(argv=None) -> int:
         "--move-pct", type=float, default=None,
         help="the move you observed, e.g. 9.2 -- operator-supplied and labelled as such, "
              "because Perch does not retain price history for most symbols",
+    )
+    parser.add_argument(
+        "--event-time", default=None,
+        help="when the move mattered: HH:MM (interpreted in UTC on --session) or a full ISO "
+             "timestamp. WITHOUT this the tool prints the session timeline and refuses to name a "
+             "failure point -- a session-wide verdict can report ALERTED for a move that was "
+             "actually missed hours earlier",
+    )
+    parser.add_argument(
+        "--window-minutes", type=int, default=60,
+        help="how long Perch had to react, forward from --event-time (default 60). Forward, not "
+             "symmetric: Perch can only act on bars that closed at or after the move became visible",
     )
     parser.add_argument(
         "--run-id", default=None,
@@ -71,6 +104,16 @@ def main(argv=None) -> int:
     if not symbol:
         parser.error("--symbol must not be empty")
 
+    window = None
+    if args.event_time:
+        event_time = _parse_event_time(args.event_time, args.session)
+        if event_time is None:
+            parser.error(f"--event-time must be HH:MM or a full ISO timestamp, "
+                         f"got {args.event_time!r}")
+        if args.window_minutes <= 0:
+            parser.error("--window-minutes must be positive")
+        window = miss_report.EventWindow(event_time=event_time, minutes=args.window_minutes)
+
     stores = {
         "universe": miss_report.open_readonly(args.universe_db or UNIVERSE_DB),
         "evaluations": miss_report.open_readonly(args.evaluations_db or EVALUATIONS_DB),
@@ -83,7 +126,7 @@ def main(argv=None) -> int:
 
     report = miss_report.build_report(
         symbol=symbol, session=args.session, move_pct=args.move_pct,
-        run_id=args.run_id, **stores,
+        run_id=args.run_id, window=window, **stores,
     )
     print(miss_report.render(report))
     for conn in stores.values():
