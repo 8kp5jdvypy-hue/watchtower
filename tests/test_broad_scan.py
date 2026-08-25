@@ -4,6 +4,7 @@ detectors.py) evaluation runs."""
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 
 from tradebot import metrics
 from tradebot.broad_scan import (
@@ -17,6 +18,7 @@ from tradebot.broad_scan import (
     run_stage1_screen,
     screen_snapshot,
 )
+from tradebot.detectors import Bar
 
 
 def _snapshot(symbol="TEST", open_=100.0, high=100.5, low=99.5, close=100.0, prior_close=100.0, volume=1000, avg_volume=1000) -> Snapshot:
@@ -69,6 +71,23 @@ def test_multiple_confirming_checks_score_higher_than_one_alone():
 def test_reasons_are_ordered_strongest_first():
     result = screen_snapshot(_snapshot(volume=RVOL_THRESHOLD * 5000, close=103.1, prior_close=100.0))
     assert result.reasons[0] == "unusual_volume"
+
+
+def test_live_snapshot_requires_a_daily_bar_from_the_requested_session():
+    from tradebot.broad_scan import build_snapshots_from_daily_bars
+
+    def bars(symbol, last_day):
+        return [
+            Bar(symbol, datetime(2026, 8, day, 13, 30, tzinfo=timezone.utc), 100, 101, 99, 100, 1000)
+            for day in range(last_day - 5, last_day + 1)
+        ]
+
+    snapshots = build_snapshots_from_daily_bars(
+        {"CURRENT": bars("CURRENT", 25), "STALE": bars("STALE", 22)},
+        session_date=date(2026, 8, 25),
+    )
+
+    assert [snapshot.symbol for snapshot in snapshots] == ["CURRENT"]
 
 
 # ---------------------------------------------------------------------- #

@@ -2608,6 +2608,59 @@ def test_run_broad_scan_respects_the_promotion_limit():
     assert promoted == ["SYM4", "SYM3"]  # strongest first
 
 
+def test_run_broad_scan_never_promotes_a_prior_session_daily_bar():
+    from tradebot import universe as universe_mod
+    from tradebot.broad_scan import OUTCOME_PROMOTED, OUTCOME_STALE_SESSION_BAR, RVOL_THRESHOLD
+    from tradebot.marketdata import AssetInfo
+
+    universe_conn = universe_mod.connect(":memory:")
+    symbols = ["CURRENT", "STALE"]
+    universe_mod.refresh_universe(
+        universe_conn,
+        lambda: [AssetInfo(s, "NASDAQ", s, True, True, None, ()) for s in symbols],
+        datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+
+    def spike_bars(symbol, last_day):
+        bars = [
+            Bar(symbol, datetime(2026, 8, day, 13, 30, tzinfo=timezone.utc), 100, 101, 99, 100, 1000)
+            for day in range(last_day - 5, last_day)
+        ]
+        bars.append(Bar(
+            symbol, datetime(2026, 8, last_day, 13, 30, tzinfo=timezone.utc),
+            100, 101, 99, 100, int(RVOL_THRESHOLD * 1000),
+        ))
+        return bars
+
+    promoted = runner_mod.run_broad_scan(
+        universe_conn,
+        fetch_bars_fn=lambda requested, lookback: {
+            "CURRENT": spike_bars("CURRENT", 25),
+            "STALE": spike_bars("STALE", 22),
+        },
+        session_date=date(2026, 8, 25),
+        tick_utc=datetime(2026, 8, 25, 13, 35, tzinfo=timezone.utc),
+    )
+
+    assert promoted == ["CURRENT"]
+    outcomes = dict(universe_conn.execute(
+        "SELECT symbol, outcome FROM screening_events"
+    ).fetchall())
+    assert outcomes == {"CURRENT": OUTCOME_PROMOTED, "STALE": OUTCOME_STALE_SESSION_BAR}
+
+
+def test_broad_scan_waits_for_first_rth_bar_close_then_runs_on_cadence():
+    session_open = datetime(2026, 8, 25, 13, 30, tzinfo=timezone.utc)
+
+    assert not runner_mod._broad_scan_due(session_open - timedelta(hours=1), session_open, None)
+    assert not runner_mod._broad_scan_due(session_open, session_open, None)
+    assert not runner_mod._broad_scan_due(session_open + timedelta(minutes=4, seconds=59), session_open, None)
+    first_scan = session_open + timedelta(minutes=5)
+    assert runner_mod._broad_scan_due(first_scan, session_open, None)
+    assert not runner_mod._broad_scan_due(first_scan + timedelta(minutes=29), session_open, first_scan)
+    assert runner_mod._broad_scan_due(first_scan + timedelta(minutes=30), session_open, first_scan)
+
+
 def test_run_broad_scan_shadow_counts_satisfy_the_conservation_invariant(caplog):
     """Decision Ledger measurement gate: one symbol in each of the five
     mutually-exclusive Stage-1 outcomes (missing from the vendor
