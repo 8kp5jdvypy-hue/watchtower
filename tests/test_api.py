@@ -7,12 +7,14 @@ entitlements.py (already covered in their own test files).
 """
 from __future__ import annotations
 
+import io
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
-from tradebot import accounts
-from tradebot.api.app import create_app
+from tradebot import accounts, funnel_events, rate_limit
+from tradebot.api.app import MAX_REQUEST_BODY_BYTES, create_app
 from tradebot.detectors import Detection
 from tradebot.email_sender import DevEmailSender
 from tradebot.journal import CLOSE_MARK_OFFSET_MIN, write_cluster
@@ -71,6 +73,49 @@ def test_healthz():
     app = create_app(users_db_path=":memory:", journal_db_path=":memory:")
     client = app.test_client()
     assert client.get("/healthz").get_json() == {"ok": True}
+
+
+def test_caddy_and_flask_share_the_same_request_body_limit(app):
+    repo_root = Path(__file__).parents[1]
+    caddyfile = (repo_root / "Caddyfile").read_text(encoding="utf-8")
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    assert app.config["MAX_CONTENT_LENGTH"] == 64_000
+    assert "max_size 64KB" in caddyfile
+    assert "image: caddy:2.11.4-alpine" in compose
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/events", "text/plain"),
+        ("/client-errors", "text/plain"),
+        ("/auth/magic-link/request", "application/json"),
+        ("/auth/magic-link/verify", "application/json"),
+    ],
+)
+def test_public_body_readers_reject_oversized_requests(client, path, content_type):
+    response = client.post(path, data=b"x" * (MAX_REQUEST_BODY_BYTES + 1), content_type=content_type)
+    assert response.status_code == 413
+    assert response.get_json() == {"error": "request body too large"}
+    for table in ("rate_limit_counters", "funnel_events", "client_errors", "magic_link_tokens"):
+        assert client.application.users_conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_chunked_body_without_content_length_is_not_silently_truncated(client):
+    valid_prefix = b'{"event":"landing_view","anon_id":"chunked"}'
+    body = valid_prefix + b" " * (MAX_REQUEST_BODY_BYTES - len(valid_prefix)) + b"X"
+
+    response = client.open(
+        "/events",
+        method="POST",
+        input_stream=io.BytesIO(body),
+        content_type="text/plain",
+        environ_overrides={"CONTENT_LENGTH": "", "wsgi.input_terminated": True},
+    )
+
+    assert response.status_code == 413
+    assert response.get_json() == {"error": "request body too large"}
+    assert client.application.users_conn.execute("SELECT COUNT(*) FROM funnel_events").fetchone()[0] == 0
 
 
 def test_create_app_refuses_to_start_without_a_session_secret_key(monkeypatch):
@@ -811,6 +856,23 @@ def test_events_endpoint_silently_drops_writes_past_the_per_anon_limit(app, clie
     ).fetchone()[0] == limit
 
 
+def test_events_ip_denial_does_not_create_attacker_selected_bucket(app, client):
+    from tradebot.api import app as app_module
+
+    for _ in range(app_module._EVENTS_PER_IP[0]):
+        assert rate_limit.allow(
+            app.users_conn,
+            "events:ip:127.0.0.1",
+            *app_module._EVENTS_PER_IP,
+        ) is True
+
+    response = _post_event_beacon(client, {"event": "landing_view", "anon_id": "new-after-ip-cap"})
+    assert response.status_code == 204
+    assert app.users_conn.execute(
+        "SELECT COUNT(*) FROM rate_limit_counters WHERE bucket_key LIKE 'events:anon:%'"
+    ).fetchone()[0] == 0
+
+
 def test_magic_link_request_is_rate_limited_per_email(app, client):
     from tradebot.api import app as app_module
 
@@ -824,6 +886,52 @@ def test_magic_link_request_is_rate_limited_per_email(app, client):
     # A *different* email is unaffected -- the limit is per-address, not global.
     other = client.post("/auth/magic-link/request", json={"email": "someone-else@example.com"})
     assert other.status_code == 202
+
+
+def test_magic_link_keeps_existing_raw_limiter_state_across_deploy(app, client):
+    from tradebot.api import app as app_module
+
+    for _ in range(app_module._MAGIC_LINK_PER_EMAIL[0]):
+        assert rate_limit.allow(
+            app.users_conn,
+            "magic_link:email:existing@example.com",
+            *app_module._MAGIC_LINK_PER_EMAIL,
+        ) is True
+
+    response = client.post("/auth/magic-link/request", json={"email": "existing@example.com"})
+    assert response.status_code == 429
+    assert app.users_conn.execute(
+        "SELECT COUNT(*) FROM magic_link_tokens WHERE email = 'existing@example.com'"
+    ).fetchone()[0] == 0
+
+
+def test_magic_link_ip_denial_does_not_create_attacker_selected_bucket(app, client):
+    from tradebot.api import app as app_module
+
+    for _ in range(app_module._MAGIC_LINK_PER_IP[0]):
+        assert rate_limit.allow(
+            app.users_conn,
+            "magic_link:ip:127.0.0.1",
+            *app_module._MAGIC_LINK_PER_IP,
+        ) is True
+
+    response = client.post("/auth/magic-link/request", json={"email": "new-after-cap@example.com"})
+    assert response.status_code == 429
+    assert app.users_conn.execute(
+        "SELECT COUNT(*) FROM rate_limit_counters WHERE bucket_key LIKE 'magic_link:email:%'"
+    ).fetchone()[0] == 0
+
+
+def test_attacker_selected_limiter_inputs_are_length_bounded(app, client):
+    assert _post_event_beacon(
+        client,
+        {"event": "landing_view", "anon_id": "a" * (funnel_events.MAX_ANON_ID_LEN + 1)},
+    ).status_code == 204
+    assert client.post(
+        "/auth/magic-link/request",
+        json={"email": f"{'a' * 250}@example.com"},
+    ).status_code == 400
+    assert app.users_conn.execute("SELECT COUNT(*) FROM rate_limit_counters").fetchone()[0] == 0
 
 
 def test_client_errors_endpoint_records_a_report(app, client):

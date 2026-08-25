@@ -98,7 +98,10 @@ services:
         max-file: "5"
 
   caddy:
-    image: caddy:2-alpine
+    # request_body in Caddyfile requires Caddy 2.10+; pin the validated
+    # production image so a cached pre-2.10 `caddy:2-alpine` cannot make
+    # the next deploy reject the configuration.
+    image: caddy:2.11.4-alpine
     restart: unless-stopped
     ports:
       - "80:80"

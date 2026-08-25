@@ -185,9 +185,9 @@ CREATE INDEX IF NOT EXISTS idx_funnel_events_event ON funnel_events(event, ts_ut
 
 -- Fixed-window rate limiting -- see tradebot.rate_limit. One row per
 -- (bucket_key, window_start); bucket_key encodes both what's being
--- limited and its scope, e.g. "magic_link:email:alice@example.com" or
--- "events:ip:203.0.113.4", so the same table serves every endpoint
--- that needs this without a schema change per endpoint.
+-- limited and its scope. Attacker-selected values are length-bounded
+-- before reaching this table, so the same schema safely serves every
+-- endpoint without a migration per limiter dimension.
 CREATE TABLE IF NOT EXISTS rate_limit_counters (
     bucket_key TEXT NOT NULL,
     window_start TEXT NOT NULL,
@@ -1476,4 +1476,3 @@ def journal_stats(conn: sqlite3.Connection, account_id: str) -> dict:
         "avg_win_cents": round(sum(wins) / len(wins)) if wins else None,
         "avg_loss_cents": round(sum(losses) / len(losses)) if losses else None,
     }
-

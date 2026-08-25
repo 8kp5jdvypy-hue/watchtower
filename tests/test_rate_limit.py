@@ -55,3 +55,24 @@ def test_old_windows_are_pruned(conn):
     rate_limit.allow(conn, "new", limit=1, window_seconds=60, now=datetime.now(timezone.utc))
     remaining = conn.execute("SELECT bucket_key FROM rate_limit_counters").fetchall()
     assert remaining == [("new",)]
+
+
+def test_allow_all_advances_every_bucket_together(conn):
+    now = datetime.now(timezone.utc)
+    buckets = [("ip", 2, 60), ("principal", 1, 60)]
+
+    assert rate_limit.allow_all(conn, buckets, now=now) is True
+    assert rate_limit.allow_all(conn, buckets, now=now) is False
+
+    rows = dict(conn.execute("SELECT bucket_key, count FROM rate_limit_counters").fetchall())
+    assert rows == {"ip": 1, "principal": 1}
+
+
+def test_allow_all_does_not_create_principal_state_after_ip_denial(conn):
+    now = datetime.now(timezone.utc)
+    assert rate_limit.allow(conn, "ip", limit=1, window_seconds=60, now=now) is True
+
+    assert rate_limit.allow_all(conn, [("ip", 1, 60), ("new-principal", 5, 60)], now=now) is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM rate_limit_counters WHERE bucket_key = 'new-principal'"
+    ).fetchone()[0] == 0

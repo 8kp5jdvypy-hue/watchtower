@@ -34,6 +34,7 @@ from functools import wraps
 
 from flask import Flask, g, jsonify, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.wrappers import Response as WerkzeugResponse
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,56 @@ DEFAULT_FRONTEND_URL = "https://app.perchmarkets.com"
 # bounds that blast radius while still being "stay signed in" for a
 # passwordless product where re-auth means waiting on another email.
 SESSION_LIFETIME_DAYS = 30
+# This API accepts only compact JSON/text beacon payloads and has no
+# upload endpoint. Keep this in lockstep with Caddyfile's 64KB outer
+# limit so oversized bodies are rejected both before proxying and when
+# gunicorn/Flask is reached directly.
+MAX_REQUEST_BODY_BYTES = 64_000
+MAX_EMAIL_LENGTH = 254
+
+
+class _RequestBodyLimitMiddleware:
+    """Bound even chunked WSGI bodies before Flask materializes them.
+
+    Werkzeug enforces ``MAX_CONTENT_LENGTH`` for declared lengths, but
+    a terminated stream without Content-Length can stop exactly at the
+    limit without probing for one more byte. Reading at most limit + 1
+    here distinguishes an oversized stream while keeping memory use
+    bounded, then restores an ordinary fixed-length stream for Flask.
+    """
+
+    def __init__(self, application, max_bytes: int):
+        self.application = application
+        self.max_bytes = max_bytes
+
+    def __call__(self, environ, start_response):
+        content_length = environ.get("CONTENT_LENGTH")
+        try:
+            declared_length = int(content_length) if content_length else None
+        except (TypeError, ValueError):
+            declared_length = None
+
+        if declared_length is not None and declared_length > self.max_bytes:
+            return self._too_large(environ, start_response)
+
+        if declared_length is None and environ.get("wsgi.input_terminated"):
+            body = environ["wsgi.input"].read(self.max_bytes + 1)
+            if len(body) > self.max_bytes:
+                return self._too_large(environ, start_response)
+            environ["wsgi.input"] = io.BytesIO(body)
+            environ["CONTENT_LENGTH"] = str(len(body))
+            environ.pop("wsgi.input_terminated", None)
+
+        return self.application(environ, start_response)
+
+    @staticmethod
+    def _too_large(environ, start_response):
+        response = WerkzeugResponse(
+            json.dumps({"error": "request body too large"}) + "\n",
+            status=413,
+            content_type="application/json",
+        )
+        return response(environ, start_response)
 
 # /performance ran two unbounded, uncached full-table queries on every
 # single request. A short TTL cache is a pragmatic fix, not a real
@@ -156,7 +207,10 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # limiting below apply to one shared bucket for everyone. x_for=1
     # trusts exactly one hop of X-Forwarded-For (the one Caddy itself
     # appends), not any earlier entry a client could forge.
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1)
+    app.wsgi_app = _RequestBodyLimitMiddleware(
+        ProxyFix(app.wsgi_app, x_for=1),
+        MAX_REQUEST_BODY_BYTES,
+    )
     # No insecure fallback here on purpose -- this key signs every
     # session cookie, and a hardcoded default sitting in a public repo
     # (this one is public on GitHub) is a full account-takeover waiting
@@ -179,6 +233,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # from app.perchmarkets.com.
     app.config["SESSION_COOKIE_DOMAIN"] = os.environ.get("SESSION_COOKIE_DOMAIN") or None
     app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=SESSION_LIFETIME_DAYS)
+    app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY_BYTES
 
     app.frontend_url = os.environ.get("FRONTEND_URL", DEFAULT_FRONTEND_URL)
     app.users_conn = users_db.connect(users_db_path) if users_db_path is not None else users_db.connect()
@@ -228,6 +283,10 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, DELETE, OPTIONS"
         return response
 
+    @app.errorhandler(413)
+    def request_body_too_large(_error):
+        return jsonify({"error": "request body too large"}), 413
+
     def login_required(view):
         @wraps(view)
         def wrapped(*args, **kwargs):
@@ -253,10 +312,11 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # works from both perchmarkets.com and app.perchmarkets.com
         # without extending `allowed_origins` above — and since the
         # client never reads the response (fire-and-forget), no
-        # Access-Control-Allow-Origin is needed here at all. Always
-        # answer 204 regardless of what was sent: a public,
-        # unauthenticated endpoint should never behave observably
-        # differently for a malformed request than a valid one.
+        # Access-Control-Allow-Origin is needed here at all. Bodies that
+        # pass the shared size ceiling always receive 204 regardless of
+        # content: a public endpoint should not distinguish malformed
+        # input from a valid event. Oversized bodies are the deliberate
+        # exception and receive 413 before this handler can buffer them.
         try:
             payload = json.loads(request.get_data(as_text=True) or "{}")
         except ValueError:
@@ -264,12 +324,18 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         if not isinstance(payload, dict):
             return "", 204
         anon_id = str(payload.get("anon_id") or "")
+        if not anon_id or len(anon_id) > funnel_events.MAX_ANON_ID_LEN:
+            return "", 204
         # Rate-limited the same silent way as everything else on this
         # route: over the limit looks identical to "recorded normally"
         # from the outside, just without the write.
-        if not rate_limit.allow(app.users_conn, f"events:anon:{anon_id}", *_EVENTS_PER_ANON):
-            return "", 204
-        if not rate_limit.allow(app.users_conn, f"events:ip:{request.remote_addr}", *_EVENTS_PER_IP):
+        if not rate_limit.allow_all(
+            app.users_conn,
+            [
+                (f"events:ip:{request.remote_addr}", *_EVENTS_PER_IP),
+                (f"events:anon:{anon_id}", *_EVENTS_PER_ANON),
+            ],
+        ):
             return "", 204
         props = payload.get("props")
         funnel_events.record_event(
@@ -283,10 +349,10 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
 
     @app.route("/client-errors", methods=["POST"])
     def report_client_error():
-        # Same sendBeacon/text-plain/always-204 shape as /events, for the
-        # same reasons (see that route's comment) -- and rate-limited by
-        # IP alone (no anon_id involved here) so a loop that throws on
-        # every render can't flood this table.
+        # Same sendBeacon/text-plain/204-after-size-admission shape as
+        # /events, for the same reasons (see that route's comment) --
+        # and rate-limited by IP alone (no anon_id involved here) so a
+        # loop that throws on every render can't flood this table.
         try:
             payload = json.loads(request.get_data(as_text=True) or "{}")
         except ValueError:
@@ -309,7 +375,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     def request_magic_link():
         data = request.get_json(silent=True) or {}
         email = (data.get("email") or "").strip().lower()
-        if not email or "@" not in email:
+        if not email or len(email) > MAX_EMAIL_LENGTH or "@" not in email:
             return jsonify({"error": "a valid email is required"}), 400
         now = datetime.now(timezone.utc)
         # Two separate limits: per-email caps how many times any one
@@ -320,9 +386,14 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # the same 429 either way -- nothing here reveals which limit
         # was hit, since that alone would leak whether this email has
         # been requested before.
-        if not rate_limit.allow(app.users_conn, f"magic_link:email:{email}", *_MAGIC_LINK_PER_EMAIL, now=now):
-            return jsonify({"error": "too many requests, try again shortly"}), 429
-        if not rate_limit.allow(app.users_conn, f"magic_link:ip:{request.remote_addr}", *_MAGIC_LINK_PER_IP, now=now):
+        if not rate_limit.allow_all(
+            app.users_conn,
+            [
+                (f"magic_link:ip:{request.remote_addr}", *_MAGIC_LINK_PER_IP),
+                (f"magic_link:email:{email}", *_MAGIC_LINK_PER_EMAIL),
+            ],
+            now=now,
+        ):
             return jsonify({"error": "too many requests, try again shortly"}), 429
         token = accounts.create_magic_link_token(app.users_conn, email, now)
         # Points at the frontend's own confirmation screen

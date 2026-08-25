@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from typing import Sequence
 
 # Counter rows are tiny and self-limiting in number (one per active
 # bucket_key per window), but nothing deletes an old window on its own
@@ -33,31 +34,51 @@ def _window_start(now: datetime, window_seconds: int) -> str:
     return datetime.fromtimestamp(floored, tz=timezone.utc).isoformat()
 
 
-def allow(conn: sqlite3.Connection, key: str, limit: int, window_seconds: int, now: datetime | None = None) -> bool:
-    """Returns True and records this call if `key` is under `limit`
-    calls within the current `window_seconds`-wide window; returns
-    False (and still doesn't record it) once the limit is hit. Callers
-    decide what "not allowed" means for their endpoint -- this never
-    raises and never distinguishes "limit hit" from any other reason
-    to say no, on purpose."""
+def allow_all(
+    conn: sqlite3.Connection,
+    buckets: Sequence[tuple[str, int, int]],
+    now: datetime | None = None,
+) -> bool:
+    """Atomically admits and records every ``(key, limit, window)``.
+
+    A request governed by both a principal and an IP limit must never
+    leave one durable counter behind when the other limit denies it.
+    ``BEGIN IMMEDIATE`` serializes the read/check/write transition
+    across gunicorn workers; either every bucket advances once or none
+    does. Pruning still commits on a denial, matching ``allow``'s
+    historical retention behavior.
+    """
     now = now or datetime.now(timezone.utc)
     cutoff = (now - _RETENTION).isoformat()
-    conn.execute("DELETE FROM rate_limit_counters WHERE window_start < ?", (cutoff,))
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM rate_limit_counters WHERE window_start < ?", (cutoff,))
+        active_buckets = []
+        for key, limit, window_seconds in buckets:
+            window_start = _window_start(now, window_seconds)
+            row = conn.execute(
+                "SELECT count FROM rate_limit_counters WHERE bucket_key = ? AND window_start = ?",
+                (key, window_start),
+            ).fetchone()
+            count = row[0] if row else 0
+            if count >= limit:
+                conn.commit()  # keep the prune above even when denying
+                return False
+            active_buckets.append((key, window_start))
 
-    window_start = _window_start(now, window_seconds)
-    row = conn.execute(
-        "SELECT count FROM rate_limit_counters WHERE bucket_key = ? AND window_start = ?",
-        (key, window_start),
-    ).fetchone()
-    count = row[0] if row else 0
-    if count >= limit:
-        conn.commit()  # keep the prune above even when denying
-        return False
+        for key, window_start in active_buckets:
+            conn.execute(
+                "INSERT INTO rate_limit_counters (bucket_key, window_start, count) VALUES (?, ?, 1) "
+                "ON CONFLICT(bucket_key, window_start) DO UPDATE SET count = count + 1",
+                (key, window_start),
+            )
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
 
-    conn.execute(
-        "INSERT INTO rate_limit_counters (bucket_key, window_start, count) VALUES (?, ?, 1) "
-        "ON CONFLICT(bucket_key, window_start) DO UPDATE SET count = count + 1",
-        (key, window_start),
-    )
-    conn.commit()
-    return True
+
+def allow(conn: sqlite3.Connection, key: str, limit: int, window_seconds: int, now: datetime | None = None) -> bool:
+    """Single-bucket convenience wrapper around :func:`allow_all`."""
+    return allow_all(conn, [(key, limit, window_seconds)], now=now)

@@ -5,5 +5,10 @@
 # challenge and terminate TLS itself, instead of Cloudflare terminating
 # it first.
 api.perchmarkets.com {
-    reverse_proxy api:8000
+	# Reject oversized bodies before they reach either gunicorn worker.
+	# Must match tradebot.api.app.MAX_REQUEST_BODY_BYTES.
+	request_body {
+		max_size 64KB
+	}
+	reverse_proxy api:8000
 }
