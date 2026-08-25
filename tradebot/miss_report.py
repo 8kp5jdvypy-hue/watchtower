@@ -598,16 +598,36 @@ def _decision_findings(journal, symbol, session, window: EventWindow) -> list[Fi
                     "no outbox row links back to this detection.",
                 ]))
         elif not alerted:
-            # tier=high, alerted=0, and nothing recorded why.
-            findings.append(Finding(
-                "decision", f"tier={tier} but never marked alerted, and nothing records why",
-                NOT_INSTRUMENTED, verdict=HIGH_NOT_ALERTED_UNEXPLAINED, explains_miss=True,
-                lines=lines + [
+            # tier=high with alerted=0. Whether anything explains it depends
+            # on the ledger: an event-window downgrade leaves detections.tier
+            # at the true score-based 'high' (that column is ground truth and
+            # is deliberately never rewritten by routing), so a downgraded
+            # HIGH arrives here with its explanation sitting in
+            # decision_events. Asserting "nothing records why" while those
+            # rows print directly above would contradict the report's own
+            # evidence.
+            has_ledger = any(line.lstrip().startswith("ledger:") for line in lines)
+            if has_ledger:
+                tail = [
+                    "No suppress_reason and no suppress_category — but the decision ledger "
+                    "rows above DO record how this was routed (an event-window downgrade "
+                    "leaves detections.tier at 'high' while routing it as medium). Read "
+                    "those rows for the reason.",
+                ]
+            else:
+                tail = [
                     "No suppress_reason, no suppress_category, and no ledger row explains "
                     "this. A HIGH that neither alerted nor recorded a reason is anomalous, "
                     "not a normal route — it is reported as unexplained rather than "
                     "labelled a suppression the data does not evidence.",
-                ]))
+                ]
+            findings.append(Finding(
+                "decision",
+                f"tier={tier} but never marked alerted"
+                + ("" if has_ledger else ", and nothing records why"),
+                DIRECT_ROW if has_ledger else NOT_INSTRUMENTED,
+                verdict=HIGH_NOT_ALERTED_UNEXPLAINED, explains_miss=True,
+                lines=lines + tail))
         else:
             findings.append(Finding("decision", f"alerted (tier={tier})", DIRECT_ROW, lines=lines))
     return findings

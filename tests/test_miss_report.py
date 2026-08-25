@@ -1323,3 +1323,46 @@ def test_medium_and_unexplained_high_are_different_verdicts(tmp_path):
     assert med.verdict == mr.ROUTED_TO_DIGEST
     assert high.verdict == mr.HIGH_NOT_ALERTED_UNEXPLAINED
 
+
+def test_a_downgraded_high_does_not_claim_nothing_records_why(tmp_path):
+    """An event-window downgrade leaves detections.tier at the true
+    score-based 'high' (that column is ground truth and routing never
+    rewrites it), so a downgraded HIGH reaches the not-alerted branch with
+    its explanation sitting in decision_events. Claiming "nothing records
+    why" while those rows print directly above would contradict the
+    report's own evidence."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(
+        tmp_path, event, score=HIGH_SCORE, alerted=False,
+        ledger=[("event_window_routing", "DOWNGRADE_HIGH_TO_MEDIUM", "earnings"),
+                ("alert_routing", "queued_for_hourly_digest", "alert_budget")])
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.HIGH_NOT_ALERTED_UNEXPLAINED  # still not ROUTED_TO_DIGEST
+    assert "nothing records why" not in text                  # the false claim is gone
+    assert "DOWNGRADE_HIGH_TO_MEDIUM" in text                 # the ledger is shown
+    assert "Read those rows for the reason" in text
+    assert report.conclusion_evidence == mr.DIRECT_ROW
+
+
+def test_a_high_with_no_ledger_still_says_nothing_records_why(tmp_path):
+    """The genuinely unexplained case keeps its stronger wording."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=HIGH_SCORE, alerted=False)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.HIGH_NOT_ALERTED_UNEXPLAINED
+    assert "nothing records why" in text
+    assert "anomalous" in text
+    assert report.conclusion_evidence == mr.NOT_INSTRUMENTED
+
