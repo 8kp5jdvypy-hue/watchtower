@@ -397,7 +397,7 @@ def test_partial_delivery_is_never_collapsed(tmp_path):
                      journal=jpath, users=upath)
     text = mr.render(report)
 
-    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED
+    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED_IN_WINDOW
     assert "delivered=1" in text and "failed=1" in text
 
 
@@ -409,7 +409,7 @@ def test_alert_not_delivered(tmp_path):
                      evaluations=_evaluations(tmp_path, [("DETECTED", {"tier": "high"})]),
                      journal=jpath, users=upath)
 
-    assert report.verdict == mr.ALERT_NOT_DELIVERED
+    assert report.verdict == mr.ALERT_NOT_DELIVERED_IN_WINDOW
 
 
 def test_fully_delivered_reports_no_failure_point(tmp_path):
@@ -420,8 +420,8 @@ def test_fully_delivered_reports_no_failure_point(tmp_path):
                      evaluations=_evaluations(tmp_path, [("DETECTED", {"tier": "high"})]),
                      journal=jpath, users=upath)
 
-    assert report.verdict == mr.ALERTED
-    assert "No failure point" in report.conclusion
+    assert report.verdict == mr.ALERTED_IN_WINDOW
+    assert "No pipeline failure identified within the selected window." in report.conclusion
 
 
 # ---------------------------------------------------------------------------
@@ -637,8 +637,9 @@ def test_regression_a_1035_move_is_not_exonerated_by_a_1430_alert(tmp_path):
                      window=mr.EventWindow(event_time=T(10, 35), minutes=60))
     text = mr.render(report)
 
-    assert report.verdict != mr.ALERTED
+    assert report.verdict != mr.ALERTED_IN_WINDOW
     assert "No failure point" not in text
+    assert "this move was detected" not in text
     # The governing tick at 10:35 is 10:30 -- the near-miss, not the 11:00 promotion.
     assert report.verdict == mr.CANDIDATE_NOT_PROMOTED
     assert "rank=27" in text
@@ -653,7 +654,7 @@ def test_regression_a_the_same_symbol_at_1430_does_see_the_detection(tmp_path):
     report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
                      window=mr.EventWindow(event_time=T(14, 30), minutes=60))
 
-    assert report.verdict == mr.ALERTED
+    assert report.verdict == mr.ALERTED_IN_WINDOW
     assert "delivery_latency_from_event_time" in mr.render(report)
 
 
@@ -726,7 +727,7 @@ def test_regression_f_no_event_time_refuses_a_verdict(tmp_path):
     text = mr.render(report)
 
     assert report.verdict == mr.INCONCLUSIVE_NO_EVENT_TIME
-    for banned in (mr.ALERTED, mr.NO_DETECTION, mr.CANDIDATE_NOT_PROMOTED, mr.SCREENED_QUIET):
+    for banned in (mr.ALERTED_IN_WINDOW, mr.NO_DETECTION, mr.CANDIDATE_NOT_PROMOTED, mr.SCREENED_QUIET):
         assert report.verdict != banned
     assert "first explainable failure point" not in text
     assert "Event window: NONE" in text
@@ -750,7 +751,7 @@ def test_regression_g_delivery_is_event_scoped_with_latency(tmp_path):
                      window=mr.EventWindow(event_time=T(10, 35), minutes=60))
     text = mr.render(report)
 
-    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED
+    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED_IN_WINDOW
     assert "delivered=1" in text and "failed=1" in text
     assert "delivery_latency_from_event_time: min=+5m" in text
     assert "cannot exonerate this move" in text  # the 15:00 detection is context only
@@ -874,3 +875,231 @@ def test_cli_without_event_time_returns_the_timeline(tmp_path, capsys):
     assert code == 0
     assert "INCONCLUSIVE_NO_EVENT_TIME" in out
     assert "Re-run with --event-time" in out
+
+
+# ===========================================================================
+# SUCCESS-SIDE SEMANTICS — scope in the name, latency as data, no timeliness
+# ===========================================================================
+
+
+def _alerted_at(tmp_path, event_time, detection_offset_min, *, delivery_offset_min=None,
+                statuses=("delivered",)):
+    """Promoted, detected and delivered `detection_offset_min` after the
+    event. Returns the four store paths."""
+    detect_at = event_time + timedelta(minutes=detection_offset_min)
+    upath = _multi_tick_universe(tmp_path, [(event_time - timedelta(minutes=35),
+                                             [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(detect_at - timedelta(minutes=mr.BAR_MINUTES), "DETECTED",
+                              {"kinds": "gap", "tier": "high"})])
+    jpath, det_id = _detection_at(tmp_path, detect_at)
+    delivered = (event_time + timedelta(minutes=delivery_offset_min)
+                 if delivery_offset_min is not None else detect_at)
+    ppath = _delivery(tmp_path, det_id,
+                      [(st, delivered if st == "delivered" else None) for st in statuses])
+    return upath, epath, jpath, ppath
+
+
+@pytest.mark.parametrize("offset", [2, 58])
+def test_a_prompt_and_a_late_in_window_alert_are_the_same_verdict(tmp_path, offset):
+    """Case A: +2m and +58m both land inside a 60m window and both get
+    ALERTED_IN_WINDOW. Neither is called timely, caught, or a success —
+    the tool has no threshold that could justify the distinction."""
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, offset)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.ALERTED_IN_WINDOW
+    # Flat bans are unambiguous CLAIMS only. "timely" itself appears in the
+    # mandated disclaimer, so it is checked per-line below instead.
+    for banned in ("caught the move", "this move was detected", "No failure point",
+                   "successfully"):
+        assert banned not in text, f"overclaiming language present: {banned!r}"
+    # "timely" may appear ONLY inside a disclaimer that denies encoding it.
+    for line in text.splitlines():
+        if "timely" in line:
+            assert any(marker in line for marker in
+                       ("not encoded by this tool", "does not judge", "defines no")), \
+                f"unqualified timeliness claim: {line!r}"
+    assert "No pipeline failure identified within the selected window." in text
+    assert "not encoded by this tool" in text
+
+
+def test_the_verdict_token_itself_carries_the_window_scope(tmp_path):
+    """The token is what gets grepped and quoted out of context."""
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 5)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict.endswith("_IN_WINDOW")
+
+
+def test_detection_latency_is_surfaced_explicitly(tmp_path):
+    """Case B: it was missing before — delivery latency was reported and
+    detection latency was not."""
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 12, delivery_offset_min=20)
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    assert "detection_latency_from_event_time = +12m" in text
+
+
+def test_detection_and_delivery_latency_stay_separate(tmp_path):
+    """Case C: they measure different things — Perch's responsiveness vs
+    the outbox worker's."""
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 12, delivery_offset_min=40)
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    assert "detection_latency_from_event_time = +12m" in text
+    assert "delivery_latency_from_event_time=+40m" in text
+
+
+def test_the_timing_block_carries_every_required_field(tmp_path):
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 5)
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    for field in ("event_time", "selected_window", "detection_time",
+                  "detection_latency_from_event_time", "delivery_time",
+                  "delivery_latency_from_event_time"):
+        assert field in text, f"timing block missing {field}"
+    assert "reported as DATA" in text
+
+
+def test_recipients_are_listed_individually_not_collapsed(tmp_path):
+    """One delivered promptly and one never delivered must not read as a
+    single prompt delivery."""
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 5,
+                                             statuses=("delivered", "failed"))
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.ALERT_PARTIALLY_DELIVERED_IN_WINDOW
+    assert "status=delivered" in text
+    assert "status=failed" in text
+    assert "never delivered" in text
+
+
+# ---------------------------------------------------------------------------
+# Half-open window boundary
+# ---------------------------------------------------------------------------
+
+
+def test_an_event_exactly_at_the_window_end_is_excluded(tmp_path):
+    """Case D. [start, end) — the end is exclusive."""
+    window = mr.EventWindow(event_time=T(10, 35), minutes=60)
+
+    assert window.contains(T(10, 35)) is True    # start inclusive
+    assert window.contains(T(11, 34)) is True
+    assert window.contains(T(11, 35)) is False   # end exclusive
+
+
+def test_the_same_event_belongs_to_the_next_adjacent_window(tmp_path):
+    """Case E: no double-counting across adjacent investigations, which
+    would inflate any aggregate over many reports."""
+    first = mr.EventWindow(event_time=T(10, 35), minutes=60)   # [10:35, 11:35)
+    second = mr.EventWindow(event_time=T(11, 35), minutes=60)  # [11:35, 12:35)
+    edge = T(11, 35)
+
+    assert first.contains(edge) is False
+    assert second.contains(edge) is True
+    assert not (first.contains(edge) and second.contains(edge))
+
+
+def test_a_bar_decidable_exactly_at_the_window_end_is_excluded(tmp_path):
+    """The boundary rule applied through decision-time normalization: a
+    bar OPENING at 11:30 is decidable at 11:35, which is the exclusive
+    end."""
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _bars(tmp_path, [(T(11, 30), "NO_DETECTION", {"atr14": 3.0})])
+
+    report = _report(universe=upath, evaluations=epath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+
+    assert report.verdict == mr.NO_EVALUATION  # the 11:35-decidable bar is out
+    assert "no bar was evaluated inside the event window" in mr.render(report)
+
+
+def test_the_report_states_the_half_open_window(tmp_path):
+    event = T(10, 35)
+    upath, epath, jpath, ppath = _alerted_at(tmp_path, event, 5)
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    assert "end EXCLUSIVE" in text
+
+
+# ---------------------------------------------------------------------------
+# The preserved protections, re-pinned after the rename
+# ---------------------------------------------------------------------------
+
+
+def test_1035_regression_survives_the_rename(tmp_path):
+    """Case F."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=T(10, 35), minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.CANDIDATE_NOT_PROMOTED
+    assert report.verdict != mr.ALERTED_IN_WINDOW
+    assert "governing tick 2026-08-24T10:30" in text
+
+
+def test_1430_regression_reports_latency_without_judging_it(tmp_path):
+    """Case G."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=T(14, 30), minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.ALERTED_IN_WINDOW
+    assert "detection_latency_from_event_time" in text
+    assert "delivery_latency_from_event_time" in text
+    # The tool states the latency and explicitly declines to grade it.
+    assert "not encoded by this tool" in text
+    assert "caught the move" not in text
+    for line in text.splitlines():
+        if "timely" in line:
+            assert any(marker in line for marker in
+                       ("not encoded by this tool", "does not judge", "defines no")), \
+                f"unqualified timeliness claim: {line!r}"
+
+
+def test_no_event_time_still_refuses_after_the_rename(tmp_path):
+    """Case H."""
+    upath, epath, jpath, ppath = _full_timeline(tmp_path)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath, window=None)
+
+    assert report.verdict == mr.INCONCLUSIVE_NO_EVENT_TIME
+    assert report.verdict != mr.ALERTED_IN_WINDOW
+
+
+def test_no_timing_block_without_an_in_window_detection(tmp_path):
+    """The block is about in-window detections; there is nothing to time
+    when there are none."""
+    upath = _multi_tick_universe(tmp_path, [(T(10, 30), [("CANDIDATE_NOT_PROMOTED", 4.1, 27)])])
+
+    text = mr.render(_report(universe=upath,
+                             window=mr.EventWindow(event_time=T(10, 35), minutes=60)))
+
+    assert "detection_latency_from_event_time" not in text
+

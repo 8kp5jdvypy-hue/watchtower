@@ -75,9 +75,17 @@ DETECTOR_ERROR = "DETECTOR_ERROR"
 EVALUATION_ERROR = "EVALUATION_ERROR"
 SUB_THRESHOLD = "SUB_THRESHOLD"
 SUPPRESSED = "SUPPRESSED"
-ALERT_NOT_DELIVERED = "ALERT_NOT_DELIVERED"
-ALERT_PARTIALLY_DELIVERED = "ALERT_PARTIALLY_DELIVERED"
-ALERTED = "ALERTED"
+# Success-side verdicts carry their scope IN THE NAME. The verdict token
+# is what gets grepped, aggregated and quoted out of context, and a bare
+# "ALERTED" will be read as "Perch caught it" by anyone who did not also
+# read the window line. These say only what the data supports: something
+# was surfaced inside the window the operator chose. Whether that was
+# soon enough to count as catching the move is a product judgement this
+# tool does not have and must not imply.
+DETECTED_IN_WINDOW = "DETECTED_IN_WINDOW"
+ALERT_NOT_DELIVERED_IN_WINDOW = "ALERT_NOT_DELIVERED_IN_WINDOW"
+ALERT_PARTIALLY_DELIVERED_IN_WINDOW = "ALERT_PARTIALLY_DELIVERED_IN_WINDOW"
+ALERTED_IN_WINDOW = "ALERTED_IN_WINDOW"
 INCONCLUSIVE = "INCONCLUSIVE"
 # No --event-time was supplied. The tool prints the session timeline and
 # refuses to name a failure point: a symbol can be quiet at 10:00, a
@@ -121,7 +129,20 @@ class EventWindow:
         return self.event_time + timedelta(minutes=self.minutes)
 
     def contains(self, when: datetime | None) -> bool:
-        return when is not None and self.event_time <= when <= self.end
+        """HALF-OPEN: [event_time, event_time + minutes).
+
+        Start inclusive, end EXCLUSIVE. Inclusive-both-ends put an event
+        landing exactly on the boundary inside two adjacent windows at
+        once, so aggregating investigations ("how many misses were
+        CANDIDATE_NOT_PROMOTED last month?") would count it twice. On a
+        5-minute grid boundary events are common, not rare.
+
+        The start stays inclusive because that is the load-bearing end:
+        the bar decidable AT event-time is the first one Perch could have
+        acted on. Consequence to read literally: --window-minutes 60
+        means the twelve bars decidable in the hour BEGINNING at
+        event-time, not thirteen."""
+        return when is not None and self.event_time <= when < self.end
 
     def label(self, when: datetime | None) -> str:
         """Downstream events are labelled by their offset, so a reader can
@@ -429,6 +450,7 @@ def _one_run_finding(run_id, run_mode, evaluation_version, rows, window: EventWi
     if detected:
         return Finding(
             stage, f"{len(detected)} in-window bar(s) produced a detection", DIRECT_ROW,
+            verdict=DETECTED_IN_WINDOW,
             lines=header + [f"first at {detected[0][0]}{window.label(_decision_time(detected[0][0]))} "
                             f"kinds={detected[0][5]} score={detected[0][6]} tier={detected[0][7]}"])
 
@@ -604,15 +626,15 @@ def _delivery_finding(users, journal, symbol, session, window: EventWindow) -> F
     summary = ", ".join(f"{st}={n}" for st, n in sorted(totals.items()))
     if delivered and not other:
         return Finding("delivery", f"delivered to every recipient ({summary})", DIRECT_ROW,
-                       verdict=ALERTED, lines=lines)
+                       verdict=ALERTED_IN_WINDOW, lines=lines)
     if delivered and other:
         return Finding(
             "delivery", f"PARTIAL delivery ({summary})", DIRECT_ROW,
-            verdict=ALERT_PARTIALLY_DELIVERED, explains_miss=True,
+            verdict=ALERT_PARTIALLY_DELIVERED_IN_WINDOW, explains_miss=True,
             lines=lines + ["Some recipients received it and some did not — reported as counts "
                            "rather than collapsed into a single state."])
     return Finding("delivery", f"enqueued but never delivered ({summary})", DIRECT_ROW,
-                   verdict=ALERT_NOT_DELIVERED, explains_miss=True, lines=lines)
+                   verdict=ALERT_NOT_DELIVERED_IN_WINDOW, explains_miss=True, lines=lines)
 
 
 # --------------------------------------------------------------------------
@@ -663,6 +685,66 @@ def session_timeline(universe, evaluations, journal, users, symbol, session) -> 
             events.append((delivered_at or created_at, f"delivery {status} for {det_id}"))
 
     return [f"  {when}  {what}" for when, what in sorted(events, key=lambda e: e[0] or "")]
+
+
+def _timing_finding(journal, users, symbol, session, window: EventWindow) -> Finding | None:
+    """Every timestamp and latency for the in-window detections, in one
+    place.
+
+    Detection latency matters more than delivery latency and was the one
+    missing from the report: it is where Perch's own responsiveness
+    lives, while delivery latency mostly reflects the outbox worker.
+    Reporting only the second made the first look unmeasured.
+
+    Recipients are listed INDIVIDUALLY, each with its own status and
+    time. A min/max roll-up alone would let "one delivered promptly, one
+    never delivered" read as a single prompt delivery, which is the same
+    collapsing the partial-delivery verdict exists to prevent.
+
+    Every number here is DATA. This tool encodes no timeliness
+    threshold, so nothing in this block is labelled timely or late."""
+    if journal is None or window is None:
+        return None
+    inside, _all_rows = _in_window_detections(journal, symbol, session, window)
+    if not inside:
+        return None
+
+    lines = [
+        f"event_time                          = {window.event_time.isoformat()}",
+        f"selected_window                     = [{window.event_time.isoformat()}, "
+        f"{window.end.isoformat()})  (+{window.minutes}m, start inclusive, end EXCLUSIVE)",
+    ]
+    for det_id, ts_utc, *_rest in inside:
+        detected_at = _parse_ts(ts_utc)
+        lines.append(f"detection {det_id}")
+        lines.append(f"  detection_time                    = {ts_utc}")
+        if detected_at is not None:
+            latency = (detected_at - window.event_time).total_seconds() / 60.0
+            lines.append(f"  detection_latency_from_event_time = {latency:+.0f}m")
+        else:
+            lines.append("  detection_latency_from_event_time = unparseable timestamp")
+
+        rows = _q(users, "SELECT chat_id, status, delivered_at FROM outbox WHERE alert_id = ? "
+                         "ORDER BY id", (det_id,)) if users is not None else None
+        if rows is None:
+            lines.append("  delivery_time                     = NOT INSTRUMENTED (users.db unavailable)")
+            continue
+        if not rows:
+            lines.append("  delivery_time                     = no recipients enqueued")
+            continue
+        for chat_id, status, delivered_at in rows:
+            when = _parse_ts(delivered_at)
+            if when is None:
+                lines.append(f"  recipient {chat_id}: status={status}  delivery_time=none "
+                             f"(never delivered)  delivery_latency_from_event_time=n/a")
+            else:
+                delivery_latency = (when - window.event_time).total_seconds() / 60.0
+                lines.append(f"  recipient {chat_id}: status={status}  delivery_time={delivered_at}"
+                             f"  delivery_latency_from_event_time={delivery_latency:+.0f}m")
+
+    lines.append("All latencies above are reported as DATA. This tool encodes no timeliness "
+                 "threshold and does not judge any of them timely or late.")
+    return Finding("timing", "in-window timing and latency", DIRECT_ROW, lines=lines)
 
 
 def build_report(*, symbol, session, move_pct=None, universe=None, evaluations=None,
@@ -720,6 +802,9 @@ def build_report(*, symbol, session, move_pct=None, universe=None, evaluations=N
 
     findings.extend(_decision_findings(journal, symbol, session, window))
     findings.append(_delivery_finding(users, journal, symbol, session, window))
+    timing = _timing_finding(journal, users, symbol, session, window)
+    if timing is not None:
+        findings.append(timing)
     return _finish(symbol, session, move_pct, findings, universe, evaluations, journal, users, window)
 
 
@@ -738,10 +823,12 @@ def _finish(symbol, session, move_pct, findings, universe, evaluations, journal,
         if first.stage.startswith("stage2["):
             conclusion += " (scoped to that run — other runs are reported separately above.)"
         evidence = first.evidence
-    elif any(f.verdict == ALERTED for f in findings):
-        verdict, evidence = ALERTED, DIRECT_ROW
-        conclusion = ("No failure point inside the event window: this move was detected, alerted "
-                      "and delivered. See the delivery latency above for how promptly.")
+    elif any(f.verdict == ALERTED_IN_WINDOW for f in findings):
+        verdict, evidence = ALERTED_IN_WINDOW, DIRECT_ROW
+        conclusion = (
+            "No pipeline failure identified within the selected window.\n"
+            "Perch surfaced this symbol within the selected investigation window. Whether that "
+            "latency was timely enough to count as catching the move is not encoded by this tool.")
     else:
         verdict, evidence = INCONCLUSIVE, NOT_INSTRUMENTED
         conclusion = ("No stage explains the miss from recorded data inside the event window. "
