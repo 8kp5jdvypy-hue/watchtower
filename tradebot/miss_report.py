@@ -75,6 +75,18 @@ DETECTOR_ERROR = "DETECTOR_ERROR"
 EVALUATION_ERROR = "EVALUATION_ERROR"
 SUB_THRESHOLD = "SUB_THRESHOLD"
 SUPPRESSED = "SUPPRESSED"
+# A MEDIUM cluster that was never individually alerted is NOT suppressed --
+# that is the designed route. AlertBudget.evaluate appends every
+# tier=="medium" cluster to the hourly digest queue and returns
+# QUEUED_FOR_DIGEST, and runner.process_new_bar writes suppress_reason
+# only for SUPPRESS_CAP/COOLDOWN/NEWS_BLACKOUT/DUPLICATE -- so a normal
+# medium row is alerted=0 with suppress_reason NULL, exactly like the
+# genuinely-unexplained case it must not be confused with.
+ROUTED_TO_DIGEST = "ROUTED_TO_DIGEST"
+# A HIGH with alerted=0 and no suppression evidence anywhere. Perch's own
+# records do not explain it, and it must stay visible as an anomaly rather
+# than be absorbed into a normal-looking bucket.
+HIGH_NOT_ALERTED_UNEXPLAINED = "HIGH_NOT_ALERTED_UNEXPLAINED"
 # Success-side verdicts carry their scope IN THE NAME. The verdict token
 # is what gets grepped, aggregated and quoted out of context, and a bare
 # "ALERTED" will be read as "Perch caught it" by anyone who did not also
@@ -558,15 +570,44 @@ def _decision_findings(journal, symbol, session, window: EventWindow) -> list[Fi
                 "decision", f"scored {score} — sub-threshold, journaled but never alertable",
                 DIRECT_ROW, verdict=SUB_THRESHOLD, explains_miss=True, lines=lines))
         elif suppress_reason:
+            # Real suppression, proven by the row itself. Checked BEFORE the
+            # tier rules so a medium that genuinely was suppressed still
+            # reports as suppressed.
             findings.append(Finding(
                 "decision", f"suppressed: {suppress_reason}", DIRECT_ROW,
                 verdict=SUPPRESSED, explains_miss=True,
                 lines=lines + [f"category={suppress_category}"]))
-        elif not alerted:
+        elif tier == "medium":
+            # The designed route, not a suppression. Evidence is DIRECT ROW
+            # when the ledger recorded queued_for_hourly_digest, and
+            # INFERRED from tier semantics otherwise -- a journal written
+            # before decision_events existed has no ledger row to quote.
+            queued = any("queued_for_hourly_digest" in line for line in lines)
             findings.append(Finding(
-                "decision", f"tier={tier} but never marked alerted", DIRECT_ROW,
-                verdict=SUPPRESSED, explains_miss=True,
-                lines=lines + ["no suppress_reason recorded — check the ledger rows above"]))
+                "decision",
+                "tier=medium — routed to the hourly digest, never individually alerted",
+                DIRECT_ROW if queued else INFERRED,
+                verdict=ROUTED_TO_DIGEST, explains_miss=True,
+                lines=lines + [
+                    "This is the designed path for MEDIUM, not a suppression: "
+                    "AlertBudget.evaluate queues every medium cluster for the hourly "
+                    "digest and returns QUEUED_FOR_DIGEST, and no suppress_reason is "
+                    "written for it.",
+                    "Whether the digest itself reached anyone is NOT provable here: "
+                    "send_medium_digest_if_due sends the digest with no alert_id, so "
+                    "no outbox row links back to this detection.",
+                ]))
+        elif not alerted:
+            # tier=high, alerted=0, and nothing recorded why.
+            findings.append(Finding(
+                "decision", f"tier={tier} but never marked alerted, and nothing records why",
+                NOT_INSTRUMENTED, verdict=HIGH_NOT_ALERTED_UNEXPLAINED, explains_miss=True,
+                lines=lines + [
+                    "No suppress_reason, no suppress_category, and no ledger row explains "
+                    "this. A HIGH that neither alerted nor recorded a reason is anomalous, "
+                    "not a normal route — it is reported as unexplained rather than "
+                    "labelled a suppression the data does not evidence.",
+                ]))
         else:
             findings.append(Finding("decision", f"alerted (tier={tier})", DIRECT_ROW, lines=lines))
     return findings

@@ -1103,3 +1103,223 @@ def test_no_timing_block_without_an_in_window_detection(tmp_path):
 
     assert "detection_latency_from_event_time" not in text
 
+
+# ===========================================================================
+# MEDIUM routing — a batched medium is not a suppression
+# ===========================================================================
+
+
+def _detection_tier(tmp_path, when, *, score, tier_forced=None, alerted=False,
+                    suppress=None, category=None, ledger=(), path=None):
+    """A detection whose tier follows from its score (tier_for_score), with
+    optional real suppression evidence."""
+    path = path or (tmp_path / "journal.db")
+    conn = journal_connect(path)
+    det_id = write_cluster(
+        conn, session=SESSION, symbol=SYMBOL, ts_utc=when.isoformat(), kinds="gap",
+        headlines="h", score=score, close=100.0, atr14=1.0, trend="up",
+        detections=[Detection(SYMBOL, "gap", when, score, "h", {})],
+        code_version_str="sha", alerted=alerted, suppress_reason=suppress)
+    if category:
+        conn.execute("UPDATE detections SET suppress_category=? WHERE id=?", (category, det_id))
+    for stage, decision, reason in ledger:
+        record_decision_event(conn, det_id, stage=stage, decision=decision, reason=reason)
+    conn.commit()
+    conn.close()
+    return path, det_id
+
+
+MEDIUM_SCORE = 2.5   # between TIER_MEDIUM (1.9) and TIER_HIGH (3.8)
+HIGH_SCORE = 9.0
+
+
+def _stage2_detected(tmp_path, event, name="ev_stage2.db"):
+    """An in-window DETECTED bar, so the funnel walk reaches the decision
+    stage instead of stopping at PROMOTED_NO_EVALUATION. A journaled
+    detection implies Stage 2 saw the bar, so this is the realistic
+    pairing, not a convenience."""
+    return _bars(tmp_path, [(event - timedelta(minutes=mr.BAR_MINUTES), "DETECTED",
+                             {"kinds": "gap", "tier": "high"})],
+                 path=tmp_path / name)
+
+
+def test_medium_tier_scores_really_are_medium():
+    """Guards the fixture: if the thresholds move, these tests must fail
+    loudly rather than silently exercise the wrong branch."""
+    from tradebot.detectors import tier_for_score
+
+    assert tier_for_score(MEDIUM_SCORE).value == "medium"
+    assert tier_for_score(HIGH_SCORE).value == "high"
+
+
+def test_a_normal_medium_is_not_reported_as_suppressed(tmp_path):
+    """THE defect. A medium with alerted=0 and no suppress_reason is the
+    designed digest route, not a suppression."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=MEDIUM_SCORE)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.ROUTED_TO_DIGEST
+    assert report.verdict != mr.SUPPRESSED
+    assert "suppressed" not in text.lower().replace("not a suppression", "")
+    assert "routed to the hourly digest" in text
+
+
+def test_a_normal_medium_says_it_is_the_designed_path(tmp_path):
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=MEDIUM_SCORE)
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    assert "designed path for MEDIUM" in text
+    assert "QUEUED_FOR_DIGEST" in text
+
+
+def test_a_medium_never_claims_the_digest_was_delivered(tmp_path):
+    """send_medium_digest_if_due sends with no alert_id, so no outbox row
+    links back to the detection. The report must not invent one."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, det_id = _detection_tier(tmp_path, event, score=MEDIUM_SCORE)
+    ppath = _delivery(tmp_path, det_id, [])  # users.db exists, no rows for it
+
+    text = mr.render(_report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                             window=mr.EventWindow(event_time=event, minutes=60)))
+
+    assert "NOT provable here" in text
+    assert "no alert_id" in text
+
+
+def test_a_medium_with_ledger_evidence_is_a_direct_row(tmp_path):
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(
+        tmp_path, event, score=MEDIUM_SCORE,
+        ledger=[("alert_routing", "queued_for_hourly_digest", "alert_budget")])
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.ROUTED_TO_DIGEST
+    assert report.conclusion_evidence == mr.DIRECT_ROW
+
+
+def test_a_medium_without_a_ledger_row_is_inferred_not_direct(tmp_path):
+    """A journal written before decision_events existed — like the real
+    replay-era one — has no row to quote, so the claim is INFERRED from
+    tier semantics and must say so."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=MEDIUM_SCORE)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.ROUTED_TO_DIGEST
+    assert report.conclusion_evidence == mr.INFERRED
+
+
+def test_a_genuinely_suppressed_medium_still_reports_suppressed(tmp_path):
+    """Real suppression evidence outranks the tier rule."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=MEDIUM_SCORE,
+                               suppress="news_blackout:8-K:material",
+                               category="news_blackout")
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.SUPPRESSED
+    assert report.verdict != mr.ROUTED_TO_DIGEST
+    assert "news_blackout" in mr.render(report)
+
+
+def test_a_high_that_never_alerted_stays_distinguishable_as_anomalous(tmp_path):
+    """Must not be silently absorbed into a normal-looking bucket."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=HIGH_SCORE, alerted=False)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+    text = mr.render(report)
+
+    assert report.verdict == mr.HIGH_NOT_ALERTED_UNEXPLAINED
+    assert report.verdict not in (mr.SUPPRESSED, mr.ROUTED_TO_DIGEST)
+    assert report.conclusion_evidence == mr.NOT_INSTRUMENTED
+    assert "anomalous" in text
+
+
+def test_a_genuinely_suppressed_high_still_reports_suppressed(tmp_path):
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=HIGH_SCORE,
+                               suppress="cooldown_active", category="budget_cooldown")
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.SUPPRESSED
+    assert "cooldown_active" in mr.render(report)
+
+
+def test_a_log_tier_detection_is_unchanged(tmp_path):
+    """The log branch is checked first and is untouched by this fix."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, _ = _detection_tier(tmp_path, event, score=1.0)
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.SUB_THRESHOLD
+
+
+def test_an_alerted_high_is_unchanged(tmp_path):
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    jpath, det_id = _detection_tier(tmp_path, event, score=HIGH_SCORE, alerted=True)
+    ppath = _delivery(tmp_path, det_id, [("delivered", event + timedelta(minutes=1))])
+
+    report = _report(universe=upath, evaluations=epath, journal=jpath, users=ppath,
+                     window=mr.EventWindow(event_time=event, minutes=60))
+
+    assert report.verdict == mr.ALERTED_IN_WINDOW
+
+
+def test_medium_and_unexplained_high_are_different_verdicts(tmp_path):
+    """Both have alerted=0 and no suppress_reason; conflating them was the
+    bug. They must not collapse back together."""
+    event = T(10, 35)
+    upath = _multi_tick_universe(tmp_path, [(T(10, 0), [("PROMOTED", 8.4, 3)])])
+    epath = _stage2_detected(tmp_path, event)
+    med_path, _ = _detection_tier(tmp_path, event, score=MEDIUM_SCORE,
+                                  path=tmp_path / "med.db")
+    high_path, _ = _detection_tier(tmp_path, event, score=HIGH_SCORE,
+                                   path=tmp_path / "high.db")
+    w = mr.EventWindow(event_time=event, minutes=60)
+
+    med = _report(universe=upath, evaluations=epath, journal=med_path, window=w)
+    high = _report(universe=upath, evaluations=epath, journal=high_path, window=w)
+
+    assert med.verdict != high.verdict
+    assert med.verdict == mr.ROUTED_TO_DIGEST
+    assert high.verdict == mr.HIGH_NOT_ALERTED_UNEXPLAINED
+
