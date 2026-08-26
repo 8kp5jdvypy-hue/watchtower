@@ -236,6 +236,32 @@ class AlertBudget:
             self._last_sent_by_key[(cluster.symbol, kind)] = now
         return Decision.SEND
 
+    def release_unsent(self, cluster: Cluster, decision: Decision) -> None:
+        """Undo evaluate()'s HIGH reservation when no alert was sent.
+
+        evaluate() reserves a daily-cap slot and per-kind cooldown before
+        the runner performs its quote/data-integrity validation.  A guard
+        rejection must not make an alert nobody received count as sent.
+        Only SEND creates a reservation; cap/cooldown/queue decisions are
+        deliberate no-ops here.
+
+        process_new_bar calls this synchronously for the same cluster, so
+        the most recent timestamp is the reservation being released.  The
+        timestamp equality guard keeps a future misuse from deleting a
+        newer reservation for the same key.
+        """
+        if decision != Decision.SEND or not self._high_sent_today:
+            return
+
+        reserved_at = self._high_sent_today[-1]
+        keys = [(cluster.symbol, kind) for kind in cluster.kinds.split(",")]
+        if not all(self._last_sent_by_key.get(key) == reserved_at for key in keys):
+            return
+
+        self._high_sent_today.pop()
+        for key in keys:
+            del self._last_sent_by_key[key]
+
     def pop_medium_digest_if_due(self) -> list[Cluster] | None:
         """Returns the accumulated medium-tier queue once per clock-hour
         boundary, or None if not due yet / nothing queued."""

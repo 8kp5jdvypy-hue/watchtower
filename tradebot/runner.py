@@ -985,6 +985,14 @@ def process_new_bar(
                 except Exception:
                     stats.errors.append(f"{symbol}: subscriber fan-out failed — {traceback.format_exc()}")
         else:
+            # AlertBudget reserves the HIGH daily-cap slot and cooldown
+            # when evaluate() returns SEND. The data guard runs afterward
+            # because it needs a fresh quote. A rejection means nothing
+            # was delivered, so release that reservation before handling
+            # the suppression; otherwise bad-data candidates can consume
+            # the entire cap and block later valid alerts (live-observed
+            # 2026-08-26: eight guarded HIGHs, one actual send, cap full).
+            budget.release_unsent(cluster, decision)
             rule_name = guard_reason.split(":", 1)[0]
             logger.error(
                 "alert suppressed by data guard: rule=%s symbol=%s detection_id=%s reason=%r "
