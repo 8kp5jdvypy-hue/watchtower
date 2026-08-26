@@ -13,7 +13,10 @@ import pytest
 
 from tradebot.detectors import Bar
 from tradebot.marketdata import (
+    LiveMarketData,
     ReplayMarketData,
+    _is_postmarket,
+    _is_rth,
     filter_plausible_sessions,
     implausible_session_reason,
     median_session_volume,
@@ -145,6 +148,66 @@ def test_premarket_bars_gated_by_the_same_cursor(tmp_path):
         md.advance()
     assert len(md.premarket_bars(SYMBOL, SESSION)) == 3
     assert len(md.session_bars(SYMBOL, SESSION)) == 3
+
+
+def test_postmarket_bars_are_gated_by_the_same_cursor(tmp_path):
+    rth_close_bar = datetime(2026, 6, 15, 19, 55, tzinfo=timezone.utc)
+    postmarket_open = datetime(2026, 6, 15, 20, 0, tzinfo=timezone.utc)
+    bars = [
+        _bar_row(rth_close_bar, price=100),
+        _bar_row(postmarket_open, price=108),
+        _bar_row(postmarket_open + timedelta(minutes=5), price=109),
+    ]
+    _write_intraday_csv(tmp_path, SYMBOL, SESSION, bars)
+    _write_daily_csv(tmp_path, SYMBOL, [_bar_row(rth_close_bar - timedelta(days=1), price=99)])
+
+    md = ReplayMarketData(tmp_path, SYMBOL, SESSION)
+    md.advance()
+    assert len(md.session_bars(SYMBOL, SESSION)) == 1
+    assert md.postmarket_bars(SYMBOL, SESSION) == ()
+
+    md.advance()
+    assert len(md.postmarket_bars(SYMBOL, SESSION)) == 1
+    md.advance()
+    assert len(md.postmarket_bars(SYMBOL, SESSION)) == 2
+
+
+def test_early_close_uses_real_xnys_close_for_rth_and_postmarket():
+    # 2026-11-27 closes at 13:00 ET (18:00 UTC). A 13:00 print is
+    # postmarket, not an extra three hours of fake RTH.
+    last_rth = Bar(SYMBOL, datetime(2026, 11, 27, 17, 55, tzinfo=timezone.utc), 100, 101, 99, 100, 1000)
+    first_post = Bar(SYMBOL, datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc), 101, 102, 100, 101, 1000)
+
+    assert _is_rth(last_rth) is True
+    assert _is_postmarket(last_rth) is False
+    assert _is_rth(first_post) is False
+    assert _is_postmarket(first_post) is True
+
+
+def test_live_intraday_snapshot_partitions_one_provider_call_without_freezing_future_reads(monkeypatch):
+    rth = Bar(SYMBOL, datetime(2026, 6, 15, 19, 55, tzinfo=timezone.utc), 100, 101, 99, 100, 1000)
+    post = Bar(SYMBOL, datetime(2026, 6, 15, 20, 0, tzinfo=timezone.utc), 110, 111, 109, 110, 2000)
+    calls = []
+
+    def _fetch(symbol, session_date):
+        calls.append((symbol, session_date))
+        return [rth, post]
+
+    monkeypatch.setattr("tradebot.vendors.alpaca.fetch_intraday_bars", _fetch)
+    market_data = LiveMarketData(SYMBOL, SESSION)
+
+    snapshot = market_data.intraday_snapshot(SYMBOL, SESSION)
+    assert snapshot.rth == (rth,)
+    assert snapshot.postmarket == (post,)
+    assert calls == [(SYMBOL, SESSION)]
+
+    # The ordinary live accessor still fetches afresh. Existing RTH runner
+    # instances live all day and must never freeze on the first snapshot.
+    assert market_data.session_bars(SYMBOL, SESSION) == (rth,)
+    assert len(calls) == 2
+
+    with pytest.raises(ValueError, match="scoped"):
+        market_data.intraday_snapshot(SYMBOL, date(2026, 6, 16))
 
 
 def test_daily_bars_not_gated_by_intraday_cursor(cache_dir):
