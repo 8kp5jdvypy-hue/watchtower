@@ -50,23 +50,28 @@ class EventWindow:
     severity: str
     source: str  # "sec_edgar" | "nasdaq_earnings" | "eia_schedule" | "manual"
     detail: str | None
+    event_date: date | None = None
+    event_timing: str | None = None
 
 
-_COLUMNS = "id, symbol, kind, start_utc, end_utc, severity, source, detail"
+_COLUMNS = "id, symbol, kind, start_utc, end_utc, severity, source, detail, event_date, event_timing"
 
 
 def _row_to_window(row) -> EventWindow:
-    id_, symbol, kind, start_utc, end_utc, severity, source, detail = row
+    id_, symbol, kind, start_utc, end_utc, severity, source, detail, event_date, event_timing = row
     return EventWindow(
         id=id_, symbol=symbol, kind=kind,
         start_utc=datetime.fromisoformat(start_utc), end_utc=datetime.fromisoformat(end_utc),
         severity=severity, source=source, detail=detail,
+        event_date=date.fromisoformat(event_date) if event_date else None,
+        event_timing=event_timing,
     )
 
 
 def add_event_window(
     conn, *, symbol: str | None, kind: str, start_utc: datetime, end_utc: datetime,
     severity: str, source: str, detail: str | None = None,
+    event_date: date | None = None, event_timing: str | None = None,
 ) -> int | None:
     """Idempotent — re-running the same ingestion (or the same manual
     seed) twice does not duplicate the row. Returns the new row id, or
@@ -76,10 +81,12 @@ def add_event_window(
     cur = conn.execute(
         """
         INSERT OR IGNORE INTO event_windows
-            (symbol, kind, start_utc, end_utc, severity, source, detail, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (symbol, kind, start_utc, end_utc, severity, source, detail,
+             event_date, event_timing, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (symbol, kind, start_utc.isoformat(), end_utc.isoformat(), severity, source, detail,
+         event_date.isoformat() if event_date else None, event_timing,
          datetime.now(timezone.utc).isoformat()),
     )
     conn.commit()
@@ -158,6 +165,29 @@ def has_earnings_before(conn, symbol: str, start_date, end_date) -> bool | None:
         (symbol, day_end.isoformat(), day_start.isoformat()),
     ).fetchone()
     return row is not None
+
+
+def scheduled_after_hours_earnings_symbols(conn, report_date: date) -> list[str]:
+    """Active-ledger symbols scheduled to report after this session.
+
+    Reads structured provider facts, never parses card copy. DISTINCT is
+    required because one earnings event intentionally creates two context
+    windows (report session and reaction session).
+    """
+    return [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM event_windows
+            WHERE kind = 'earnings' AND source = 'nasdaq_earnings'
+              AND event_date = ? AND event_timing = 'after-hours'
+              AND symbol IS NOT NULL
+            ORDER BY symbol
+            """,
+            (report_date.isoformat(),),
+        ).fetchall()
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -307,6 +337,7 @@ def ingest_earnings(conn, events: list, calendar) -> int:
             row_id = add_event_window(
                 conn, symbol=event.symbol, kind="earnings", start_utc=start, end_utc=end,
                 severity=severity, source="nasdaq_earnings", detail=detail,
+                event_date=event.report_date, event_timing=event.timing,
             )
             if row_id is not None:
                 created += 1

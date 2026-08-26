@@ -32,6 +32,7 @@ from tradebot.events import (
     seed_eia_event,
     seed_macro_event,
     session_window_for_date,
+    scheduled_after_hours_earnings_symbols,
 )
 from tradebot.journal import connect
 from tradebot.vendors.nasdaq_earnings import EarningsEvent
@@ -360,6 +361,23 @@ def test_ingest_earnings_creates_both_windows_and_gates_correctly():
 
     two_days_before = active_event_window(conn, "DDOG", datetime(2026, 8, 4, 15, 0, tzinfo=timezone.utc))
     assert two_days_before is None
+    assert scheduled_after_hours_earnings_symbols(conn, date(2026, 8, 6)) == []
+
+
+def test_after_hours_earnings_are_queryable_as_structured_candidates():
+    conn = _conn()
+    events = [
+        EarningsEvent(symbol="CRM", report_date=date(2026, 8, 26), timing="after-hours"),
+        EarningsEvent(symbol="CRWD", report_date=date(2026, 8, 26), timing="after-hours"),
+        EarningsEvent(symbol="BEFORE", report_date=date(2026, 8, 26), timing="pre-market"),
+    ]
+    ingest_earnings(conn, events, CALENDAR)
+
+    assert scheduled_after_hours_earnings_symbols(conn, date(2026, 8, 26)) == ["CRM", "CRWD"]
+    row = conn.execute(
+        "SELECT event_date, event_timing FROM event_windows WHERE symbol='CRM' LIMIT 1"
+    ).fetchone()
+    assert row == ("2026-08-26", "after-hours")
 
 
 def test_ingest_earnings_is_idempotent():
@@ -383,8 +401,26 @@ def test_connect_migrates_retired_earnings_suppression_to_context(tmp_path):
 
     migrated = connect(db_path)
     assert migrated.execute(
-        "SELECT severity FROM event_windows WHERE symbol = 'CRWD'"
-    ).fetchone()[0] == "context"
+        "SELECT severity, event_date, event_timing FROM event_windows WHERE symbol = 'CRWD'"
+    ).fetchone() == ("context", None, None)
+
+
+def test_connect_backfills_structured_fields_for_legacy_nasdaq_rows(tmp_path):
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    add_event_window(
+        conn, symbol="CRWD", kind="earnings",
+        start_utc=datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 8, 26, 20, 0, tzinfo=timezone.utc),
+        severity="context", source="nasdaq_earnings",
+        detail="CRWD earnings (after-hours), reported 2026-08-26",
+    )
+    conn.close()
+
+    migrated = connect(db_path)
+    assert migrated.execute(
+        "SELECT event_date, event_timing FROM event_windows WHERE symbol='CRWD'"
+    ).fetchone() == ("2026-08-26", "after-hours")
 
 
 def test_refresh_earnings_events_fetches_classifies_and_stores(monkeypatch):

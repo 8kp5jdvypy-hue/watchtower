@@ -139,6 +139,27 @@ evidence.
 8. **Remaining ranked reliability/trust work.** Close P1/P2 items above in
    small PRs while live-shadow evidence accumulates.
 
+## Implementation status
+
+- Slice 1, market-wide catalyst ledger: merged and deployed at `b39e4b5`.
+  The 2026-08-26 production ingestion matched 48 of 48 provider events to
+  the 13,091-symbol active universe, created 96 context windows, and an
+  immediate manual rerun proved idempotent (one successful run remained
+  one). CRM, CRWD, and OKTA all have structured after-hours ledger facts.
+- Slices 2–3, extended-hours contract and postmarket observer: implemented
+  on `feature/postmarket-shadow-observer`, pending review. The new process
+  is default-off (`POSTMARKET_SHADOW_ENABLED=0`), imports no delivery path,
+  writes a separate append-only shadow database, uses one SIP snapshot per
+  symbol/tick, observes actual XNYS closes including early-close sessions,
+  evaluates completed bars only, and records an explicit outcome for every
+  scheduled symbol including per-symbol fetch failures.
+- Slice 4, versioned truth set and replay: not complete. CRM/CRWD/OKTA in
+  the observer unit tests are tuning-shaped examples, not a holdout set and
+  not evidence for the activation gate.
+- Extended-hours customer alerts remain unimplemented and unauthorized.
+  The kill switch must remain off until the shadow acceptance gate below is
+  satisfied and the owner explicitly approves a separate routing release.
+
 ## Shadow acceptance gate
 
 Before any extended-hours customer alert is armed:
@@ -157,4 +178,3 @@ Before any extended-hours customer alert is armed:
 
 Precision, latency, and recall are reported together. No threshold is
 changed merely to make one missed screenshot pass.
-

@@ -208,6 +208,8 @@ CREATE TABLE IF NOT EXISTS event_windows (
     severity TEXT NOT NULL,
     source TEXT NOT NULL,
     detail TEXT,
+    event_date TEXT,
+    event_timing TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_event_windows_symbol_time ON event_windows(symbol, start_utc, end_utc);
@@ -365,6 +367,8 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.executescript(SCHEMA)
+    _add_column_if_missing(conn, "event_windows", "event_date", "TEXT")
+    _add_column_if_missing(conn, "event_windows", "event_timing", "TEXT")
     # Owner decision 2026-08-17 superseded the original earnings policy:
     # earnings are context and signal, never suppression/downgrade. Update
     # any windows written by an older build so a pre-existing row cannot
@@ -372,6 +376,26 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     conn.execute(
         "UPDATE event_windows SET severity = 'context' "
         "WHERE kind = 'earnings' AND source = 'nasdaq_earnings' AND severity != 'context'"
+    )
+    # Rows written by the catalyst-ledger release before these structured
+    # columns existed used one source-owned, deterministic detail shape.
+    # Backfill only that source and only NULLs; manual/other-provider text
+    # is not parsed or guessed.
+    conn.execute(
+        """
+        UPDATE event_windows
+        SET event_date = substr(detail, -10),
+            event_timing = CASE
+                WHEN instr(detail, '(pre-market)') > 0 THEN 'pre-market'
+                WHEN instr(detail, '(after-hours)') > 0 THEN 'after-hours'
+                WHEN instr(detail, '(unspecified)') > 0 THEN 'unspecified'
+                ELSE NULL
+            END
+        WHERE kind = 'earnings' AND source = 'nasdaq_earnings'
+          AND detail IS NOT NULL
+          AND instr(detail, '), reported ') > 0
+          AND (event_date IS NULL OR event_timing IS NULL)
+        """
     )
     conn.commit()
     _add_column_if_missing(conn, "detections", "no_trade", "INTEGER")

@@ -9,13 +9,17 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
+import exchange_calendars as ecals
+
 from tradebot.detectors import Bar
 
 ET = ZoneInfo("America/New_York")
+XNYS = ecals.get_calendar("XNYS")
 
 # Proposal 5c (docs/open-awareness-proposals-2026-08.md): a cached
 # session is implausible -- and must never join a baseline (rvol,
@@ -96,6 +100,15 @@ class AssetInfo:
     attributes: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class IntradaySessionBars:
+    """One provider snapshot partitioned by actual exchange session."""
+
+    premarket: tuple[Bar, ...]
+    rth: tuple[Bar, ...]
+    postmarket: tuple[Bar, ...]
+
+
 class MarketData(Protocol):
     def daily_bars(self, symbol: str, n: int) -> Sequence[Bar]:
         """The n most recent daily bars, oldest first."""
@@ -107,6 +120,14 @@ class MarketData(Protocol):
 
     def premarket_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
         """5-minute premarket (04:00-09:30 ET) bars for one session, oldest first."""
+        ...
+
+    def postmarket_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
+        """5-minute bars from the real XNYS close through 20:00 ET."""
+        ...
+
+    def intraday_snapshot(self, symbol: str, session_date: date) -> IntradaySessionBars:
+        """All session partitions derived from one provider snapshot."""
         ...
 
     def quote(self, symbol: str) -> Quote:
@@ -156,14 +177,46 @@ def write_bars_csv(path: Path, bars: list[Bar]) -> None:
             writer.writerow([b.ts.isoformat(), b.open, b.high, b.low, b.close, b.volume])
 
 
+@lru_cache(maxsize=512)
+def _session_bounds_utc(session_date: date) -> tuple[datetime, datetime] | None:
+    """Real XNYS bounds for a date, cached for bar-level predicates."""
+    if not XNYS.is_session(session_date):
+        return None
+    return (
+        XNYS.session_open(session_date).to_pydatetime().astimezone(timezone.utc),
+        XNYS.session_close(session_date).to_pydatetime().astimezone(timezone.utc),
+    )
+
+
 def _is_rth(bar: Bar) -> bool:
-    local = bar.ts.astimezone(ET)
-    return (9, 30) <= (local.hour, local.minute) < (16, 0)
+    """Whether a bar opens inside the actual XNYS session.
+
+    The old fixed ``09:30 <= t < 16:00`` rule mislabeled 13:00-16:00 ET
+    prints as RTH on early-close sessions. That corrupts both the session
+    close baseline and any postmarket reaction measured from it.
+    """
+    local_date = bar.ts.astimezone(ET).date()
+    bounds = _session_bounds_utc(local_date)
+    return bounds is not None and bounds[0] <= bar.ts < bounds[1]
 
 
 def _is_premarket(bar: Bar) -> bool:
     local = bar.ts.astimezone(ET)
-    return (4, 0) <= (local.hour, local.minute) < (9, 30)
+    bounds = _session_bounds_utc(local.date())
+    if bounds is None:
+        return False
+    premarket_open = local.replace(hour=4, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    return premarket_open <= bar.ts < bounds[0]
+
+
+def _is_postmarket(bar: Bar) -> bool:
+    """Whether a bar opens after the real close and before 20:00 ET."""
+    local = bar.ts.astimezone(ET)
+    bounds = _session_bounds_utc(local.date())
+    if bounds is None:
+        return False
+    postmarket_end = local.replace(hour=20, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    return bounds[1] <= bar.ts < postmarket_end
 
 
 def median_session_volume(session_totals: Sequence[float]) -> float | None:
@@ -258,7 +311,7 @@ class ReplayMarketData:
     bar by bar behind an internal cursor.
 
     This is the project's lookahead guard: session_bars() and
-    premarket_bars() only ever return bars revealed so far by advance().
+    premarket_bars()/postmarket_bars() only ever return bars revealed so far by advance().
     No caller — detector, replay harness, or anything else — can see a bar
     at or beyond the cursor, no matter what else is sitting in the cache
     file on disk.
@@ -314,6 +367,19 @@ class ReplayMarketData:
         self._check(symbol, session_date)
         return tuple(b for b in self._visible if _is_premarket(b))
 
+    def postmarket_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
+        self._check(symbol, session_date)
+        return tuple(b for b in self._visible if _is_postmarket(b))
+
+    def intraday_snapshot(self, symbol: str, session_date: date) -> IntradaySessionBars:
+        self._check(symbol, session_date)
+        visible = self._visible
+        return IntradaySessionBars(
+            premarket=tuple(b for b in visible if _is_premarket(b)),
+            rth=tuple(b for b in visible if _is_rth(b)),
+            postmarket=tuple(b for b in visible if _is_postmarket(b)),
+        )
+
     def quote(self, symbol: str) -> Quote:
         raise NotImplementedError("ReplayMarketData has no live quotes; use session_bars()")
 
@@ -351,9 +417,13 @@ class LiveMarketData:
         self.symbol = symbol
         self.session_date = session_date
 
-    def _check(self, symbol: str) -> None:
+    def _check(self, symbol: str, session_date: date | None = None) -> None:
         if symbol != self.symbol:
             raise ValueError(f"this LiveMarketData is scoped to {self.symbol}, not {symbol}")
+        if session_date is not None and session_date != self.session_date:
+            raise ValueError(
+                f"this LiveMarketData is scoped to {self.session_date}, not {session_date}"
+            )
 
     def daily_bars(self, symbol: str, n: int) -> Sequence[Bar]:
         from tradebot.vendors.alpaca import fetch_daily_bars
@@ -366,14 +436,38 @@ class LiveMarketData:
     def session_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
         from tradebot.vendors.alpaca import fetch_intraday_bars
 
-        self._check(symbol)
+        self._check(symbol, session_date)
         return tuple(b for b in fetch_intraday_bars(symbol, session_date) if _is_rth(b))
 
     def premarket_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
         from tradebot.vendors.alpaca import fetch_intraday_bars
 
-        self._check(symbol)
+        self._check(symbol, session_date)
         return tuple(b for b in fetch_intraday_bars(symbol, session_date) if _is_premarket(b))
+
+    def postmarket_bars(self, symbol: str, session_date: date) -> Sequence[Bar]:
+        from tradebot.vendors.alpaca import fetch_intraday_bars
+
+        self._check(symbol, session_date)
+        return tuple(b for b in fetch_intraday_bars(symbol, session_date) if _is_postmarket(b))
+
+    def intraday_snapshot(self, symbol: str, session_date: date) -> IntradaySessionBars:
+        """Fetch one session snapshot once per scoped MarketData object.
+
+        The postmarket observer needs both the official RTH close and the
+        extended-hours reaction. They must come from one provider snapshot:
+        two independent calls waste half the request budget and can observe
+        different revisions of the same five-minute bar.
+        """
+        from tradebot.vendors.alpaca import fetch_intraday_bars
+
+        self._check(symbol, session_date)
+        bars = tuple(fetch_intraday_bars(symbol, session_date))
+        return IntradaySessionBars(
+            premarket=tuple(b for b in bars if _is_premarket(b)),
+            rth=tuple(b for b in bars if _is_rth(b)),
+            postmarket=tuple(b for b in bars if _is_postmarket(b)),
+        )
 
     def quote(self, symbol: str) -> Quote:
         from tradebot.vendors.alpaca import fetch_latest_quote
