@@ -115,6 +115,58 @@ def test_cooldown_blocks_the_same_symbol_and_kind_within_the_window():
     assert budget.evaluate(_cluster(symbol="TSLA", kinds="gap", cid="e")) == Decision.SEND
 
 
+def test_releasing_guard_rejected_highs_preserves_cap_and_cooldown_for_real_sends():
+    """Eight HIGH candidates rejected after routing must not exhaust the
+    eight-alert cap, and a rejected symbol/kind must not start cooldown.
+    This is the exact production failure observed on 2026-08-26."""
+    clock = FakeClock(datetime(2026, 8, 26, 13, 35, tzinfo=timezone.utc))
+    budget = AlertBudget(now=clock, max_high_per_day=8, cooldown_minutes=45)
+
+    for i in range(8):
+        rejected = _cluster(symbol=f"BAD{i}", cid=f"bad{i}")
+        decision = budget.evaluate(rejected)
+        assert decision == Decision.SEND
+        budget.release_unsent(rejected, decision)
+
+    first_valid = _cluster(symbol="VALID", cid="valid")
+    assert budget.evaluate(first_valid) == Decision.SEND
+    assert len(budget._high_sent_today) == 1
+
+    rejected_same_key = _cluster(symbol="RETRY", kinds="gap", cid="retry1")
+    retry_decision = budget.evaluate(rejected_same_key)
+    assert retry_decision == Decision.SEND
+    budget.release_unsent(rejected_same_key, retry_decision)
+    assert budget.evaluate(_cluster(symbol="RETRY", kinds="gap", cid="retry2")) == Decision.SEND
+
+
+def test_releasing_a_cap_notice_does_not_refund_an_actual_prior_send():
+    clock = FakeClock(datetime(2026, 8, 26, 13, 35, tzinfo=timezone.utc))
+    budget = AlertBudget(now=clock, max_high_per_day=1)
+
+    sent = _cluster(symbol="SENT", cid="sent")
+    assert budget.evaluate(sent) == Decision.SEND
+    capped = _cluster(symbol="CAPPED", cid="capped")
+    decision = budget.evaluate(capped)
+    assert decision == Decision.CAP_REACHED_NOTICE
+
+    budget.release_unsent(capped, decision)
+
+    assert len(budget._high_sent_today) == 1
+    assert budget.evaluate(_cluster(symbol="STILL_CAPPED", cid="still-capped")) == Decision.SUPPRESS_CAP
+
+
+def test_release_refuses_to_remove_a_different_clusters_reservation():
+    clock = FakeClock(datetime(2026, 8, 26, 13, 35, tzinfo=timezone.utc))
+    budget = AlertBudget(now=clock)
+    sent = _cluster(symbol="ACTUAL", cid="actual")
+    assert budget.evaluate(sent) == Decision.SEND
+
+    budget.release_unsent(_cluster(symbol="OTHER", cid="other"), Decision.SEND)
+
+    assert len(budget._high_sent_today) == 1
+    assert budget.evaluate(_cluster(symbol="ACTUAL", cid="actual-2")) == Decision.SUPPRESS_COOLDOWN
+
+
 def test_medium_tier_is_queued_and_released_once_per_hour_boundary():
     clock = FakeClock(datetime(2026, 7, 23, 13, 5, tzinfo=timezone.utc))
     budget = AlertBudget(now=clock)

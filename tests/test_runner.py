@@ -1223,6 +1223,11 @@ def test_process_new_bar_guard_rejection_logs_error_and_emits_a_metric(monkeypat
     assert row[1].startswith("data_integrity_failed: crossed_quote")
     assert row[2] == "data_integrity"
 
+    # The guard ran after AlertBudget returned SEND, but no alert was
+    # delivered. Its provisional cap/cooldown reservation must be gone.
+    assert budget._high_sent_today == []
+    assert budget._last_sent_by_key == {}
+
     assert metrics_mod.read_all(metrics_path) == {
         "validator_rejection{rule=crossed_quote}": 1,
         "suppression{category=data_integrity}": 1,
