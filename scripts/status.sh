@@ -34,34 +34,12 @@ proc_line "caffeinate" "$DATA_DIR/caffeinate.pid" "caffeinate"
 
 echo ""
 echo "== heartbeat =="
-if [[ -f "$DATA_DIR/heartbeat.json" ]]; then
-  age_secs="$(python3 - "$DATA_DIR/heartbeat.json" <<'PY'
-import json, sys
-from datetime import datetime, timezone
-try:
-    with open(sys.argv[1]) as f:
-        ts = json.load(f)["ts_utc"]
-    dt = datetime.fromisoformat(ts)
-    print(int((datetime.now(timezone.utc) - dt).total_seconds()))
-except Exception as e:
-    print(f"ERR {e}")
-PY
-)"
-  if [[ "$age_secs" == ERR* ]]; then
-    echo "  unreadable: $age_secs"
-    RC=1
-  else
-    mins=$(( age_secs / 60 ))
-    printf "  last evaluation %ds ago (~%dm)\n" "$age_secs" "$mins"
-    # Only a fresh heartbeat matters during RTH; the runner writes it
-    # every bar. >~15m during a trading day means a stall.
-    if (( age_secs > 900 )); then
-      echo "  WARNING: heartbeat is stale (>15m) — scanner may be stalled or asleep."
-      RC=1
-    fi
-  fi
+if heartbeat_out="$(PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m tradebot.runner_health \
+  --heartbeat "$DATA_DIR/heartbeat.json" --max-age 900 2>&1)"; then
+  echo "  $heartbeat_out"
 else
-  echo "  no heartbeat.json yet"
+  echo "  WARNING: $heartbeat_out"
+  RC=1
 fi
 
 echo ""
