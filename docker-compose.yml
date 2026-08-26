@@ -60,15 +60,10 @@ services:
     depends_on:
       - worker
     healthcheck:
-      # Same staleness contract as scripts/status.sh: if the scanner
-      # hasn't written a heartbeat in 15 minutes, something's wrong.
-      # During market close the process exits on its own (see
-      # runner.py's run_live loop) — Docker will then restart it into a
-      # fast no-op idle state, not a crash loop, since run_live's own
-      # session-bounds check makes an off-hours start a quick return.
-      # maybe_send_session_open_messages guards the morning
-      # briefing/pre-open card against resending on that restart.
-      test: ["CMD", "python", "-c", "import json,sys,time; from datetime import datetime; d=json.load(open('data/heartbeat.json')); age=time.time()-datetime.fromisoformat(d['ts_utc']).timestamp(); sys.exit(0 if age < 900 else 1)"]
+      # The runner intentionally idles without writing heartbeats outside
+      # RTH. During an actual XNYS session, require a fresh evaluation;
+      # off-hours, Docker's process supervision is the liveness signal.
+      test: ["CMD", "python", "-m", "tradebot.runner_health", "--heartbeat", "data/heartbeat.json", "--max-age", "900"]
       interval: 5m
       timeout: 10s
       retries: 3
