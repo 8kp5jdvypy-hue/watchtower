@@ -217,6 +217,42 @@ CREATE INDEX IF NOT EXISTS idx_event_windows_symbol_time ON event_windows(symbol
 CREATE UNIQUE INDEX IF NOT EXISTS idx_event_windows_dedup
     ON event_windows(COALESCE(symbol, ''), kind, start_utc, source);
 
+-- Append-only provenance for scheduled-event ingestion. An empty
+-- event_windows result is otherwise ambiguous: it can mean "the provider
+-- reported no events" or "the provider failed and the adapter returned
+-- nothing." These rows preserve that distinction permanently and make
+-- every session's claimed catalyst coverage auditable.
+CREATE TABLE IF NOT EXISTS event_ingestion_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    attempted_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    universe_scope TEXT NOT NULL,
+    requested_symbols INTEGER NOT NULL,
+    fetched_events INTEGER,
+    matched_events INTEGER,
+    windows_created INTEGER,
+    error TEXT,
+    code_version TEXT,
+    run_mode TEXT,
+    run_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_event_ingestion_runs_lookup
+    ON event_ingestion_runs(kind, report_date, universe_scope, status, completed_at);
+CREATE TRIGGER IF NOT EXISTS event_ingestion_runs_no_update
+BEFORE UPDATE ON event_ingestion_runs
+BEGIN
+    SELECT RAISE(ABORT, 'event_ingestion_runs is append-only: UPDATE is not permitted');
+END;
+CREATE TRIGGER IF NOT EXISTS event_ingestion_runs_no_delete
+BEFORE DELETE ON event_ingestion_runs
+BEGIN
+    SELECT RAISE(ABORT, 'event_ingestion_runs is append-only: DELETE is not permitted');
+END;
+
 -- Append-only ledger of the individual decisions taken about a detection
 -- on its way through the pipeline. Deliberately NOT columns on
 -- `detections`: that row is a mutable snapshot of the cluster's latest
@@ -329,6 +365,15 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = Tru
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
     conn.executescript(SCHEMA)
+    # Owner decision 2026-08-17 superseded the original earnings policy:
+    # earnings are context and signal, never suppression/downgrade. Update
+    # any windows written by an older build so a pre-existing row cannot
+    # keep enforcing the retired policy after the new classifier ships.
+    conn.execute(
+        "UPDATE event_windows SET severity = 'context' "
+        "WHERE kind = 'earnings' AND source = 'nasdaq_earnings' AND severity != 'context'"
+    )
+    conn.commit()
     _add_column_if_missing(conn, "detections", "no_trade", "INTEGER")
     _add_column_if_missing(conn, "detections", "news_driven", "INTEGER")
     _add_column_if_missing(conn, "detections", "primary_kind", "TEXT")

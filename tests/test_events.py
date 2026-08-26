@@ -5,6 +5,7 @@ real vendor adapters hand back.
 """
 from __future__ import annotations
 
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 import exchange_calendars as ecals
@@ -19,6 +20,7 @@ from tradebot.events import (
     classify_earnings_event,
     classify_filing,
     eia_report_window,
+    earnings_ingestion_succeeded,
     events_for_date,
     has_earnings_before,
     ingest_earnings,
@@ -315,22 +317,22 @@ def test_refresh_edgar_events_respects_the_lookback_window(monkeypatch):
 # ---------------------------------------------------------------------- #
 
 
-def test_classify_pre_market_earnings_suppresses_report_day_downgrades_day_before():
+def test_classify_pre_market_earnings_is_context_on_report_day_and_day_before():
     event = EarningsEvent(symbol="DDOG", report_date=date(2026, 8, 6), timing="pre-market")  # a Thursday
     windows = classify_earnings_event(event, CALENDAR)
-    assert windows == [(date(2026, 8, 6), "suppress"), (date(2026, 8, 5), "downgrade")]
+    assert windows == [(date(2026, 8, 6), "context"), (date(2026, 8, 5), "context")]
 
 
-def test_classify_after_hours_earnings_suppresses_next_session_downgrades_report_day():
+def test_classify_after_hours_earnings_is_context_on_next_session_and_report_day():
     event = EarningsEvent(symbol="PBR", report_date=date(2026, 8, 6), timing="after-hours")
     windows = classify_earnings_event(event, CALENDAR)
-    assert windows == [(date(2026, 8, 7), "suppress"), (date(2026, 8, 6), "downgrade")]
+    assert windows == [(date(2026, 8, 7), "context"), (date(2026, 8, 6), "context")]
 
 
 def test_classify_unspecified_timing_treated_like_pre_market():
     event = EarningsEvent(symbol="XYZ", report_date=date(2026, 8, 6), timing="unspecified")
     windows = classify_earnings_event(event, CALENDAR)
-    assert windows == [(date(2026, 8, 6), "suppress"), (date(2026, 8, 5), "downgrade")]
+    assert windows == [(date(2026, 8, 6), "context"), (date(2026, 8, 5), "context")]
 
 
 def test_classify_earnings_rolls_over_a_weekend_report_date():
@@ -351,10 +353,10 @@ def test_ingest_earnings_creates_both_windows_and_gates_correctly():
     assert created == 2
 
     report_day = active_event_window(conn, "DDOG", datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc))
-    assert report_day.severity == "suppress"
+    assert report_day.severity == "context"
 
     day_before = active_event_window(conn, "DDOG", datetime(2026, 8, 5, 15, 0, tzinfo=timezone.utc))
-    assert day_before.severity == "downgrade"
+    assert day_before.severity == "context"
 
     two_days_before = active_event_window(conn, "DDOG", datetime(2026, 8, 4, 15, 0, tzinfo=timezone.utc))
     assert two_days_before is None
@@ -368,20 +370,102 @@ def test_ingest_earnings_is_idempotent():
     assert first == 2 and second == 0
 
 
+def test_connect_migrates_retired_earnings_suppression_to_context(tmp_path):
+    db_path = tmp_path / "journal.db"
+    conn = connect(db_path)
+    add_event_window(
+        conn, symbol="CRWD", kind="earnings",
+        start_utc=datetime(2026, 8, 26, 13, 30, tzinfo=timezone.utc),
+        end_utc=datetime(2026, 8, 26, 20, 0, tzinfo=timezone.utc),
+        severity="suppress", source="nasdaq_earnings",
+    )
+    conn.close()
+
+    migrated = connect(db_path)
+    assert migrated.execute(
+        "SELECT severity FROM event_windows WHERE symbol = 'CRWD'"
+    ).fetchone()[0] == "context"
+
+
 def test_refresh_earnings_events_fetches_classifies_and_stores(monkeypatch):
     """The orchestration entrypoint runner.py actually calls: fetches via
     the real vendor adapter (lazy-imported, monkeypatched here so this
     test makes no network call), then runs the exact same
     classify+store path as ingest_earnings."""
-    from tradebot.vendors import nasdaq_earnings
-
-    events = [EarningsEvent(symbol="DDOG", report_date=date(2026, 8, 6), timing="pre-market")]
-    monkeypatch.setattr(nasdaq_earnings, "fetch_earnings_for_symbols", lambda report_date, symbols: events)
+    events = [
+        EarningsEvent(symbol="DDOG", report_date=date(2026, 8, 6), timing="pre-market"),
+        EarningsEvent(symbol="OUTSIDE", report_date=date(2026, 8, 6), timing="after-hours"),
+    ]
 
     conn = _conn()
-    created = refresh_earnings_events(conn, symbols={"DDOG", "TSLA"}, report_date=date(2026, 8, 6), calendar=CALENDAR)
+    created = refresh_earnings_events(
+        conn, symbols={"DDOG", "TSLA"}, report_date=date(2026, 8, 6),
+        calendar=CALENDAR, code_version="abc123", run_mode="live",
+        run_id="run-1", fetch_fn=lambda report_date: events,
+    )
     assert created == 2
     assert active_event_window(conn, "DDOG", datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc)) is not None
+    assert active_event_window(conn, "OUTSIDE", datetime(2026, 8, 6, 15, 0, tzinfo=timezone.utc)) is None
+
+    row = conn.execute(
+        """
+        SELECT status, universe_scope, requested_symbols, fetched_events,
+               matched_events, windows_created, error, code_version, run_mode, run_id
+        FROM event_ingestion_runs
+        """
+    ).fetchone()
+    assert row == ("success", "market", 2, 2, 1, 2, None, "abc123", "live", "run-1")
+    assert earnings_ingestion_succeeded(conn, date(2026, 8, 6)) is True
+
+
+def test_refresh_earnings_events_records_a_successful_empty_calendar():
+    conn = _conn()
+    created = refresh_earnings_events(
+        conn, symbols={"DDOG", "TSLA"}, report_date=date(2026, 8, 8),
+        calendar=CALENDAR, fetch_fn=lambda report_date: [],
+    )
+    assert created == 0
+    row = conn.execute(
+        "SELECT status, fetched_events, matched_events, windows_created, error FROM event_ingestion_runs"
+    ).fetchone()
+    assert row == ("success", 0, 0, 0, None)
+
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE event_ingestion_runs SET status = 'failed'")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM event_ingestion_runs")
+
+
+def test_refresh_earnings_events_records_failure_then_reraises():
+    conn = _conn()
+
+    def failed_fetch(_report_date):
+        raise RuntimeError("provider unavailable")
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        refresh_earnings_events(
+            conn, symbols={"DDOG"}, report_date=date(2026, 8, 6),
+            calendar=CALENDAR, fetch_fn=failed_fetch,
+        )
+
+    row = conn.execute(
+        "SELECT status, requested_symbols, fetched_events, error FROM event_ingestion_runs"
+    ).fetchone()
+    assert row[0:3] == ("failed", 1, None)
+    assert "RuntimeError: provider unavailable" in row[3]
+    assert earnings_ingestion_succeeded(conn, date(2026, 8, 6)) is False
+
+
+def test_refresh_earnings_events_rejects_and_records_an_empty_eligible_universe():
+    conn = _conn()
+    with pytest.raises(ValueError, match="eligible earnings universe is empty"):
+        refresh_earnings_events(
+            conn, symbols=set(), report_date=date(2026, 8, 6),
+            calendar=CALENDAR, fetch_fn=lambda report_date: [],
+        )
+    assert conn.execute(
+        "SELECT status, requested_symbols FROM event_ingestion_runs"
+    ).fetchone() == ("failed", 0)
 
 
 # ---------------------------------------------------------------------- #

@@ -318,6 +318,7 @@ def test_render_pre_open_card_golden_with_events():
     assert text == (
         "<b>Pre-Open — 2026-07-23</b>\n"
         "\n"
+        "<b>Scheduled earnings context: 1 active symbol(s)</b>\n"
         "TSLA — earnings (downgrade) · after the close\n"
         "Market-wide — FOMC (blackout)\n"
         "GOOGL — Form 4 (context) · routine Form 4\n"
@@ -332,12 +333,37 @@ def test_render_pre_open_card_says_no_known_events_rather_than_omitting_the_body
     assert "No known earnings, macro, or filing events today." in text
 
 
+def test_render_pre_open_card_does_not_call_a_failed_calendar_quiet():
+    when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    text = templates.render_pre_open_card(
+        [], date(2026, 7, 23), when, earnings_coverage_error=True,
+    )
+    assert "Coverage incomplete" in text
+    assert "scheduled earnings calendar unavailable" in text
+    assert "No known earnings" not in text
+
+
 def test_render_pre_open_card_escapes_and_never_exclaims():
     when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
     events = [_event_window(detail="<script>alert(1)</script>")]
     text = templates.render_pre_open_card(events, date(2026, 7, 23), when)
     assert "<script>" not in text
     assert "!" not in text
+
+
+def test_render_pre_open_card_bounds_a_market_wide_earnings_calendar():
+    when = datetime(2026, 7, 23, 13, 0, tzinfo=timezone.utc)
+    events = [
+        _event_window(
+            id=i, symbol=f"SYM{i:03d}", severity="context",
+            detail=f"SYM{i:03d} earnings (after-hours), reported 2026-07-23",
+        )
+        for i in range(250)
+    ]
+    text = templates.render_pre_open_card(events, date(2026, 7, 23), when)
+    assert "Scheduled earnings context: 250 active symbol(s)" in text
+    assert "(+210 more)" in text
+    assert len(text) < 4096
 
 
 def test_render_heartbeat_golden():
