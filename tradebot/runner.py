@@ -47,7 +47,13 @@ from tradebot.alerts import (
 from tradebot.config import MARKET_PROXY_SYMBOLS, WATCHLIST
 from tradebot.costs import select_contract
 from tradebot import dedup
-from tradebot.events import active_event_window, events_for_date, has_earnings_before
+from tradebot.events import (
+    active_event_window,
+    earnings_ingestion_succeeded,
+    events_for_date,
+    has_earnings_before,
+    refresh_earnings_events,
+)
 from tradebot import evaluations as evaluations_mod
 from tradebot.rendering import templates
 from tradebot.guard import extreme_mover_evidence, validate_alert_data
@@ -1984,7 +1990,10 @@ def _mark_session_close_sent(path: Path, session_date) -> None:
     path.write_text(json.dumps({"session_date": session_date.isoformat()}))
 
 
-def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime, state_path: Path | None = None) -> None:
+def maybe_send_session_open_messages(
+    conn, alerter, session_date, now: datetime, state_path: Path | None = None,
+    *, earnings_coverage_error: bool = False,
+) -> None:
     """The morning briefing + pre-open card are once-per-session
     announcements, guarded the same way maybe_send_weekly_recap/
     maybe_update_pinned_status guard theirs — run_live() itself has no
@@ -2000,10 +2009,40 @@ def maybe_send_session_open_messages(conn, alerter, session_date, now: datetime,
         return
     alerter.send(templates.render_morning_briefing(tier_performance(conn).get("high"), now), priority=outbox.PRIORITY_NORMAL)
     alerter.send(
-        templates.render_pre_open_card(events_for_date(conn, session_date), session_date, now),
+        templates.render_pre_open_card(
+            events_for_date(conn, session_date), session_date, now,
+            earnings_coverage_error=earnings_coverage_error,
+        ),
         priority=outbox.PRIORITY_NORMAL,
     )
     _mark_session_open_sent(state_path, session_date)
+
+
+def maybe_refresh_market_earnings(
+    conn, universe_conn, session_date: date, *, version: str,
+    run_mode: str, run_id: str,
+) -> int | None:
+    """Populate today's market-wide scheduled-earnings ledger once.
+
+    Runs before the pre-open card so the card cannot precede its own data
+    source. A prior attributable success is idempotent across supervised
+    restarts. A missing/empty universe is handed to the ingestion layer on
+    purpose: it records a FAILED run before raising, rather than falling
+    back to a fixed watchlist while claiming whole-market coverage.
+    """
+    if earnings_ingestion_succeeded(conn, session_date, universe_scope="market"):
+        return None
+
+    symbols: set[str] = set()
+    if universe_conn is not None:
+        from tradebot import universe as universe_mod
+
+        symbols = set(universe_mod.active_symbols(universe_conn))
+
+    return refresh_earnings_events(
+        conn, symbols, session_date, CALENDAR, universe_scope="market",
+        code_version=version, run_mode=run_mode, run_id=run_id,
+    )
 
 
 def run_live(
@@ -2061,8 +2100,62 @@ def run_live(
     budget = AlertBudget(now=lambda: datetime.now(timezone.utc))
     stats = HeartbeatStats(start_time=now, session_date=session_date)
 
+    # Stage 1's universe is also the eligibility set for scheduled
+    # catalysts. Initialize it before the pre-open card: publishing "no
+    # events" and only then fetching the calendar made an empty card an
+    # architectural certainty. This remains opt-in with --broad-scan;
+    # production enables it, while fixed-watchlist/replay paths make no
+    # new network call.
+    universe_conn = None
+    dynamic_symbols: list[str] = []
+    last_broad_scan: datetime | None = None
+    earnings_coverage_error = False
+    if enable_broad_scan:
+        try:
+            from tradebot import universe as universe_mod
+            from tradebot.vendors.alpaca import fetch_us_equity_assets
+
+            universe_conn = universe_mod.connect()
+            universe_mod.refresh_universe(universe_conn, fetch_us_equity_assets, now)
+        except Exception:
+            stats.errors.append(traceback.format_exc())
+            universe_conn = None
+
+        try:
+            created = maybe_refresh_market_earnings(
+                conn, universe_conn, session_date, version=version,
+                run_mode=RUN_MODE_LIVE, run_id=run_id,
+            )
+            if created is not None:
+                logger.info(
+                    "market-wide earnings ingest succeeded: session=%s windows_created=%d",
+                    session_date.isoformat(), created,
+                )
+        except Exception:
+            earnings_coverage_error = True
+            failure = traceback.format_exc()
+            stats.errors.append(failure)
+            logger.error(
+                "market-wide earnings ingest failed for %s", session_date.isoformat(), exc_info=True,
+            )
+            try:
+                alerter.send(
+                    templates.render_failure_notice(
+                        "Market-wide earnings calendar ingestion FAILED for "
+                        f"{session_date.isoformat()}. Catalyst coverage is incomplete; "
+                        "the session will continue. See runner logs and event_ingestion_runs.",
+                        now,
+                    ),
+                    priority=outbox.PRIORITY_HIGH,
+                )
+            except Exception:
+                logger.error("also failed to send the earnings-ingestion failure alert", exc_info=True)
+
     try:
-        maybe_send_session_open_messages(conn, alerter, session_date, now)
+        maybe_send_session_open_messages(
+            conn, alerter, session_date, now,
+            earnings_coverage_error=earnings_coverage_error,
+        )
         maybe_send_weekly_recap(conn, alerter, now)
         if isinstance(alerter, TelegramAlerter):
             maybe_update_pinned_status(alerter.token, alerter.chat_id, conn, now)
@@ -2102,20 +2195,6 @@ def run_live(
     # behavior this loop always had) and never allowed to take the
     # session down: a universe-refresh or bulk-fetch failure is logged
     # like any other per-iteration exception, not fatal.
-    universe_conn = None
-    dynamic_symbols: list[str] = []
-    last_broad_scan: datetime | None = None
-    if enable_broad_scan:
-        try:
-            from tradebot import universe as universe_mod
-            from tradebot.vendors.alpaca import fetch_us_equity_assets
-
-            universe_conn = universe_mod.connect()
-            universe_mod.refresh_universe(universe_conn, fetch_us_equity_assets, now)
-        except Exception:
-            stats.errors.append(traceback.format_exc())
-            universe_conn = None
-
     while True:
         loop_start = datetime.now(timezone.utc)
         if loop_start >= close_ts:

@@ -510,6 +510,53 @@ def test_heartbeat_stats_record_cluster_tracks_tier_and_suppression_counts():
     assert "send" not in stats.suppression_counts
 
 
+def test_maybe_refresh_market_earnings_uses_the_full_active_universe(monkeypatch):
+    from tradebot import universe as universe_mod
+
+    monkeypatch.setattr(
+        runner_mod, "earnings_ingestion_succeeded",
+        lambda conn, report_date, universe_scope: False,
+    )
+    monkeypatch.setattr(
+        universe_mod, "active_symbols", lambda conn: ["CRM", "CRWD", "OKTA"],
+    )
+    captured = {}
+
+    def fake_refresh(conn, symbols, report_date, calendar, **kwargs):
+        captured.update(symbols=symbols, report_date=report_date, calendar=calendar, kwargs=kwargs)
+        return 6
+
+    monkeypatch.setattr(runner_mod, "refresh_earnings_events", fake_refresh)
+    result = runner_mod.maybe_refresh_market_earnings(
+        object(), object(), date(2026, 8, 26), version="abc123",
+        run_mode="live", run_id="run-1",
+    )
+
+    assert result == 6
+    assert captured["symbols"] == {"CRM", "CRWD", "OKTA"}
+    assert captured["report_date"] == date(2026, 8, 26)
+    assert captured["calendar"] is runner_mod.CALENDAR
+    assert captured["kwargs"] == {
+        "universe_scope": "market", "code_version": "abc123",
+        "run_mode": "live", "run_id": "run-1",
+    }
+
+
+def test_maybe_refresh_market_earnings_is_restart_idempotent(monkeypatch):
+    monkeypatch.setattr(
+        runner_mod, "earnings_ingestion_succeeded",
+        lambda conn, report_date, universe_scope: True,
+    )
+    monkeypatch.setattr(
+        runner_mod, "refresh_earnings_events",
+        lambda *args, **kwargs: pytest.fail("successful session must not be fetched twice"),
+    )
+    assert runner_mod.maybe_refresh_market_earnings(
+        object(), object(), date(2026, 8, 26), version="abc123",
+        run_mode="live", run_id="run-2",
+    ) is None
+
+
 def _plausible_session_bars(symbol: str, session_date: date, *, n: int = 78, volume: int = 1000) -> list[Bar]:
     """A full regular-day's worth of RTH bars (78 == 6.5 hours of 5-min
     bars) starting at 09:30 ET -- passes Proposal 5c's plausibility floor

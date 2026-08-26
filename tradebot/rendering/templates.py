@@ -304,6 +304,8 @@ EVENT_KIND_LABELS = {
     "nfp": "NFP",
 }
 EVENT_SEVERITY_LABELS = {"suppress": "blackout", "downgrade": "downgrade", "context": "context"}
+MAX_PRE_OPEN_EARNINGS_SYMBOLS_PER_TIMING = 40
+MAX_PRE_OPEN_OTHER_EVENTS = 12
 
 
 def _render_event_row(event) -> str:
@@ -316,7 +318,9 @@ def _render_event_row(event) -> str:
     return line
 
 
-def render_pre_open_card(events: list, session_date, when: datetime) -> str:
+def render_pre_open_card(
+    events: list, session_date, when: datetime, *, earnings_coverage_error: bool = False,
+) -> str:
     """Today's known earnings, macro prints, and filing-driven blackout
     windows, sent once before the alerting loop starts. Context, not a
     trade signal — no tier emoji. See tradebot.events module docstring:
@@ -324,11 +328,57 @@ def render_pre_open_card(events: list, session_date, when: datetime) -> str:
     the one place a day's events are all shown together rather than
     scattered across individual alert suppressions."""
     lines = [f"<b>Pre-Open — {html.escape(str(session_date))}</b>", ""]
+    if earnings_coverage_error:
+        lines.extend([
+            "<b>Coverage incomplete: scheduled earnings calendar unavailable.</b>",
+            "The scanner is continuing; do not read an absent earnings row as a confirmed quiet day.",
+            "",
+        ])
     if not events:
-        lines.append("No known earnings, macro, or filing events today.")
+        if earnings_coverage_error:
+            lines.append("No other known macro or filing events today.")
+        else:
+            lines.append("No known earnings, macro, or filing events today.")
     else:
-        for event in events:
+        earnings = [event for event in events if event.kind == "earnings"]
+        other_events = [event for event in events if event.kind != "earnings"]
+
+        if earnings:
+            lines.append(f"<b>Scheduled earnings context: {len(earnings)} active symbol(s)</b>")
+            timing_groups = (
+                ("Pre-market", [e.symbol for e in earnings if "(pre-market)" in (e.detail or "")]),
+                ("After-hours", [e.symbol for e in earnings if "(after-hours)" in (e.detail or "")]),
+                ("Timing unspecified", [e.symbol for e in earnings if "(unspecified)" in (e.detail or "")]),
+            )
+            for label, symbols in timing_groups:
+                if not symbols:
+                    continue
+                ordered = sorted(set(symbols))
+                shown = ordered[:MAX_PRE_OPEN_EARNINGS_SYMBOLS_PER_TIMING]
+                suffix = (
+                    f" (+{len(ordered) - len(shown)} more)" if len(shown) < len(ordered) else ""
+                )
+                lines.append(f"{label}: {html.escape(', '.join(shown))}{suffix}")
+
+            # Manual/legacy rows may not carry the adapter's parenthesized
+            # timing token. Preserve their exact symbol/detail instead of
+            # letting the compact market-wide grouping erase them.
+            ungrouped = [
+                event for event in earnings
+                if not any(
+                    marker in (event.detail or "")
+                    for marker in ("(pre-market)", "(after-hours)", "(unspecified)")
+                )
+            ]
+            for event in ungrouped[:MAX_PRE_OPEN_OTHER_EVENTS]:
+                lines.append(_render_event_row(event))
+            if len(ungrouped) > MAX_PRE_OPEN_OTHER_EVENTS:
+                lines.append(f"Other earnings rows: +{len(ungrouped) - MAX_PRE_OPEN_OTHER_EVENTS} more")
+
+        for event in other_events[:MAX_PRE_OPEN_OTHER_EVENTS]:
             lines.append(_render_event_row(event))
+        if len(other_events) > MAX_PRE_OPEN_OTHER_EVENTS:
+            lines.append(f"Other known events: +{len(other_events) - MAX_PRE_OPEN_OTHER_EVENTS} more")
     lines.append("")
     lines.append(_footer(when))
     return "\n".join(lines)

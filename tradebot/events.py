@@ -1,9 +1,9 @@
-"""News and macro events as suppression and context — never as an alert
-source. See CLAUDE.md-style rule for this module: it never publishes
-anything, never races to be first with a headline, and never fabricates
-a date it doesn't actually have. It answers exactly one question for the
-rest of the pipeline: "is `symbol` inside a known event window right
-now, and if so, how much should that change what we do?"
+"""Scheduled events as suppression or context — never an alert source.
+This module never publishes anything, never races to be first with a
+headline, and never fabricates a date it doesn't actually have. It answers
+exactly one question for the rest of the pipeline: "is `symbol` inside a
+known event window right now, and if so, how should routing, explanation,
+and track-record cohorts treat it?"
 
 Three severities, in ascending priority when windows overlap:
     context    — worth tagging (Similar Setups doesn't apply), not worth blocking
@@ -23,10 +23,11 @@ Real sources only:
       weekly schedule — see eia_report_window(), a pure computation, not
       a fetch.
 
-No live "breaking news" polling loop exists anywhere in this project and
-none should be added here: we cannot win a latency race against
-headline-scanning algos, so the only useful thing news data can do for a
-technical scanner is explain the times it should stay quiet.
+No live "breaking news" polling loop exists in this module and none should
+be added here. Earnings dates provide full-tier context and stats
+exclusion; macro windows can suppress genuinely broken tape. A separate
+reaction observer may use these scheduled facts for candidate admission,
+but the calendar itself is never a price signal.
 """
 from __future__ import annotations
 
@@ -267,29 +268,28 @@ def _adjacent_session(d: date, calendar, direction: int) -> date:
 # Earnings classification — tradebot.vendors.nasdaq_earnings only fetches
 # who's reporting and when (pre-market/after-hours/unspecified); this is
 # the one place that turns that into windows. Two per event: the session
-# actually pricing in the number (suppress) and the session immediately
-# before it (downgrade — anticipation risk). "unspecified" timing is
-# treated the conservative way, like pre-market, since which side of the
-# close it landed on isn't known and pre-market is the more common
-# convention when a source doesn't say.
+# immediately before the print and the session pricing in the number.
+# Both are context. Owner decision 2026-08-17: earnings are signal and
+# context, never suppression; full-tier alerts remain eligible while
+# Similar Setups excludes the event-driven population.
 # --------------------------------------------------------------------------
 
 
 def classify_earnings_event(event, calendar) -> list:
     """[(session_date, severity), ...] — always exactly 2 entries."""
     if event.timing == "after-hours":
-        suppress_session = _adjacent_session(event.report_date, calendar, +1)
-        downgrade_session = (
+        reaction_session = _adjacent_session(event.report_date, calendar, +1)
+        report_session = (
             event.report_date if calendar.is_session(event.report_date)
             else _adjacent_session(event.report_date, calendar, -1)
         )
     else:  # "pre-market" or "unspecified"
-        suppress_session = (
+        reaction_session = (
             event.report_date if calendar.is_session(event.report_date)
             else _adjacent_session(event.report_date, calendar, +1)
         )
-        downgrade_session = _adjacent_session(suppress_session, calendar, -1)
-    return [(suppress_session, "suppress"), (downgrade_session, "downgrade")]
+        report_session = _adjacent_session(reaction_session, calendar, -1)
+    return [(reaction_session, "context"), (report_session, "context")]
 
 
 def ingest_earnings(conn, events: list, calendar) -> int:
@@ -313,14 +313,97 @@ def ingest_earnings(conn, events: list, calendar) -> int:
     return created
 
 
-def refresh_earnings_events(conn, symbols: set, report_date: date, calendar) -> int:
-    """Orchestration entrypoint: fetch today's (or any given date's)
-    earnings for the tracked watchlist, classify, store. Meant to run
-    once per session, same cadence as refresh_edgar_events."""
-    from tradebot.vendors.nasdaq_earnings import fetch_earnings_for_symbols
+def _record_event_ingestion_run(
+    conn, *, provider: str, kind: str, report_date: date,
+    attempted_at: datetime, status: str, universe_scope: str,
+    requested_symbols: int, fetched_events: int | None,
+    matched_events: int | None, windows_created: int | None,
+    error: str | None, code_version: str | None, run_mode: str | None,
+    run_id: str | None, completed_at: datetime | None = None,
+) -> int:
+    """Append one provider attempt without changing its meaning later."""
+    completed_at = completed_at or datetime.now(timezone.utc)
+    cur = conn.execute(
+        """
+        INSERT INTO event_ingestion_runs
+            (provider, kind, report_date, attempted_at, completed_at, status,
+             universe_scope, requested_symbols, fetched_events, matched_events,
+             windows_created, error, code_version, run_mode, run_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            provider, kind, report_date.isoformat(), attempted_at.isoformat(),
+            completed_at.isoformat(), status, universe_scope, requested_symbols,
+            fetched_events, matched_events, windows_created, error,
+            code_version, run_mode, run_id,
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
 
-    events = fetch_earnings_for_symbols(report_date, symbols)
-    return ingest_earnings(conn, events, calendar)
+
+def earnings_ingestion_succeeded(
+    conn, report_date: date, *, universe_scope: str = "market",
+) -> bool:
+    """Whether this exact date/scope already has an attributable success."""
+    row = conn.execute(
+        """
+        SELECT 1 FROM event_ingestion_runs
+        WHERE provider = 'nasdaq_earnings' AND kind = 'earnings'
+          AND report_date = ? AND universe_scope = ? AND status = 'success'
+        LIMIT 1
+        """,
+        (report_date.isoformat(), universe_scope),
+    ).fetchone()
+    return row is not None
+
+
+def refresh_earnings_events(
+    conn, symbols: set, report_date: date, calendar, *,
+    universe_scope: str = "market", code_version: str | None = None,
+    run_mode: str | None = None, run_id: str | None = None, fetch_fn=None,
+) -> int:
+    """Fetch, filter, classify, store, and permanently record the attempt.
+
+    ``symbols`` is the complete eligible universe supplied by the caller,
+    not a fixed watchlist. A successful zero-event response and a provider
+    failure receive different ledger rows. Failures are recorded and then
+    re-raised so the runner can log/page without blocking the session.
+    """
+    from tradebot.vendors.nasdaq_earnings import fetch_earnings_calendar
+
+    attempted_at = datetime.now(timezone.utc)
+    fetch_fn = fetch_fn or fetch_earnings_calendar
+    requested_symbols = len(symbols)
+    fetched_count = matched_count = created = None
+    try:
+        if not symbols:
+            raise ValueError("eligible earnings universe is empty")
+        fetched = fetch_fn(report_date)
+        fetched_count = len(fetched)
+        matched = [event for event in fetched if event.symbol in symbols]
+        matched_count = len(matched)
+        created = ingest_earnings(conn, matched, calendar)
+    except Exception as exc:
+        _record_event_ingestion_run(
+            conn, provider="nasdaq_earnings", kind="earnings",
+            report_date=report_date, attempted_at=attempted_at, status="failed",
+            universe_scope=universe_scope, requested_symbols=requested_symbols,
+            fetched_events=fetched_count, matched_events=matched_count,
+            windows_created=created, error=f"{type(exc).__name__}: {exc}"[:1000],
+            code_version=code_version, run_mode=run_mode, run_id=run_id,
+        )
+        raise
+
+    _record_event_ingestion_run(
+        conn, provider="nasdaq_earnings", kind="earnings",
+        report_date=report_date, attempted_at=attempted_at, status="success",
+        universe_scope=universe_scope, requested_symbols=requested_symbols,
+        fetched_events=fetched_count, matched_events=matched_count,
+        windows_created=created, error=None, code_version=code_version,
+        run_mode=run_mode, run_id=run_id,
+    )
+    return created
 
 
 # --------------------------------------------------------------------------
