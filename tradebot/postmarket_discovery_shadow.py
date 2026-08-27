@@ -1,0 +1,366 @@
+"""Default-off, alert-incapable market-wide postmarket discovery service."""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import os
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from typing import Callable
+
+from tradebot.events import scheduled_after_hours_earnings_symbols
+from tradebot.journal import code_version, connect as connect_journal, new_run_id
+from tradebot.marketdata import MarketWideScreen, partition_intraday_bars
+from tradebot.postmarket import (
+    ReactionEvaluation,
+    evaluate_postmarket_reaction,
+    fetch_error_evaluation,
+)
+from tradebot.postmarket_discovery import (
+    DiscoverySelection,
+    connect as connect_discovery,
+    record_discovery_tick,
+    select_discovery_symbols,
+)
+from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
+from tradebot.universe import active_symbols, connect as connect_universe
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+JOURNAL_PATH = REPO_ROOT / "data" / "journal.db"
+UNIVERSE_PATH = REPO_ROOT / "data" / "universe.db"
+SHADOW_PATH = REPO_ROOT / "data" / "postmarket_shadow.db"
+HEARTBEAT_PATH = REPO_ROOT / "data" / "postmarket_discovery_heartbeat.json"
+POLL_SECONDS = 60
+IDLE_SECONDS = 300
+RUN_MODE = "postmarket-marketwide-shadow"
+SCREEN_TOP_N = 50
+MAX_SCREEN_AGE_SECONDS = 180
+EXPECTED_ENDPOINTS = {
+    "market_movers",
+    "most_actives_volume",
+    "most_actives_trades",
+}
+SOURCE_ENDPOINT = {
+    "market_gainer": "market_movers",
+    "market_loser": "market_movers",
+    "most_active_volume": "most_actives_volume",
+    "most_active_trades": "most_actives_trades",
+}
+
+logger = logging.getLogger("watchtower.postmarket_discovery_shadow")
+
+
+@dataclass(frozen=True)
+class DiscoveryTickResult:
+    tick_id: int
+    universe_symbols: int
+    screen_rows: int
+    discovered_symbols: int
+    fetched_symbols: int
+    evaluated_symbols: int
+    candidate_observations: int
+    new_candidates: int
+    error_count: int
+    latency_ms: int
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def discovery_enabled(raw: str | None = None) -> bool:
+    value = os.environ.get("POSTMARKET_DISCOVERY_ENABLED", "0") if raw is None else raw
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(
+        "POSTMARKET_DISCOVERY_ENABLED must be one of 1/0, true/false, yes/no, or on/off"
+    )
+
+
+def _screen_fetch(top: int) -> MarketWideScreen:
+    from tradebot.vendors.alpaca import fetch_marketwide_postmarket_screen
+
+    return fetch_marketwide_postmarket_screen(top)
+
+
+def _bars_fetch(symbols: list[str], session: date):
+    from tradebot.vendors.alpaca import fetch_intraday_bars_bulk
+
+    return fetch_intraday_bars_bulk(symbols, session)
+
+
+def _data_feed() -> str:
+    from tradebot.vendors.alpaca import DETECTOR_DATA_FEED
+
+    return str(getattr(DETECTOR_DATA_FEED, "value", DETECTOR_DATA_FEED))
+
+
+def _validate_screen(
+    screen: MarketWideScreen, *, now: datetime, data_feed: str, top_n: int,
+) -> None:
+    if screen.provider != "alpaca":
+        raise ValueError(f"unexpected market-wide screen provider: {screen.provider!r}")
+    if screen.feed != "sip":
+        raise ValueError(f"market-wide screener must use SIP, got {screen.feed!r}")
+    if data_feed != screen.feed:
+        raise ValueError(
+            f"market-wide screen/bar feed mismatch: {screen.feed!r} vs {data_feed!r}"
+        )
+    if screen.requested_top_n != top_n or not 1 <= top_n <= 50:
+        raise ValueError("market-wide screen requested bound does not match the tick")
+    if len(screen.endpoints) != len(EXPECTED_ENDPOINTS) or set(screen.endpoints) != EXPECTED_ENDPOINTS:
+        raise ValueError("market-wide screen endpoint set is incomplete, duplicated, or unexpected")
+    updates = dict(screen.source_updates)
+    if len(screen.source_updates) != len(EXPECTED_ENDPOINTS) or set(updates) != EXPECTED_ENDPOINTS:
+        raise ValueError("market-wide screen source timestamps are incomplete or duplicated")
+    for source, updated in updates.items():
+        if updated.tzinfo is None or updated.utcoffset() is None:
+            raise ValueError(f"market-wide screen timestamp is naive for {source}")
+        age = (now - updated).total_seconds()
+        if age < 0:
+            raise ValueError(f"market-wide screen timestamp is in the future for {source}")
+        if age > MAX_SCREEN_AGE_SECONDS:
+            raise ValueError(f"market-wide screen timestamp is stale for {source}: {age:.0f}s")
+    by_source: dict[str, list] = {source: [] for source in SOURCE_ENDPOINT}
+    seen_symbol_source: set[tuple[str, str]] = set()
+    for entry in screen.entries:
+        if entry.source not in SOURCE_ENDPOINT:
+            raise ValueError(f"unknown market-wide screen row source: {entry.source!r}")
+        if entry.symbol != entry.symbol.strip().upper() or not entry.symbol:
+            raise ValueError("market-wide screen symbol is not canonical")
+        if not 1 <= entry.rank <= top_n:
+            raise ValueError("market-wide screen rank is outside the requested bound")
+        key = (entry.symbol, entry.source)
+        if key in seen_symbol_source:
+            raise ValueError("market-wide screen duplicated a symbol within one source")
+        seen_symbol_source.add(key)
+        endpoint = SOURCE_ENDPOINT[entry.source]
+        if entry.source_updated_at != updates[endpoint]:
+            raise ValueError("market-wide screen row/source timestamps disagree")
+        numeric = (
+            entry.move_pct, entry.price, entry.volume, entry.trade_count,
+        )
+        if any(value is not None and not math.isfinite(value) for value in numeric):
+            raise ValueError("market-wide screen row contains a non-finite metric")
+        if entry.source in {"market_gainer", "market_loser"}:
+            if entry.move_pct is None or entry.price is None or entry.price <= 0:
+                raise ValueError("market mover row is missing price/change provenance")
+            if entry.source == "market_gainer" and entry.move_pct <= 0:
+                raise ValueError("market gainer row has a non-positive move")
+            if entry.source == "market_loser" and entry.move_pct >= 0:
+                raise ValueError("market loser row has a non-negative move")
+        elif entry.volume is None or entry.trade_count is None:
+            raise ValueError("most-active row is missing activity provenance")
+        elif entry.volume < 0 or entry.trade_count < 0:
+            raise ValueError("most-active row contains a negative metric")
+        by_source[entry.source].append(entry.rank)
+    for ranks in by_source.values():
+        if ranks and sorted(ranks) != list(range(1, len(ranks) + 1)):
+            raise ValueError("market-wide screen ranks are duplicated or non-contiguous")
+
+
+def run_discovery_tick(
+    shadow_conn,
+    *,
+    active_universe: set[str],
+    scheduled_earnings: set[str],
+    now: datetime,
+    run_id: str,
+    version: str | None,
+    data_feed: str,
+    screen_fetch: Callable[[int], MarketWideScreen] = _screen_fetch,
+    bars_fetch: Callable[[list[str], date], dict] = _bars_fetch,
+    top_n: int = SCREEN_TOP_N,
+) -> tuple[DiscoveryTickResult, DiscoverySelection, list[ReactionEvaluation]]:
+    """Screen the market, bulk-fetch the bounded union, and conserve every row."""
+    window = postmarket_window(now)
+    if window is None or not (window[1] <= now <= window[2]):
+        raise ValueError("run_discovery_tick requires an active postmarket window")
+    session, session_close, _ = window
+    started = time.perf_counter()
+    screen = screen_fetch(top_n)
+    _validate_screen(screen, now=now, data_feed=data_feed, top_n=top_n)
+    if active_universe and not screen.entries:
+        raise ValueError("market-wide screen returned no rows for a non-empty universe")
+    selection = select_discovery_symbols(screen, active_universe, scheduled_earnings)
+    symbols = [row.symbol for row in selection.symbols]
+    bars_by_symbol = bars_fetch(symbols, session)
+    evaluations: list[ReactionEvaluation] = []
+    for symbol in symbols:
+        bars = bars_by_symbol.get(symbol)
+        if bars is None:
+            evaluations.append(
+                fetch_error_evaluation(symbol, session, RuntimeError("missing from bulk bar response"))
+            )
+            continue
+        try:
+            snapshot = partition_intraday_bars(bars)
+            evaluations.append(
+                evaluate_postmarket_reaction(
+                    symbol,
+                    session,
+                    snapshot.rth,
+                    snapshot.postmarket,
+                    session_close=session_close,
+                    now=now,
+                )
+            )
+        except Exception as exc:
+            logger.exception("postmarket discovery evaluation failed symbol=%s", symbol)
+            evaluations.append(fetch_error_evaluation(symbol, session, exc))
+    latency_ms = round((time.perf_counter() - started) * 1000)
+    completed_utc = now + timedelta(milliseconds=latency_ms)
+    tick_id, new_candidates = record_discovery_tick(
+        shadow_conn,
+        selection,
+        evaluations,
+        screen=screen,
+        fetched_symbols=sum(symbol in bars_by_symbol for symbol in symbols),
+        session=session,
+        tick_utc=now,
+        completed_utc=completed_utc,
+        run_id=run_id,
+        run_mode=RUN_MODE,
+        code_version=version,
+        data_feed=data_feed,
+        latency_ms=latency_ms,
+    )
+    result = DiscoveryTickResult(
+        tick_id=tick_id,
+        universe_symbols=selection.universe_symbols,
+        screen_rows=selection.screen_rows,
+        discovered_symbols=len(selection.symbols),
+        fetched_symbols=sum(symbol in bars_by_symbol for symbol in symbols),
+        evaluated_symbols=len(evaluations),
+        candidate_observations=sum(row.outcome == "CANDIDATE" for row in evaluations),
+        new_candidates=new_candidates,
+        error_count=sum(row.outcome == "FETCH_ERROR" for row in evaluations),
+        latency_ms=latency_ms,
+    )
+    return result, selection, evaluations
+
+
+def write_heartbeat_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _heartbeat(status: str, now: datetime, **extra) -> dict:
+    return {
+        "ts_utc": now.isoformat(),
+        "status": status,
+        "enabled": True,
+        "observer": RUN_MODE,
+        "code_version": code_version(),
+        **extra,
+    }
+
+
+def configure_logging() -> None:
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+
+def main() -> int:
+    configure_logging()
+    try:
+        enabled = discovery_enabled()
+    except ValueError:
+        logger.exception("invalid market-wide postmarket discovery configuration")
+        return 2
+    if not enabled:
+        logger.info("market-wide postmarket discovery disabled by kill switch")
+        while True:
+            now = _utc_now()
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH,
+                {"ts_utc": now.isoformat(), "status": "disabled", "enabled": False},
+            )
+            time.sleep(IDLE_SECONDS)
+
+    journal_conn = connect_journal(JOURNAL_PATH)
+    universe_conn = connect_universe(UNIVERSE_PATH)
+    shadow_conn = connect_discovery(SHADOW_PATH)
+    run_id = new_run_id()
+    version = code_version()
+    data_feed = _data_feed()
+    logger.info(
+        "market-wide postmarket discovery started revision=%s feed=%s run_id=%s",
+        version,
+        data_feed,
+        run_id,
+    )
+    while True:
+        now = _utc_now()
+        if not postmarket_is_active(now):
+            write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("idle", now))
+            time.sleep(idle_sleep_seconds(now))
+            continue
+        write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("running", now))
+        try:
+            window = postmarket_window(now)
+            assert window is not None
+            session = window[0]
+            result, _, _ = run_discovery_tick(
+                shadow_conn,
+                active_universe=set(active_symbols(universe_conn)),
+                scheduled_earnings=set(
+                    scheduled_after_hours_earnings_symbols(journal_conn, session)
+                ),
+                now=now,
+                run_id=run_id,
+                version=version,
+                data_feed=data_feed,
+            )
+        except Exception as exc:
+            shadow_conn.rollback()
+            logger.exception("market-wide postmarket discovery tick failed")
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH,
+                _heartbeat("error", _utc_now(), error=f"{type(exc).__name__}: {exc}"[:1000]),
+            )
+        else:
+            logger.info(
+                "postmarket_discovery_tick tick=%s universe=%s screen_rows=%s "
+                "discovered=%s fetched=%s evaluated=%s candidates=%s new=%s "
+                "errors=%s latency_ms=%s",
+                result.tick_id,
+                result.universe_symbols,
+                result.screen_rows,
+                result.discovered_symbols,
+                result.fetched_symbols,
+                result.evaluated_symbols,
+                result.candidate_observations,
+                result.new_candidates,
+                result.error_count,
+                result.latency_ms,
+            )
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH, _heartbeat("ok", _utc_now(), **result.__dict__)
+            )
+        time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

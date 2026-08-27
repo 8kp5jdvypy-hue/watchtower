@@ -109,6 +109,32 @@ class IntradaySessionBars:
     postmarket: tuple[Bar, ...]
 
 
+@dataclass(frozen=True)
+class MarketScreenEntry:
+    """One attributable row returned by a provider market-wide screener."""
+
+    symbol: str
+    source: str
+    rank: int
+    source_updated_at: datetime
+    move_pct: float | None = None
+    price: float | None = None
+    volume: float | None = None
+    trade_count: float | None = None
+
+
+@dataclass(frozen=True)
+class MarketWideScreen:
+    """Bounded provider results whose upstream scope is the stock market."""
+
+    entries: tuple[MarketScreenEntry, ...]
+    requested_top_n: int
+    provider: str
+    feed: str
+    endpoints: tuple[str, ...]
+    source_updates: tuple[tuple[str, datetime], ...]
+
+
 class MarketData(Protocol):
     def daily_bars(self, symbol: str, n: int) -> Sequence[Bar]:
         """The n most recent daily bars, oldest first."""
@@ -135,6 +161,15 @@ class MarketData(Protocol):
 
     def chain(self, symbol: str, expiry: date) -> OptionChain:
         ...
+
+
+def partition_intraday_bars(bars: Sequence[Bar]) -> IntradaySessionBars:
+    """Partition one already-fetched snapshot without reordering its data."""
+    return IntradaySessionBars(
+        premarket=tuple(bar for bar in bars if _is_premarket(bar)),
+        rth=tuple(bar for bar in bars if _is_rth(bar)),
+        postmarket=tuple(bar for bar in bars if _is_postmarket(bar)),
+    )
 
 
 def _read_bars(path: Path, symbol: str) -> list[Bar]:
@@ -373,12 +408,7 @@ class ReplayMarketData:
 
     def intraday_snapshot(self, symbol: str, session_date: date) -> IntradaySessionBars:
         self._check(symbol, session_date)
-        visible = self._visible
-        return IntradaySessionBars(
-            premarket=tuple(b for b in visible if _is_premarket(b)),
-            rth=tuple(b for b in visible if _is_rth(b)),
-            postmarket=tuple(b for b in visible if _is_postmarket(b)),
-        )
+        return partition_intraday_bars(self._visible)
 
     def quote(self, symbol: str) -> Quote:
         raise NotImplementedError("ReplayMarketData has no live quotes; use session_bars()")
@@ -463,11 +493,7 @@ class LiveMarketData:
 
         self._check(symbol, session_date)
         bars = tuple(fetch_intraday_bars(symbol, session_date))
-        return IntradaySessionBars(
-            premarket=tuple(b for b in bars if _is_premarket(b)),
-            rth=tuple(b for b in bars if _is_rth(b)),
-            postmarket=tuple(b for b in bars if _is_postmarket(b)),
-        )
+        return partition_intraday_bars(bars)
 
     def quote(self, symbol: str) -> Quote:
         from tradebot.vendors.alpaca import fetch_latest_quote
