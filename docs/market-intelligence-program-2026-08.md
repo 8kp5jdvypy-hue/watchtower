@@ -146,16 +146,21 @@ evidence.
   the 13,091-symbol active universe, created 96 context windows, and an
   immediate manual rerun proved idempotent (one successful run remained
   one). CRM, CRWD, and OKTA all have structured after-hours ledger facts.
-- Slices 2–3, extended-hours contract and postmarket observer: implemented
-  on `feature/postmarket-shadow-observer`, pending review. The new process
+- Slices 2–3, extended-hours contract and postmarket observer: merged and
+  deployed at `6cc0a95`. The new process
   is default-off (`POSTMARKET_SHADOW_ENABLED=0`), imports no delivery path,
   writes a separate append-only shadow database, uses one SIP snapshot per
   symbol/tick, observes actual XNYS closes including early-close sessions,
   evaluates completed bars only, and records an explicit outcome for every
-  scheduled symbol including per-symbol fetch failures.
-- Slice 4, versioned truth set and replay: not complete. CRM/CRWD/OKTA in
-  the observer unit tests are tuning-shaped examples, not a holdout set and
-  not evidence for the activation gate.
+  scheduled symbol including per-symbol fetch failures. Its first live session
+  recorded 27 invariant-clean ticks, zero errors, 1.047-second average tick
+  latency, and five deduplicated candidates: CRM, CRWD, HPQ, LTRX, and OKTA.
+  That is one of the ten required clean sessions.
+- Slice 4, versioned truth set and replay: contract harness in review. The
+  production-shaped CRM/CRWD/OKTA tuning cases are isolated from 18 synthetic
+  adversarial contract-holdout cases. The empirical holdout is intentionally
+  empty until independently labeled live cases are available; synthetic
+  precision/recall does not count toward the activation gate.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The kill switch must remain off until the shadow acceptance gate below is
   satisfied and the owner explicitly approves a separate routing release.
@@ -166,7 +171,7 @@ Before any extended-hours customer alert is armed:
 
 - at least 10 clean live shadow sessions;
 - at least 95% recall for scheduled, liquid reactions reaching 8% on the
-  versioned holdout set;
+  independently labeled empirical holdout set;
 - observation latency no greater than one completed bar plus processing;
 - zero stale, zero-volume, or single-print alerts;
 - every candidate and rejection has symbol/session/provider/feed/revision/

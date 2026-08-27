@@ -1,0 +1,433 @@
+{
+  "schema_version": 1,
+  "truth_set_version": "postmarket-earnings-v1",
+  "observer_version": 1,
+  "thresholds": {
+    "move_pct": 8.0,
+    "min_cumulative_notional": 100000.0,
+    "persistence_bars": 2,
+    "max_close_divergence_pct": 10.0,
+    "max_data_age_seconds": 420
+  },
+  "created_at": "2026-08-27",
+  "policy": "Tuning and evaluation symbols are disjoint. Synthetic contract-holdout cases were fixed after observer thresholds shipped and are not used to retune v1. Empirical holdout remains empty until independently labeled production sessions are added.",
+  "cases": [
+    {
+      "id": "tuning_crm_2026_08_26",
+      "cohort": "tuning",
+      "label": "positive",
+      "symbol": "CRM",
+      "event_date": "2026-08-26",
+      "session_close_utc": "2026-08-26T20:00:00+00:00",
+      "rth_close": 206.11,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 223.50, "volume": 1800000},
+        {"offset_min": 5, "close": 228.00, "volume": 1200000},
+        {"offset_min": 10, "close": 230.00, "volume": 800000}
+      ],
+      "evaluation_offsets_min": [5, 10, 15],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 10,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "production-shaped:2026-08-26",
+      "notes": "Known CRM after-hours move used for tuning shape, not holdout evidence."
+    },
+    {
+      "id": "tuning_crwd_2026_08_26",
+      "cohort": "tuning",
+      "label": "positive",
+      "symbol": "CRWD",
+      "event_date": "2026-08-26",
+      "session_close_utc": "2026-08-26T20:00:00+00:00",
+      "rth_close": 189.42,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 189.26, "volume": 400000},
+        {"offset_min": 5, "close": 192.00, "volume": 500000},
+        {"offset_min": 10, "close": 205.00, "volume": 900000},
+        {"offset_min": 15, "close": 211.12, "volume": 1100000}
+      ],
+      "evaluation_offsets_min": [5, 10, 15, 20],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 20,
+      "eligible_offset_min": 20,
+      "failure_class": "none",
+      "provenance": "production-shaped:2026-08-26",
+      "notes": "Known delayed CRWD reaction used for tuning shape, not holdout evidence."
+    },
+    {
+      "id": "tuning_okta_2026_08_26",
+      "cohort": "tuning",
+      "label": "positive",
+      "symbol": "OKTA",
+      "event_date": "2026-08-26",
+      "session_close_utc": "2026-08-26T20:00:00+00:00",
+      "rth_close": 134.87,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 153.00, "volume": 700000},
+        {"offset_min": 5, "close": 158.00, "volume": 600000},
+        {"offset_min": 10, "close": 162.00, "volume": 500000}
+      ],
+      "evaluation_offsets_min": [5, 10, 15],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 10,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "production-shaped:2026-08-26",
+      "notes": "Known OKTA after-hours move used for tuning shape, not holdout evidence."
+    },
+    {
+      "id": "holdout_persistent_up",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "HOLDUP",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 109.00, "volume": 12000},
+        {"offset_min": 5, "close": 110.00, "volume": 11000},
+        {"offset_min": 10, "close": 111.00, "volume": 10000}
+      ],
+      "evaluation_offsets_min": [5, 10, 15],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 10,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Liquid positive reaction holds above threshold across consecutive bars."
+    },
+    {
+      "id": "holdout_persistent_down",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "HOLDDN",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 90.00, "volume": 12000},
+        {"offset_min": 5, "close": 89.00, "volume": 11000},
+        {"offset_min": 10, "close": 88.00, "volume": 10000}
+      ],
+      "evaluation_offsets_min": [5, 10, 15],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 10,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Liquid negative reaction holds below threshold across consecutive bars."
+    },
+    {
+      "id": "holdout_early_close_positive",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "EARLY",
+      "event_date": "2026-11-27",
+      "session_close_utc": "2026-11-27T18:00:00+00:00",
+      "rth_close": 50.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 54.50, "volume": 20000},
+        {"offset_min": 5, "close": 55.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [5, 10],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 10,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Official 13:00 ET early close is the baseline, not a fixed 16:00 close."
+    },
+    {
+      "id": "holdout_bounded_poll_latency",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "POLLDELAY",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 109.00, "volume": 12000},
+        {"offset_min": 5, "close": 110.00, "volume": 11000}
+      ],
+      "evaluation_offsets_min": [11],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 11,
+      "eligible_offset_min": 10,
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "A one-minute polling delay remains well inside the one-completed-bar latency gate."
+    },
+    {
+      "id": "holdout_quiet_report",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "QUIET",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 103.00, "volume": 20000},
+        {"offset_min": 5, "close": 104.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [5, 10],
+      "expected_candidate": false,
+      "expected_final_outcome": "BELOW_MOVE",
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Ordinary after-hours drift must remain quiet."
+    },
+    {
+      "id": "holdout_spike_then_fade",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "FADE",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 112.00, "volume": 20000},
+        {"offset_min": 5, "close": 101.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [5, 10],
+      "expected_candidate": false,
+      "expected_final_outcome": "BELOW_MOVE",
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "One completed spike that immediately fades never persists."
+    },
+    {
+      "id": "holdout_unstable_print",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "UNSTABLE",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 109.00, "volume": 20000},
+        {"offset_min": 5, "close": 125.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "UNSTABLE_PRINT",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Consecutive closes diverge too sharply to trust as a stable reaction."
+    },
+    {
+      "id": "holdout_below_notional",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "THIN",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 10},
+        {"offset_min": 5, "close": 111.00, "volume": 10}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "BELOW_NOTIONAL",
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "A large percentage move without enough traded notional is rejected."
+    },
+    {
+      "id": "holdout_bar_gap",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "GAPPED",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 10, "close": 111.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [15],
+      "expected_candidate": false,
+      "expected_final_outcome": "BAR_GAP",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "The two persistence bars are not consecutive."
+    },
+    {
+      "id": "holdout_zero_volume",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "ZEROVOL",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 5, "close": 111.00, "volume": 0}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "ZERO_VOLUME",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "A zero-volume bar cannot support a candidate."
+    },
+    {
+      "id": "holdout_duplicate_timestamp",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "DUPETS",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 0, "close": 111.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [5],
+      "expected_candidate": false,
+      "expected_final_outcome": "DUPLICATE_TIMESTAMP",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Duplicate vendor timestamps fail closed."
+    },
+    {
+      "id": "holdout_out_of_order",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "ORDER",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 5, "close": 111.00, "volume": 18000},
+        {"offset_min": 0, "close": 110.00, "volume": 20000}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "OUT_OF_ORDER",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Out-of-order vendor data fails closed."
+    },
+    {
+      "id": "holdout_malformed_ohlc",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "BADBAR",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 5, "open": 111.00, "high": 100.00, "low": 110.00, "close": 111.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "MALFORMED_BAR",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Impossible OHLC geometry fails closed."
+    },
+    {
+      "id": "holdout_stale_start",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "STALE",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 5, "close": 111.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [18],
+      "expected_candidate": false,
+      "expected_final_outcome": "STALE",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Observer starts with a completed series already older than the freshness limit."
+    },
+    {
+      "id": "holdout_missing_rth_close",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "NORTH",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": null,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 5, "close": 111.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": false,
+      "expected_final_outcome": "NO_RTH_CLOSE",
+      "failure_class": "data_quality",
+      "provenance": "synthetic-contract:v1",
+      "notes": "A reaction has no honest percentage baseline without the official RTH close."
+    },
+    {
+      "id": "holdout_provider_failure",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "VENDORERR",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [],
+      "evaluation_offsets_min": [10],
+      "fault": "fetch_error",
+      "expected_candidate": false,
+      "expected_final_outcome": "FETCH_ERROR",
+      "failure_class": "provider",
+      "provenance": "synthetic-contract:v1",
+      "notes": "A provider exception becomes an explicit rejection, never a missing row or candidate."
+    },
+    {
+      "id": "holdout_forming_second_bar",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "FORMING",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 110.00, "volume": 20000},
+        {"offset_min": 5, "close": 112.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [8],
+      "expected_candidate": false,
+      "expected_final_outcome": "AWAITING_PERSISTENCE",
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "The forming second bar is excluded even though its partial move would qualify."
+    },
+    {
+      "id": "holdout_exact_threshold_boundary",
+      "cohort": "contract_holdout",
+      "label": "ambiguous",
+      "symbol": "BOUNDARY",
+      "event_date": "2026-07-15",
+      "session_close_utc": "2026-07-15T20:00:00+00:00",
+      "rth_close": 100.00,
+      "postmarket_bars": [
+        {"offset_min": 0, "close": 108.00, "volume": 20000},
+        {"offset_min": 5, "close": 108.00, "volume": 18000}
+      ],
+      "evaluation_offsets_min": [10],
+      "expected_candidate": null,
+      "expected_final_outcome": "CANDIDATE",
+      "failure_class": "none",
+      "provenance": "synthetic-contract:v1",
+      "notes": "Exact policy boundary is locked for regression but excluded from precision and recall."
+    }
+  ]
+}
