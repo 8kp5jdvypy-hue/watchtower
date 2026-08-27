@@ -163,12 +163,17 @@ evidence.
   adversarial contract-holdout cases. The empirical holdout is intentionally
   empty until independently labeled live cases are available; synthetic
   precision/recall does not count toward the activation gate.
-- Daily operational audit and empirical scoring: in review. Full-window,
+- Daily operational audit and empirical scoring: merged and deployed at
+  `b7d58f2`. Full-window,
   conservation, error, revision, provenance, latency, and candidate-ledger
   invariants produce an immutable daily report. Empirical scoring requires a
   separately locked, blinded, artifact-digested manifest and fails closed on
   missing symbols, policy drift, ambiguity, misses, false positives, or
   direction disagreement.
+- Aggregate evidence gate: in review. A locked, complete XNYS-session inventory
+  pins daily and control artifacts by SHA-256, recomputes aggregate confusion
+  and latency metrics, rejects mixed feed/provider eras, and emits only
+  `NOT_READY` or `ELIGIBLE_FOR_OWNER_REVIEW`. It has no activation path.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the
