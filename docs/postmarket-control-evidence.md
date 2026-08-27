@@ -89,3 +89,6 @@ will fail the aggregate digest check.
 - A failed artifact is useful evidence and must not be rewritten as passed.
 - Regenerate a new directory after any observer, persistence, health, Compose,
   or control-harness change.
+- `scripts/backup.sh` includes the evidence directory in its manifest-bound,
+  encrypted off-box backup set; `scripts/verify_backup.py` restores it only
+  after digest and safe-archive validation.

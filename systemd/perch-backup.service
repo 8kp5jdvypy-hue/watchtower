@@ -3,7 +3,7 @@
 # data/ directory is a bind mount, so the host's sqlite3 CLI sees the
 # exact same files the containers are writing.
 [Unit]
-Description=Perch nightly database backup
+Description=Perch nightly database and evidence backup
 After=perch.service
 
 [Service]

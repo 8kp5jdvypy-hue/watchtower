@@ -174,11 +174,16 @@ evidence.
   pins daily and control artifacts by SHA-256, recomputes aggregate confusion
   and latency metrics, rejects mixed feed/provider eras, and emits only
   `NOT_READY` or `ELIGIBLE_FOR_OWNER_REVIEW`. It has no activation path.
-- Operational control evidence: in review. An offline harness exercises real
+- Operational control evidence: merged at `17afffd`. An offline harness
+  exercises real
   failure-conservation, default-off kill-switch, delivery-isolation, Git
   rollback-ancestry, SQLite online-backup, point-in-time restore, integrity,
   and append-only invariants. It writes immutable, SHA-256-addressable control
   artifacts and refuses partial or overwrite-prone evidence sets.
+- Complete evidence custody: in review. Nightly backups cover all durable
+  decision/evaluation/shadow databases plus immutable postmarket audits and
+  controls, bind each set with SHA-256, ship irrebuildable state encrypted
+  off-box, and support a traversal-safe isolated restore with SQLite checks.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the

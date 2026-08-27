@@ -18,7 +18,8 @@ backup.
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |
-| `scripts/backup.sh` | `.backup`-based dump of `journal.db`/`users.db`/`universe.db`, gzipped, rotated after 14 days by default. Also ships `journal.db`/`users.db`/`.env` off-box, GPG-encrypted, once `/opt/perch/.backup-env` is configured — see Backups below |
+| `scripts/backup.sh` | Verified online snapshots of all five durable SQLite databases plus immutable postmarket audits/evidence, SHA-256 manifesting, 14-day rotation, and encrypted off-box shipping of irrebuildable state — see Backups below |
+| `scripts/verify_backup.py` | Digest-check and isolated restore of one manifest-bound backup set; rejects missing databases, corrupt SQLite, and unsafe artifact archives |
 | `scripts/fetch_cache.py`, `scripts/purge_and_backfill_runts.py`, and other `scripts/*.py` tools | Not in the image (see Dockerfile) and need the app's real deps — see "Running `scripts/` tools in-container" below for the one correct invocation |
 
 ## First-time VPS setup
@@ -140,18 +141,31 @@ output going to shell history).
 ```bash
 BACKUP_DIR=/opt/perch/backups scripts/backup.sh
 ```
-It writes gzip'd, timestamped copies of the three SQLite databases to
-`$BACKUP_DIR` (`./backups` by default) and deletes anything older than
-`RETAIN_DAYS` (14 by default).
+It writes gzip'd, timestamped online snapshots of `journal.db`, `users.db`,
+`evaluations.db`, `postmarket_shadow.db`, and (when present) `universe.db` to
+`$BACKUP_DIR` (`./backups` by default). The first four are required; a missing
+one makes the job fail loudly. `universe.db` is optional because it can be
+rebuilt from the asset catalog.
+
+The job also archives `data/postmarket_audits/` and
+`data/postmarket_evidence/` when present. Every SQLite snapshot passes
+`PRAGMA quick_check`; the artifact archive is rejected if it contains a
+symlink, special file, absolute path, traversal, or unexpected root. A
+`manifest_<stamp>.sha256` binds every file in that timestamped set. Local
+retention removes only recognized database, artifact, and manifest filenames
+older than `RETAIN_DAYS` (14 by default).
 
 **These local backups are not enough on their own** — they live on the
 same disk as the data they're backing up, so a VPS or disk failure
 takes out both simultaneously. `scripts/backup.sh` also ships
-`journal.db`, `users.db`, and `.env` off-box (universe.db is skipped —
-cheaply rebuildable, see the script's own comment), GPG-encrypted
-before upload, once the setup below is done. Opt-in: with neither of
-the two env vars below set, off-box shipping is silently skipped and
-nothing changes from today's local-only behavior.
+`journal.db`, `users.db`, `evaluations.db`, `postmarket_shadow.db`, the
+postmarket artifact archive, the set manifest, and `.env` off-box
+(`universe.db` is skipped because it is rebuildable), GPG-encrypted before
+upload, once the setup below is done. With `RCLONE_REMOTE` unset, the job is
+explicitly local-only. If a remote is configured but its encryption key is
+missing, the job fails instead of silently downgrading to local-only custody.
+The remote must include a non-empty path (`remote:bucket-or-prefix`); remote-root
+retention is refused.
 
 ### Off-box setup (one-time)
 
@@ -212,46 +226,78 @@ S3-compatible provider works the same way; swap the endpoint in
 
 ### Restore
 
-**Local (no off-box involved):**
+**Verify and stage a local backup set (no live files are replaced):**
 ```bash
-systemctl stop perch.service         # stop the containers writing to these files
-gunzip -c backups/journal_<stamp>.db.gz > data/journal.db
-gunzip -c backups/users_<stamp>.db.gz > data/users.db
-gunzip -c backups/universe_<stamp>.db.gz > data/universe.db
+python3 scripts/verify_backup.py \
+  backups/manifest_<stamp>.sha256 \
+  /tmp/perch-restore-<stamp>
+```
+
+The command verifies every manifest digest before creating the destination,
+decompresses into an isolated staging directory, runs `PRAGMA quick_check` on
+every restored database, safely extracts postmarket artifacts, and writes
+`restore_report.json`. It refuses an existing destination and leaves live
+`data/` untouched. Review the report and restored contents before any disaster
+recovery cutover.
+
+**Install a reviewed staged restore during an actual recovery:**
+
+```bash
+systemctl stop perch.service
+install -m 0644 /tmp/perch-restore-<stamp>/data/journal.db data/journal.db
+install -m 0644 /tmp/perch-restore-<stamp>/data/users.db data/users.db
+install -m 0644 /tmp/perch-restore-<stamp>/data/evaluations.db data/evaluations.db
+install -m 0644 /tmp/perch-restore-<stamp>/data/postmarket_shadow.db data/postmarket_shadow.db
+[[ ! -f /tmp/perch-restore-<stamp>/data/universe.db ]] || \
+  install -m 0644 /tmp/perch-restore-<stamp>/data/universe.db data/universe.db
+[[ ! -d /tmp/perch-restore-<stamp>/data/postmarket_audits ]] || \
+  cp -a /tmp/perch-restore-<stamp>/data/postmarket_audits/. data/postmarket_audits/
+[[ ! -d /tmp/perch-restore-<stamp>/data/postmarket_evidence ]] || \
+  cp -a /tmp/perch-restore-<stamp>/data/postmarket_evidence/. data/postmarket_evidence/
 systemctl start perch.service
 ```
+
+Only use the installation block after resolving the exact timestamp and
+reviewing the isolated restore. It is intentionally not automated by the
+verifier.
 
 **Off-box (the actual disaster-recovery path — the one that matters if
 the VPS itself is gone):**
 ```bash
-mkdir -p /tmp/restore && cd /tmp/restore
+RESTORE_WORKDIR=$(mktemp -d /tmp/perch-offbox-restore.XXXXXX)
+cd "$RESTORE_WORKDIR"
 rclone copy do-spaces:perch-backups/journal_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/users_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
+rclone copy do-spaces:perch-backups/evaluations_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
+rclone copy do-spaces:perch-backups/postmarket_shadow_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
+rclone copy do-spaces:perch-backups/postmarket_artifacts_<stamp>.tar.gz.gpg . --config ~/.config/rclone/rclone.conf
+rclone copy do-spaces:perch-backups/manifest_<stamp>.sha256.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/env_<stamp>.gpg . --config ~/.config/rclone/rclone.conf
 
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d journal_<stamp>.db.gz.gpg > journal_<stamp>.db.gz
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d users_<stamp>.db.gz.gpg > users_<stamp>.db.gz
+gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d evaluations_<stamp>.db.gz.gpg > evaluations_<stamp>.db.gz
+gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d postmarket_shadow_<stamp>.db.gz.gpg > postmarket_shadow_<stamp>.db.gz
+gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d postmarket_artifacts_<stamp>.tar.gz.gpg > postmarket_artifacts_<stamp>.tar.gz
+gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d manifest_<stamp>.sha256.gpg > manifest_<stamp>.sha256
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d env_<stamp>.gpg > .env.restored
 
-systemctl stop perch.service
-gunzip -c journal_<stamp>.db.gz > /opt/perch/data/journal.db
-gunzip -c users_<stamp>.db.gz > /opt/perch/data/users.db
-cp .env.restored /opt/perch/.env   # review before overwriting a live .env — see below
-systemctl start perch.service
-rm -rf /tmp/restore                # don't leave decrypted secrets/data on disk
+python3 /opt/perch/scripts/verify_backup.py \
+  manifest_<stamp>.sha256 \
+  /tmp/perch-restore-<stamp>
 ```
+Review the isolated restore report before installing data or `.env`. Do not
+delete the staged evidence until recovery verification is complete.
 Restoring `.env` onto a VPS that still has a working `.env` is rarely
 what you want (it would roll back credentials that may have since
 rotated) — this path is really for rebuilding on a *new* VPS after the
 old one is gone, where there's no existing `.env` to conflict with.
 
-**Tested, 2026-08-12**: the SQLite backup/restore mechanics
-(`.backup` → `gzip` → `gunzip`, verified via `PRAGMA integrity_check`
-and an exact row-count match against a real, non-trivial database)
-were run end-to-end and confirmed correct. The GPG encrypt/decrypt and
-`rclone` upload/download legs use standard, well-documented commands
-but have **not** been run against a real DigitalOcean Spaces bucket —
-neither `gpg` nor `rclone` exist in the environment this was built in.
+The local online-snapshot, compression, digest, five-database restore,
+`PRAGMA quick_check`, artifact recovery, and traversal/tamper rejection paths
+are exercised end-to-end in the automated test suite. The GPG encrypt/decrypt
+and `rclone` upload/download legs use standard commands and simulated integration
+coverage but have **not** been run against a real DigitalOcean Spaces bucket.
 **Before trusting this for real disaster recovery, run the off-box
 restore commands above once, for real**, against a test file, and
 update this note with the date. A backup nobody has restored from is a
