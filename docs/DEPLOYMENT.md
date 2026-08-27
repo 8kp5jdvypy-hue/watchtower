@@ -164,6 +164,9 @@ postmarket artifact archive, the set manifest, and `.env` off-box
 upload, once the setup below is done. With `RCLONE_REMOTE` unset, the job is
 explicitly local-only. If a remote is configured but its encryption key is
 missing, the job fails instead of silently downgrading to local-only custody.
+The encrypted off-box manifest is generated from that exact remote payload, so
+an isolated disaster restore never requires the intentionally omitted
+`universe.db`; the local manifest continues to cover it when present.
 The remote must include a non-empty path (`remote:bucket-or-prefix`); remote-root
 retention is refused.
 

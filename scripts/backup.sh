@@ -120,6 +120,7 @@ elif [[ -z "${BACKUP_ENCRYPTION_PASSPHRASE_FILE:-}" || ! -f "$BACKUP_ENCRYPTION_
 else
   OFFBOX_STAGE="$(mktemp -d)"
   trap 'rm -rf "$OFFBOX_STAGE"' EXIT
+  OFFBOX_MANIFEST_FILES=()
 
   encrypt_and_stage() {
     local src="$1" name="$2"
@@ -133,11 +134,30 @@ else
   # excluded because it can be rebuilt from the asset catalog.
   for db in "${OFFBOX_DBS[@]}"; do
     gz="$BACKUP_DIR/${db}_${STAMP}.db.gz"
-    [[ -f "$gz" ]] && encrypt_and_stage "$gz" "${db}_${STAMP}.db.gz"
+    if [[ -f "$gz" ]]; then
+      name="${db}_${STAMP}.db.gz"
+      encrypt_and_stage "$gz" "$name"
+      OFFBOX_MANIFEST_FILES+=("$name")
+    fi
   done
   artifact="$BACKUP_DIR/postmarket_artifacts_${STAMP}.tar.gz"
-  [[ -f "$artifact" ]] && encrypt_and_stage "$artifact" "$(basename "$artifact")"
-  encrypt_and_stage "$BACKUP_DIR/$manifest_name" "$manifest_name"
+  if [[ -f "$artifact" ]]; then
+    artifact_name="$(basename "$artifact")"
+    encrypt_and_stage "$artifact" "$artifact_name"
+    OFFBOX_MANIFEST_FILES+=("$artifact_name")
+  fi
+
+  # The local manifest includes optional universe.db when present, but that
+  # rebuildable database is intentionally not shipped off-box. Build the
+  # encrypted remote manifest from the exact off-box payload instead of
+  # uploading a manifest that references a file recovery cannot download.
+  offbox_manifest_plain="$OFFBOX_STAGE/${manifest_name}.plain"
+  (
+    cd "$BACKUP_DIR"
+    sha256sum "${OFFBOX_MANIFEST_FILES[@]}" > "$offbox_manifest_plain"
+  )
+  encrypt_and_stage "$offbox_manifest_plain" "$manifest_name"
+  rm -f "$offbox_manifest_plain"
   # .env: not a sqlite db, no .backup step needed — straight encrypt.
   [[ -f "$ENV_FILE" ]] && encrypt_and_stage "$ENV_FILE" "env_${STAMP}"
 

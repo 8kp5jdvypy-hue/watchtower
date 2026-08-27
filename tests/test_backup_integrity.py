@@ -363,7 +363,10 @@ cp "$src" "$out"
 set -euo pipefail
 if [[ "$1" == "copy" ]]; then
   for path in "$2"/*; do
-    [[ -f "$path" ]] && basename "$path"
+    if [[ -f "$path" ]]; then
+      basename "$path"
+      cp "$path" "$FAKE_RCLONE_CAPTURE/"
+    fi
   done | sort > "$FAKE_RCLONE_LOG"
 fi
 """,
@@ -374,6 +377,8 @@ fi
     passphrase = tmp_path / "passphrase"
     passphrase.write_text("not-a-real-passphrase\n", encoding="utf-8")
     log = tmp_path / "rclone-files.txt"
+    capture = tmp_path / "remote"
+    capture.mkdir()
 
     _run_backup(
         tmp_path,
@@ -385,6 +390,7 @@ fi
             "RCLONE_CONFIG": str(tmp_path / "rclone.conf"),
             "BACKUP_ENCRYPTION_PASSPHRASE_FILE": str(passphrase),
             "FAKE_RCLONE_LOG": str(log),
+            "FAKE_RCLONE_CAPTURE": str(capture),
         },
     )
 
@@ -402,6 +408,21 @@ fi
     assert any(name.startswith("manifest_") and name.endswith(".sha256.gpg") for name in names)
     assert any(name.startswith("env_") and name.endswith(".gpg") for name in names)
     assert not any(name.startswith("universe_") for name in names)
+
+    # Fake gpg copies plaintext, so stripping the .gpg suffix simulates an
+    # off-box download/decrypt. The remote manifest must restore the complete
+    # irrebuildable set without asking for the intentionally omitted universe.
+    downloaded = tmp_path / "downloaded"
+    downloaded.mkdir()
+    for encrypted in capture.glob("*.gpg"):
+        if encrypted.name.startswith("env_"):
+            continue
+        shutil.copyfile(encrypted, downloaded / encrypted.name[:-4])
+    remote_manifest = next(downloaded.glob("manifest_*.sha256"))
+    report = restore_backup(remote_manifest, tmp_path / "offbox-restore")
+    assert set(report.databases) == set(REQUIRED_DATABASES)
+    assert "universe" not in report.databases
+    assert report.postmarket_artifacts
 
 
 def test_configured_offbox_without_key_fails_instead_of_downgrading(tmp_path):
