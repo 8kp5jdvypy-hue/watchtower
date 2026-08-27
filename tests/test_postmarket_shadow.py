@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from tradebot import postmarket_shadow as shadow_module
 from tradebot.detectors import Bar
 from tradebot.events import add_event_window
 from tradebot.journal import connect as connect_journal
 from tradebot.marketdata import IntradaySessionBars
 from tradebot.postmarket import connect as connect_shadow
 from tradebot.postmarket_shadow import (
+    audit_heartbeat_fields,
+    idle_sleep_seconds,
     postmarket_is_active,
     postmarket_window,
     run_shadow_tick,
@@ -147,6 +150,16 @@ def test_real_calendar_window_includes_early_close_and_final_bar_grace():
     assert postmarket_is_active(end + timedelta(seconds=1)) is False
 
 
+def test_idle_sleep_aligns_to_regular_and_early_close_without_crossing_start():
+    regular_preclose = datetime(2026, 8, 26, 19, 58, tzinfo=timezone.utc)
+    early_preclose = datetime(2026, 11, 27, 17, 59, 30, tzinfo=timezone.utc)
+    far_from_close = datetime(2026, 8, 26, 18, 0, tzinfo=timezone.utc)
+
+    assert idle_sleep_seconds(regular_preclose) == 120
+    assert idle_sleep_seconds(early_preclose) == 30
+    assert idle_sleep_seconds(far_from_close) == 300
+
+
 def test_atomic_heartbeat_replaces_complete_json_and_leaves_no_temp(tmp_path):
     path = tmp_path / "heartbeat.json"
     path.write_text('{"old":true}', encoding="utf-8")
@@ -156,3 +169,43 @@ def test_atomic_heartbeat_replaces_complete_json_and_leaves_no_temp(tmp_path):
 
     assert json.loads(path.read_text(encoding="utf-8")) == payload
     assert list(tmp_path.glob(".heartbeat.json.*.tmp")) == []
+
+
+def test_idle_heartbeat_keeps_latest_daily_audit_visible(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow_module, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(shadow_module, "write_due_audits", lambda now: ())
+    (tmp_path / "postmarket_audit_2026-08-26_v1.json").write_text(
+        json.dumps(
+            {
+                "session": "2026-08-26",
+                "operational_clean": False,
+                "issues": [{"code": "COVERAGE_STARTED_LATE"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fields = audit_heartbeat_fields(CLOSE + timedelta(hours=5))
+
+    assert fields == {
+        "audit_status": "current",
+        "audits_written": 0,
+        "latest_audit": {
+            "session": "2026-08-26",
+            "operational_clean": False,
+            "issue_codes": ["COVERAGE_STARTED_LATE"],
+        },
+    }
+
+
+def test_corrupt_daily_audit_is_loud_in_heartbeat(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow_module, "AUDIT_DIR", tmp_path)
+    monkeypatch.setattr(shadow_module, "write_due_audits", lambda now: ())
+    (tmp_path / "postmarket_audit_2026-08-26_v1.json").write_text(
+        "not-json", encoding="utf-8"
+    )
+
+    fields = audit_heartbeat_fields(CLOSE + timedelta(hours=5))
+
+    assert fields["audit_status"] == "error"
+    assert fields["audit_error"].startswith("JSONDecodeError:")
