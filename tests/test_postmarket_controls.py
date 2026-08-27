@@ -58,6 +58,7 @@ def _git_fixture(tmp_path: Path) -> tuple[Path, str, str, str]:
     _git(repo, "add", "side.txt")
     _git(repo, "commit", "-m", "side")
     side = _git(repo, "rev-parse", "--short=7", "HEAD")
+    _git(repo, "switch", "--detach", current)
     return repo, base, current, side
 
 
@@ -244,6 +245,22 @@ def test_suite_refuses_to_overwrite_any_existing_evidence_set(tmp_path):
 
     assert sentinel.read_text(encoding="utf-8") == "keep me"
     assert sorted(path.name for path in output.iterdir()) == ["kill_switch.json"]
+
+
+def test_suite_refuses_revision_that_is_not_checked_out_head(tmp_path):
+    repo, base, current, _ = _git_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="does not match checked-out HEAD"):
+        run_control_suite(
+            base,
+            base,
+            tmp_path / "evidence",
+            completed_at=COMPLETED,
+            repo_path=repo,
+        )
+
+    assert _git(repo, "rev-parse", "--short=7", "HEAD") == current
+    assert not (tmp_path / "evidence").exists()
 
 
 def test_suite_publication_is_atomic_when_a_write_fails(tmp_path, monkeypatch):

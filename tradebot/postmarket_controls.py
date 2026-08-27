@@ -379,6 +379,19 @@ def _git_is_ancestor(repo_path: Path, ancestor: str, descendant: str) -> bool:
     return result.returncode == 0
 
 
+def _git_head(repo_path: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+        cwd=repo_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ValueError(f"cannot resolve checked-out HEAD in {repo_path}")
+    return result.stdout.strip().lower()
+
+
 def _database_snapshot(conn: sqlite3.Connection) -> dict[str, object]:
     return {
         "quick_check": [row[0] for row in conn.execute("PRAGMA quick_check")],
@@ -548,6 +561,13 @@ def run_control_suite(
     repo_path: Path = REPO_ROOT,
 ) -> tuple[WrittenControl, ...]:
     completed = _completed_at(completed_at)
+    tested_commit = _git_commit(repo_path, revision)
+    checked_out_commit = _git_head(repo_path)
+    if tested_commit != checked_out_commit:
+        raise ValueError(
+            "revision does not match checked-out HEAD; refusing false attribution "
+            f"(revision={tested_commit}, HEAD={checked_out_commit})"
+        )
     exercises: tuple[Callable[[], ControlEvidence], ...] = (
         lambda: run_failure_injection(revision, completed_at=completed),
         lambda: run_kill_switch(revision, completed_at=completed),

@@ -56,7 +56,9 @@ The exercise never replaces a live database or changes the checked-out code.
 ## Running the suite
 
 Run it from a clean checkout of the revision that produced the shadow evidence.
-Use a reviewed ancestor as the rollback target:
+The declared tested revision must resolve to the checkout's exact `HEAD`; the
+tool refuses to attribute newer code to an older evidence revision. Use a
+reviewed ancestor as the rollback target:
 
 ```bash
 REVISION=$(git rev-parse --short=7 HEAD)
