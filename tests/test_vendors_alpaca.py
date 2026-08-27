@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import logging
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -119,7 +120,7 @@ def test_timeout_adapter_preserves_an_explicit_scalar_timeout(monkeypatch):
     assert capture["timeout"] == 7
 
 
-def test_all_three_client_factories_mount_the_timeout_adapter(monkeypatch):
+def test_all_client_factories_mount_the_timeout_adapter(monkeypatch):
     """The explicit compatibility test for the one private-SDK coupling
     this fix relies on: client._session. If alpaca-py 0.43.5 ever stops
     exposing a plain requests.Session there, this fails loudly and
@@ -127,7 +128,12 @@ def test_all_three_client_factories_mount_the_timeout_adapter(monkeypatch):
     monkeypatch.setenv("ALPACA_KEY_ID", "test-key-id")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "test-secret-key")
 
-    factories = (alpaca_module._client, alpaca_module._option_client, alpaca_module._trading_client)
+    factories = (
+        alpaca_module._client,
+        alpaca_module._option_client,
+        alpaca_module._trading_client,
+        alpaca_module._screener_client,
+    )
     for factory in factories:
         client = factory()
         https_adapter = client._session.get_adapter("https://data.alpaca.markets/v2/stocks/bars")
@@ -459,6 +465,96 @@ def test_fetch_daily_bars_bulk_logs_correct_chunk_context_and_no_symbol_list(mon
     all_messages = "\n".join(r.message for r in caplog.records)
     for symbol in symbols:
         assert symbol not in all_messages
+
+
+def test_fetch_intraday_bars_bulk_conserves_missing_symbols_and_chunk_context(
+    monkeypatch, caplog,
+):
+    class _FakeBar:
+        timestamp = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
+        open = high = low = close = 100.0
+        volume = 1000
+
+    class _FakeResponse:
+        def __init__(self, symbols):
+            self.data = {symbol: [_FakeBar()] for symbol in symbols if symbol != "MISSING"}
+
+    class _FakeClient:
+        def get_stock_bars(self, request):
+            return _FakeResponse(request.symbol_or_symbols)
+
+    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeClient())
+    monkeypatch.setattr(alpaca_module, "BULK_FETCH_CHUNK_SIZE", 2)
+    symbols = ["AAA", "MISSING", "CCC"]
+
+    with caplog.at_level("INFO", logger="watchtower.vendors.alpaca"):
+        result = alpaca_module.fetch_intraday_bars_bulk(symbols, date(2026, 8, 27))
+
+    assert set(result) == {"AAA", "CCC"}
+    starts = [record.message for record in caplog.records if "vendor_call_start" in record.message]
+    assert len(starts) == 2
+    assert "operation=fetch_intraday_bars_bulk" in starts[0]
+    assert "chunk_index=1" in starts[0] and "chunk_count=2" in starts[0]
+    assert "session=2026-08-27" in starts[0]
+    all_messages = "\n".join(record.message for record in caplog.records)
+    for symbol in symbols:
+        assert symbol not in all_messages
+
+
+def test_intraday_request_window_covers_complete_est_postmarket_hour():
+    start, end = alpaca_module._intraday_request_window(date(2026, 12, 15))
+
+    assert start == datetime(2026, 12, 15, 5, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 12, 16, 5, 0, tzinfo=timezone.utc)
+    assert datetime(2026, 12, 16, 1, 0, tzinfo=timezone.utc) < end
+
+
+def test_marketwide_screen_preserves_source_rank_metric_and_timestamp(monkeypatch):
+    updated = datetime(2026, 8, 27, 20, 9, tzinfo=timezone.utc)
+
+    class _FakeScreener:
+        def get_market_movers(self, request):
+            assert request.top == 50
+            return SimpleNamespace(
+                gainers=[SimpleNamespace(symbol="GAIN", percent_change=12.5, price=22.0)],
+                losers=[SimpleNamespace(symbol="LOSS", percent_change=-9.0, price=8.0)],
+                last_updated=updated,
+            )
+
+        def get_most_actives(self, request):
+            symbol = "VOL" if str(request.by.value) == "volume" else "TRADES"
+            return SimpleNamespace(
+                most_actives=[SimpleNamespace(symbol=symbol, volume=1000, trade_count=200)],
+                last_updated=updated,
+            )
+
+    monkeypatch.setattr(alpaca_module, "_screener_client", lambda: _FakeScreener())
+
+    screen = alpaca_module.fetch_marketwide_postmarket_screen(50)
+
+    assert screen.provider == "alpaca"
+    assert screen.feed == "sip"
+    assert screen.requested_top_n == 50
+    assert [entry.source for entry in screen.entries] == [
+        "market_gainer",
+        "market_loser",
+        "most_active_volume",
+        "most_active_trades",
+    ]
+    assert screen.entries[0].move_pct == 12.5
+    assert screen.entries[0].rank == 1
+    assert all(entry.source_updated_at == updated for entry in screen.entries)
+    assert dict(screen.source_updates) == {
+        "market_movers": updated,
+        "most_actives_volume": updated,
+        "most_actives_trades": updated,
+    }
+
+
+@pytest.mark.parametrize("top", [0, 51])
+def test_marketwide_screen_rejects_out_of_contract_top_bound(top):
+    with pytest.raises(ValueError, match="between 1 and 50"):
+        alpaca_module.fetch_marketwide_postmarket_screen(top)
 
 
 def test_fetch_option_chain_logs_contracts_phase_then_chain_snapshot_phase(monkeypatch, caplog):

@@ -180,10 +180,20 @@ evidence.
   rollback-ancestry, SQLite online-backup, point-in-time restore, integrity,
   and append-only invariants. It writes immutable, SHA-256-addressable control
   artifacts and refuses partial or overwrite-prone evidence sets.
-- Complete evidence custody: in review. Nightly backups cover all durable
+- Complete evidence custody: merged and production-restored through the
+  encrypted off-box path at `6261801`. Nightly backups cover all durable
   decision/evaluation/shadow databases plus immutable postmarket audits and
   controls, bind each set with SHA-256, ship irrebuildable state encrypted
   off-box, and support a traversal-safe isolated restore with SQLite checks.
+- Slice 6, whole-market unscheduled discovery: implemented as a separate,
+  default-off shadow service pending review and live provider-contract
+  calibration. Alpaca's bounded real-time SIP mover and activity screens form
+  Stage 1; Perch bulk-fetches completed five-minute bars only for their
+  deduplicated union and reuses the strict reaction evaluator for Stage 2.
+  Provider bounds/timestamps/metrics, active-universe conservation, missing
+  bars, evaluations, and candidates are append-only in the already-backed-up
+  shadow database. This slice has no delivery dependency and does not alter or
+  reset the scheduled-earnings evidence program.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the

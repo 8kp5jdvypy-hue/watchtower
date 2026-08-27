@@ -368,10 +368,19 @@ def evaluate_earnings_reaction(
     )
 
 
+# The evaluator's contract is price/volume based and contains no earnings-only
+# branch. Keep the original public name for replay compatibility while giving
+# unscheduled market-wide discovery an honest domain name.
+evaluate_postmarket_reaction = evaluate_earnings_reaction
+
+
 def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     path = Path(db_path if db_path is not None else DEFAULT_DB_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    # Scheduled and market-wide shadow observers share this backed-up ledger.
+    # Wait through brief write overlap instead of reporting a false lock error.
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
     return conn
 

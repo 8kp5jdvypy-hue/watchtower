@@ -12,13 +12,17 @@ import math
 import os
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from requests.adapters import HTTPAdapter
 
 from alpaca.common.exceptions import APIError
-from alpaca.data.enums import DataFeed, OptionsFeed
+from alpaca.data.enums import DataFeed, MarketType, MostActivesBy, OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import (
+    MarketMoversRequest,
+    MostActivesRequest,
     OptionBarsRequest,
     OptionChainRequest,
     StockBarsRequest,
@@ -31,6 +35,8 @@ from alpaca.trading.requests import GetAssetsRequest, GetOptionContractsRequest
 
 from tradebot.detectors import Bar
 from tradebot.marketdata import AssetInfo as MDAssetInfo
+from tradebot.marketdata import MarketScreenEntry as MDMarketScreenEntry
+from tradebot.marketdata import MarketWideScreen as MDMarketWideScreen
 from tradebot.marketdata import OptionChain as MDOptionChain
 from tradebot.marketdata import OptionContract as MDOptionContract
 from tradebot.marketdata import Quote as MDQuote
@@ -58,6 +64,7 @@ def _resolve_detector_data_feed() -> DataFeed:
 
 
 DETECTOR_DATA_FEED = _resolve_detector_data_feed()
+_EASTERN = ZoneInfo("America/New_York")
 
 
 class AlpacaCredentialsError(RuntimeError):
@@ -147,6 +154,11 @@ def _option_client() -> OptionHistoricalDataClient:
 def _trading_client() -> TradingClient:
     key_id, secret_key = _credentials()
     return _bound_timeout(TradingClient(key_id, secret_key, paper=True))
+
+
+def _screener_client() -> ScreenerClient:
+    key_id, secret_key = _credentials()
+    return _bound_timeout(ScreenerClient(key_id, secret_key))
 
 
 def _with_backoff(fn, max_retries: int = 5, base_delay: float = 2.0):
@@ -273,7 +285,7 @@ def fetch_daily_bars(symbol: str, n: int) -> list[Bar]:
 
 
 def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
-    """5-minute bars spanning the full calendar day (UTC) for one session —
+    """5-minute bars spanning the full New York calendar day for one session —
     covers premarket, RTH, and anything else the feed reports in that
     window. Callers slice into premarket vs. RTH by clock time.
 
@@ -283,8 +295,7 @@ def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
     own without a cache rebuild first.
     """
     client = _client()
-    start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
+    start, end = _intraday_request_window(session_date)
     request = StockBarsRequest(
         symbol_or_symbols=symbol,
         timeframe=TimeFrame(5, TimeFrameUnit.Minute),
@@ -300,6 +311,140 @@ def fetch_intraday_bars(symbol: str, session_date: date) -> list[Bar]:
     )
     raw = response.data.get(symbol, [])
     return _to_bars(symbol, raw)
+
+
+def fetch_intraday_bars_bulk(
+    symbols: list[str], session_date: date,
+) -> dict[str, list[Bar]]:
+    """One-session five-minute bars for a bounded multi-symbol candidate set.
+
+    This is deliberately not used against the complete asset universe. The
+    market-wide screener narrows that universe first; this call then retrieves
+    the real completed-bar inputs used by the strict postmarket evaluator.
+    Missing symbols remain absent so the caller can record them explicitly.
+    """
+    if not symbols:
+        return {}
+    client = _client()
+    start, end = _intraday_request_window(session_date)
+    out: dict[str, list[Bar]] = {}
+    chunk_count = math.ceil(len(symbols) / BULK_FETCH_CHUNK_SIZE)
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockBarsRequest(
+            symbol_or_symbols=chunk,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start,
+            end=end,
+            feed=DETECTOR_DATA_FEED,
+        )
+        response = _observed_call(
+            "fetch_intraday_bars_bulk",
+            lambda r=request: _with_backoff(lambda: client.get_stock_bars(r)),
+            client="stock",
+            chunk_index=i // BULK_FETCH_CHUNK_SIZE + 1,
+            chunk_count=chunk_count,
+            chunk_size=len(chunk),
+            session=session_date.isoformat(),
+        )
+        for symbol, raw_bars in response.data.items():
+            out[symbol] = _to_bars(symbol, raw_bars)
+    return out
+
+
+def _intraday_request_window(session_date: date) -> tuple[datetime, datetime]:
+    """UTC bounds for one complete New York trading date.
+
+    A fixed UTC day truncates 19:00-20:00 ET after daylight saving time
+    ends. Local-midnight bounds retain the complete extended-hours session
+    on both EST and EDT dates.
+    """
+    local_start = datetime.combine(session_date, datetime.min.time(), tzinfo=_EASTERN)
+    local_end = datetime.combine(
+        session_date + timedelta(days=1), datetime.min.time(), tzinfo=_EASTERN
+    )
+    return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
+
+
+def fetch_marketwide_postmarket_screen(top: int = 50) -> MDMarketWideScreen:
+    """Top SIP movers plus volume/trade-count leaders across US stocks.
+
+    Alpaca's screener performs the market-wide ranking. Perch records the
+    returned rank, metric, source timestamp, endpoint, and requested bound;
+    it never treats a provider top-N response as a complete per-symbol census.
+    """
+    if not 1 <= top <= 50:
+        raise ValueError("market-wide screener top must be between 1 and 50")
+    client = _screener_client()
+    movers = _observed_call(
+        "fetch_market_movers",
+        lambda: _with_backoff(
+            lambda: client.get_market_movers(
+                MarketMoversRequest(top=top, market_type=MarketType.STOCKS)
+            )
+        ),
+        client="screener",
+        top=top,
+    )
+    volume = _observed_call(
+        "fetch_most_actives",
+        lambda: _with_backoff(
+            lambda: client.get_most_actives(
+                MostActivesRequest(top=top, by=MostActivesBy.VOLUME)
+            )
+        ),
+        client="screener",
+        top=top,
+        by="volume",
+    )
+    trades = _observed_call(
+        "fetch_most_actives",
+        lambda: _with_backoff(
+            lambda: client.get_most_actives(
+                MostActivesRequest(top=top, by=MostActivesBy.TRADES)
+            )
+        ),
+        client="screener",
+        top=top,
+        by="trades",
+    )
+    entries: list[MDMarketScreenEntry] = []
+    for source, rows in (("market_gainer", movers.gainers), ("market_loser", movers.losers)):
+        entries.extend(
+            MDMarketScreenEntry(
+                symbol=row.symbol,
+                source=source,
+                rank=rank,
+                source_updated_at=movers.last_updated.astimezone(timezone.utc),
+                move_pct=float(row.percent_change),
+                price=float(row.price),
+            )
+            for rank, row in enumerate(rows, 1)
+        )
+    for source, response in (("most_active_volume", volume), ("most_active_trades", trades)):
+        entries.extend(
+            MDMarketScreenEntry(
+                symbol=row.symbol,
+                source=source,
+                rank=rank,
+                source_updated_at=response.last_updated.astimezone(timezone.utc),
+                volume=float(row.volume),
+                trade_count=float(row.trade_count),
+            )
+            for rank, row in enumerate(response.most_actives, 1)
+        )
+    return MDMarketWideScreen(
+        entries=tuple(entries),
+        requested_top_n=top,
+        provider="alpaca",
+        feed="sip",
+        endpoints=("market_movers", "most_actives_volume", "most_actives_trades"),
+        source_updates=(
+            ("market_movers", movers.last_updated.astimezone(timezone.utc)),
+            ("most_actives_volume", volume.last_updated.astimezone(timezone.utc)),
+            ("most_actives_trades", trades.last_updated.astimezone(timezone.utc)),
+        ),
+    )
 
 
 def fetch_latest_quote(symbol: str) -> MDQuote:

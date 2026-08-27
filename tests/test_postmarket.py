@@ -34,6 +34,12 @@ SESSION = date(2026, 8, 26)
 SESSION_CLOSE = datetime(2026, 8, 26, 20, 0, tzinfo=timezone.utc)
 
 
+def test_postmarket_connection_waits_through_brief_writer_overlap(tmp_path):
+    conn = connect(tmp_path / "postmarket.db")
+
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 10_000
+
+
 def _bar(ts, close, *, symbol="TEST", volume=1_000_000, open_=None, high=None, low=None):
     open_ = close if open_ is None else open_
     high = max(open_, close) if high is None else high
