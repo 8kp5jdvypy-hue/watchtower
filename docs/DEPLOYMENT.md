@@ -15,6 +15,7 @@ backup.
 | `Dockerfile` | One image for worker/bot/runner/postmarket shadows/api (they share code/deps; only the command differs) |
 | `requirements.txt` | Pinned direct dependencies for the image |
 | `docker-compose.yml` | worker / bot / runner / scheduled and market-wide postmarket shadows / api / caddy services with restart policies and market-aware healthchecks |
+| `docs/postmarket-discovery-daily-audit.md` | Immutable daily coverage, provenance, lifecycle, and conservation audit for market-wide discovery |
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |

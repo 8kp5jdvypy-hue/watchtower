@@ -27,6 +27,7 @@ from tradebot.postmarket_discovery import (
     record_discovery_tick,
     select_discovery_symbols,
 )
+from tradebot.postmarket_discovery_audit import write_completed_discovery_audits
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.universe import active_symbols, connect as connect_universe
 
@@ -36,6 +37,7 @@ JOURNAL_PATH = REPO_ROOT / "data" / "journal.db"
 UNIVERSE_PATH = REPO_ROOT / "data" / "universe.db"
 SHADOW_PATH = REPO_ROOT / "data" / "postmarket_shadow.db"
 HEARTBEAT_PATH = REPO_ROOT / "data" / "postmarket_discovery_heartbeat.json"
+AUDIT_DIR = REPO_ROOT / "data" / "postmarket_audits"
 POLL_SECONDS = 60
 IDLE_SECONDS = 300
 RUN_MODE = "postmarket-marketwide-shadow"
@@ -282,6 +284,69 @@ def configure_logging() -> None:
     )
 
 
+def write_due_discovery_audits(now: datetime) -> tuple[dict, ...]:
+    """Write immutable discovery reports only after full windows end."""
+    reports = write_completed_discovery_audits(
+        SHADOW_PATH,
+        AUDIT_DIR,
+        now=now,
+        audit_code_version=code_version(),
+    )
+    summaries = tuple(
+        {
+            "session": report.session,
+            "operational_clean": report.operational_clean,
+            "session_evidence_eligible": report.session_evidence_eligible,
+            "issue_codes": [issue.code for issue in report.issues],
+        }
+        for report in reports
+    )
+    for summary in summaries:
+        logger.info(
+            "postmarket_discovery_daily_audit session=%s operational_clean=%s "
+            "evidence_eligible=%s issues=%s",
+            summary["session"],
+            summary["operational_clean"],
+            summary["session_evidence_eligible"],
+            ",".join(summary["issue_codes"]) or "none",
+        )
+    return summaries
+
+
+def latest_discovery_audit_summary() -> dict | None:
+    paths = list(AUDIT_DIR.glob("postmarket_discovery_audit_*.json"))
+    if not paths:
+        return None
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    payload = max(
+        payloads,
+        key=lambda item: (item["session"], item.get("audit_version", 0)),
+    )
+    return {
+        "session": payload["session"],
+        "operational_clean": payload["operational_clean"],
+        "session_evidence_eligible": payload["session_evidence_eligible"],
+        "issue_codes": [issue["code"] for issue in payload["issues"]],
+    }
+
+
+def discovery_audit_heartbeat_fields(now: datetime) -> dict:
+    """Keep the latest discovery audit verdict visible in the heartbeat."""
+    try:
+        written = write_due_discovery_audits(now)
+        return {
+            "audit_status": "written" if written else "current",
+            "audits_written": len(written),
+            "latest_audit": latest_discovery_audit_summary(),
+        }
+    except Exception as exc:
+        logger.exception("postmarket discovery daily audit failed")
+        return {
+            "audit_status": "error",
+            "audit_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -295,7 +360,12 @@ def main() -> int:
             now = _utc_now()
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
-                {"ts_utc": now.isoformat(), "status": "disabled", "enabled": False},
+                {
+                    "ts_utc": now.isoformat(),
+                    "status": "disabled",
+                    "enabled": False,
+                    **discovery_audit_heartbeat_fields(now),
+                },
             )
             time.sleep(IDLE_SECONDS)
 
@@ -314,7 +384,10 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
-            write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("idle", now))
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH,
+                _heartbeat("idle", now, **discovery_audit_heartbeat_fields(now)),
+            )
             time.sleep(idle_sleep_seconds(now))
             continue
         write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("running", now))
