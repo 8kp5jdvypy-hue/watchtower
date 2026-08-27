@@ -24,6 +24,7 @@ import exchange_calendars as ecals
 from tradebot.events import scheduled_after_hours_earnings_symbols
 from tradebot.journal import code_version, connect as connect_journal, new_run_id
 from tradebot.marketdata import LiveMarketData
+from tradebot.postmarket_audit import write_completed_operational_audits
 from tradebot.postmarket import (
     ReactionEvaluation,
     connect as connect_shadow,
@@ -36,6 +37,7 @@ from tradebot.postmarket import (
 REPO_ROOT = Path(__file__).resolve().parent.parent
 JOURNAL_PATH = REPO_ROOT / "data" / "journal.db"
 HEARTBEAT_PATH = REPO_ROOT / "data" / "postmarket_heartbeat.json"
+AUDIT_DIR = REPO_ROOT / "data" / "postmarket_audits"
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 POLL_SECONDS = 60
@@ -90,6 +92,17 @@ def postmarket_window(
 def postmarket_is_active(now: datetime, *, calendar=CALENDAR) -> bool:
     window = postmarket_window(now, calendar=calendar)
     return window is not None and window[1] <= now <= window[2]
+
+
+def idle_sleep_seconds(now: datetime, *, calendar=CALENDAR) -> float:
+    """Wake at the real close instead of sleeping across the window start."""
+    window = postmarket_window(now, calendar=calendar)
+    if window is None:
+        return float(IDLE_SECONDS)
+    seconds_until_close = (window[1] - now).total_seconds()
+    if seconds_until_close <= 0:
+        return float(IDLE_SECONDS)
+    return max(0.1, min(float(IDLE_SECONDS), seconds_until_close))
 
 
 def _detector_data_feed() -> str:
@@ -199,6 +212,66 @@ def configure_logging() -> None:
     )
 
 
+def write_due_audits(now: datetime) -> tuple[dict, ...]:
+    """Backfill immutable operational reports after their full windows end."""
+    reports = write_completed_operational_audits(
+        REPO_ROOT / "data" / "postmarket_shadow.db",
+        AUDIT_DIR,
+        now=now,
+        journal_path=JOURNAL_PATH,
+        audit_code_version=code_version(),
+    )
+    summaries = tuple(
+        {
+            "session": report.session,
+            "operational_clean": report.operational_clean,
+            "issue_codes": [issue.code for issue in report.issues],
+        }
+        for report in reports
+    )
+    for summary in summaries:
+        logger.info(
+            "postmarket_daily_audit session=%s operational_clean=%s issues=%s",
+            summary["session"],
+            summary["operational_clean"],
+            ",".join(summary["issue_codes"]) or "none",
+        )
+    return summaries
+
+
+def latest_audit_summary() -> dict | None:
+    paths = list(AUDIT_DIR.glob("postmarket_audit_*.json"))
+    if not paths:
+        return None
+    payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
+    payload = max(
+        payloads,
+        key=lambda item: (item["session"], item.get("audit_version", 0)),
+    )
+    return {
+        "session": payload["session"],
+        "operational_clean": payload["operational_clean"],
+        "issue_codes": [issue["code"] for issue in payload["issues"]],
+    }
+
+
+def audit_heartbeat_fields(now: datetime) -> dict:
+    """Keep the latest durable verdict visible after its write tick."""
+    try:
+        written = write_due_audits(now)
+        return {
+            "audit_status": "written" if written else "current",
+            "audits_written": len(written),
+            "latest_audit": latest_audit_summary(),
+        }
+    except Exception as exc:
+        logger.exception("postmarket daily audit failed")
+        return {
+            "audit_status": "error",
+            "audit_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -213,7 +286,12 @@ def main() -> int:
             now = _utc_now()
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
-                {"ts_utc": now.isoformat(), "status": "disabled", "enabled": False},
+                {
+                    "ts_utc": now.isoformat(),
+                    "status": "disabled",
+                    "enabled": False,
+                    **audit_heartbeat_fields(now),
+                },
             )
             time.sleep(IDLE_SECONDS)
 
@@ -230,8 +308,11 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
-            write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("idle", now))
-            time.sleep(IDLE_SECONDS)
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH,
+                _heartbeat("idle", now, **audit_heartbeat_fields(now)),
+            )
+            time.sleep(idle_sleep_seconds(now))
             continue
 
         write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("running", now))

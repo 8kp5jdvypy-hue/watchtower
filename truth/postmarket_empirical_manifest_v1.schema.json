@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_empirical_manifest_v1.schema.json",
+  "title": "Postmarket empirical evidence manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "manifest_version",
+    "session",
+    "created_at_utc",
+    "labeler",
+    "label_method",
+    "blinded_to_observer_output",
+    "eligibility",
+    "artifacts",
+    "labels"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"const": "locked"},
+    "manifest_version": {"type": "string", "minLength": 1},
+    "session": {"type": "string", "format": "date"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "labeler": {"type": "string", "minLength": 1},
+    "label_method": {
+      "enum": ["blind_bar_review", "multi_provider_reconciliation"]
+    },
+    "blinded_to_observer_output": {"const": true},
+    "eligibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["move_pct", "min_cumulative_notional", "persistence_bars"],
+      "properties": {
+        "move_pct": {"type": "number", "exclusiveMinimum": 0},
+        "min_cumulative_notional": {"type": "number", "exclusiveMinimum": 0},
+        "persistence_bars": {"type": "integer", "minimum": 2}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["provider", "feed", "endpoint", "acquired_at_utc", "sha256"],
+        "properties": {
+          "provider": {"type": "string", "minLength": 1},
+          "feed": {"type": "string", "minLength": 1},
+          "endpoint": {"type": "string", "minLength": 1},
+          "acquired_at_utc": {"type": "string", "format": "date-time"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+        }
+      }
+    },
+    "labels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "classification",
+          "direction",
+          "eligible_at_utc",
+          "max_abs_move_pct",
+          "cumulative_notional",
+          "reason_code",
+          "rationale"
+        ],
+        "properties": {
+          "symbol": {"type": "string", "minLength": 1},
+          "classification": {"enum": ["eligible", "ineligible", "ambiguous"]},
+          "direction": {"type": ["string", "null"], "enum": ["up", "down", null]},
+          "eligible_at_utc": {"type": ["string", "null"], "format": "date-time"},
+          "max_abs_move_pct": {"type": "number", "minimum": 0},
+          "cumulative_notional": {"type": "number", "minimum": 0},
+          "reason_code": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string", "minLength": 1}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"classification": {"const": "eligible"}}},
+            "then": {
+              "properties": {
+                "direction": {"enum": ["up", "down"]},
+                "eligible_at_utc": {"type": "string", "format": "date-time"}
+              }
+            },
+            "else": {
+              "properties": {
+                "direction": {"const": null},
+                "eligible_at_utc": {"const": null}
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

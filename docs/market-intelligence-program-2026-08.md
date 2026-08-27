@@ -155,15 +155,24 @@ evidence.
   scheduled symbol including per-symbol fetch failures. Its first live session
   recorded 27 invariant-clean ticks, zero errors, 1.047-second average tick
   latency, and five deduplicated candidates: CRM, CRWD, HPQ, LTRX, and OKTA.
-  That is one of the ten required clean sessions.
-- Slice 4, versioned truth set and replay: contract harness in review. The
+  A coverage audit later established that this observer began around 19:38 ET,
+  covered only about 11% of the required close-through-20:05 window, and must
+  not count as one of the ten clean sessions. The complete-session count is 0.
+- Slice 4, versioned truth set and replay: merged at `1f9d879`. The
   production-shaped CRM/CRWD/OKTA tuning cases are isolated from 18 synthetic
   adversarial contract-holdout cases. The empirical holdout is intentionally
   empty until independently labeled live cases are available; synthetic
   precision/recall does not count toward the activation gate.
+- Daily operational audit and empirical scoring: in review. Full-window,
+  conservation, error, revision, provenance, latency, and candidate-ledger
+  invariants produce an immutable daily report. Empirical scoring requires a
+  separately locked, blinded, artifact-digested manifest and fails closed on
+  missing symbols, policy drift, ambiguity, misses, false positives, or
+  direction disagreement.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
-  The kill switch must remain off until the shadow acceptance gate below is
-  satisfied and the owner explicitly approves a separate routing release.
+  The shadow observer may remain enabled to collect evidence. Customer routing
+  must remain absent/off until the acceptance gate below is satisfied and the
+  owner explicitly approves a separate delivery release.
 
 ## Shadow acceptance gate
 
