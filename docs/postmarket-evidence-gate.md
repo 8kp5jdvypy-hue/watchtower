@@ -57,8 +57,10 @@ the gate uses the worst session latency for its pass/fail decision.
 1. The production observer writes its immutable operational daily report.
 2. A blinded reviewer locks the independent empirical manifest and generates a
    reviewed daily report with `tradebot.postmarket_audit`.
-3. Failure-injection, kill-switch, and rollback exercises produce reviewable
-   artifacts stamped with their tested revisions.
+3. Run `tradebot.postmarket_controls` as documented in
+   `docs/postmarket-control-evidence.md`. Its failure-injection, kill-switch,
+   and rollback exercises produce reviewable artifacts stamped with their
+   tested revisions.
 4. The evidence-set manifest lists relative artifact paths and SHA-256 values.
 5. Run the gate offline:
 
