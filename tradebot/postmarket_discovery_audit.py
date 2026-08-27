@@ -1,0 +1,866 @@
+"""Read-only daily audit for market-wide postmarket discovery evidence.
+
+This module performs no provider, alert, journal, broker, or database-write
+operation. Its only optional write is one atomic immutable JSON report after
+the full exchange-calendar postmarket window has ended.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import sqlite3
+import tempfile
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+import exchange_calendars as ecals
+
+
+AUDIT_VERSION = 1
+DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "postmarket_shadow.db"
+ET = ZoneInfo("America/New_York")
+CALENDAR = ecals.get_calendar("XNYS")
+START_GRACE_SECONDS = 90
+END_GRACE_SECONDS = 90
+MAX_TICK_GAP_SECONDS = 150
+MAX_PROCESSING_LATENCY_MS = 30_000
+MAX_SOURCE_AGE_SECONDS = 180
+FINAL_BAR_GRACE = timedelta(minutes=5)
+EXPECTED_PROVIDER = "alpaca"
+EXPECTED_FEED = "sip"
+EXPECTED_TIMEFRAME = "5Min"
+EXPECTED_SCOPE = "alpaca_top_movers_and_actives"
+EXPECTED_ENDPOINTS = {
+    "market_movers",
+    "most_actives_volume",
+    "most_actives_trades",
+}
+SOURCE_ENDPOINT = {
+    "market_gainer": "market_movers",
+    "market_loser": "market_movers",
+    "most_active_volume": "most_actives_volume",
+    "most_active_trades": "most_actives_trades",
+}
+NEAR_MISS_OUTCOMES = {
+    "AWAITING_PERSISTENCE",
+    "BELOW_NOTIONAL",
+    "BAR_GAP",
+    "UNSTABLE_PRINT",
+}
+
+
+@dataclass(frozen=True)
+class AuditIssue:
+    code: str
+    severity: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class CandidateLifecycle:
+    symbol: str
+    direction: str
+    first_detected_at: str
+    initial_move_pct: float
+    initial_notional: float
+    observation_ticks: int
+    latest_outcome: str
+    latest_observed_at: str
+    max_abs_move_pct: float
+    max_notional: float
+    sources: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OperationalMetrics:
+    ticks: int
+    first_tick_utc: str | None
+    final_tick_utc: str | None
+    expected_start_utc: str | None
+    expected_end_utc: str | None
+    window_coverage_pct: float
+    max_tick_gap_seconds: float | None
+    universe_symbols_min: int | None
+    universe_symbols_max: int | None
+    screen_rows_min: int | None
+    screen_rows_max: int | None
+    screen_unique_symbols_min: int | None
+    screen_unique_symbols_max: int | None
+    discovered_symbols_min: int | None
+    discovered_symbols_max: int | None
+    excluded_symbols_total: int
+    not_returned_symbols_min: int | None
+    not_returned_symbols_max: int | None
+    fetched_symbols_total: int
+    evaluated_symbols_total: int
+    candidate_observations: int
+    unique_candidates: int
+    new_candidates_recorded: int
+    fetch_errors: int
+    failed_invariants: int
+    average_latency_ms: float | None
+    max_latency_ms: int | None
+    max_source_age_seconds: float | None
+    discovery_versions: tuple[int, ...]
+    code_versions: tuple[str, ...]
+    data_feeds: tuple[str, ...]
+    market_data_providers: tuple[str, ...]
+    bar_timeframes: tuple[str, ...]
+    discovery_scopes: tuple[str, ...]
+    requested_top_ns: tuple[int, ...]
+    endpoint_snapshots: int
+    threshold_snapshots: int
+    outcome_counts: dict[str, int]
+    source_observations: dict[str, int]
+    scheduled_overlap_symbols: int
+
+
+@dataclass(frozen=True)
+class DailyDiscoveryAuditReport:
+    audit_version: int
+    audit_code_version: str | None
+    session: str
+    database: str
+    operational_clean: bool
+    session_evidence_eligible: bool
+    operational: OperationalMetrics
+    candidates: tuple[CandidateLifecycle, ...]
+    near_miss_symbols: tuple[str, ...]
+    issues: tuple[AuditIssue, ...]
+
+
+def _issue(
+    issues: list[AuditIssue], code: str, detail: str, severity: str = "blocker"
+) -> None:
+    issues.append(AuditIssue(code, severity, detail))
+
+
+def _aware_datetime(raw: Any, context: str) -> datetime:
+    if not isinstance(raw, str):
+        raise ValueError(f"{context} must be an ISO-8601 string")
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"{context} must be an ISO-8601 string") from exc
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{context} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _json_object(raw: Any, context: str) -> dict:
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context} must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{context} must be a JSON object")
+    return value
+
+
+def _json_list(raw: Any, context: str) -> list:
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{context} must be valid JSON") from exc
+    if not isinstance(value, list):
+        raise ValueError(f"{context} must be a JSON array")
+    return value
+
+
+def _session_window(session: date) -> tuple[datetime, datetime] | None:
+    if not CALENDAR.is_session(session):
+        return None
+    start = CALENDAR.session_close(session).to_pydatetime().astimezone(timezone.utc)
+    end = datetime.combine(session, time(20, 0), tzinfo=ET).astimezone(timezone.utc)
+    return start, end + FINAL_BAR_GRACE
+
+
+def connect_readonly(path: Path | str) -> sqlite3.Connection:
+    resolved = Path(path).resolve()
+    return sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+
+
+def _range(rows: list[sqlite3.Row], key: str) -> tuple[int | None, int | None]:
+    values = [int(row[key]) for row in rows]
+    return (min(values), max(values)) if values else (None, None)
+
+
+def _unique_strings(rows: list[sqlite3.Row], key: str) -> tuple[str, ...]:
+    return tuple(sorted({str(row[key]) for row in rows if row[key] is not None}))
+
+
+def _validate_tick_metadata(
+    tick: sqlite3.Row,
+    tick_time: datetime,
+    issues: list[AuditIssue],
+) -> tuple[float | None, dict[str, datetime]]:
+    tick_id = tick["tick_id"]
+    try:
+        endpoints = _json_list(tick["endpoints_json"], f"tick {tick_id} endpoints")
+        if len(endpoints) != len(EXPECTED_ENDPOINTS) or set(endpoints) != EXPECTED_ENDPOINTS:
+            _issue(issues, "ENDPOINT_SET_INVALID", f"tick {tick_id} endpoint set is invalid")
+    except ValueError as exc:
+        _issue(issues, "MALFORMED_ENDPOINT_SNAPSHOT", str(exc))
+
+    updates: dict[str, datetime] = {}
+    max_age: float | None = None
+    try:
+        raw_updates = _json_object(
+            tick["source_updates_json"], f"tick {tick_id} source updates"
+        )
+        if set(raw_updates) != EXPECTED_ENDPOINTS:
+            _issue(
+                issues,
+                "SOURCE_TIMESTAMP_SET_INVALID",
+                f"tick {tick_id} source timestamp set is invalid",
+            )
+        for source, raw in raw_updates.items():
+            updated = _aware_datetime(raw, f"tick {tick_id} {source} update")
+            updates[source] = updated
+            age = (tick_time - updated).total_seconds()
+            max_age = age if max_age is None else max(max_age, age)
+            if age < 0:
+                _issue(
+                    issues,
+                    "SOURCE_TIMESTAMP_FUTURE",
+                    f"tick {tick_id} {source} was {-age:.0f}s in the future",
+                )
+            elif age > MAX_SOURCE_AGE_SECONDS:
+                _issue(
+                    issues,
+                    "SOURCE_TIMESTAMP_STALE",
+                    f"tick {tick_id} {source} was {age:.0f}s old",
+                )
+    except ValueError as exc:
+        _issue(issues, "MALFORMED_SOURCE_TIMESTAMP_SNAPSHOT", str(exc))
+
+    try:
+        thresholds = _json_object(
+            tick["thresholds_json"], f"tick {tick_id} thresholds"
+        )
+        required = {"move_pct", "min_cumulative_notional", "persistence_bars"}
+        if not required <= thresholds.keys():
+            _issue(
+                issues,
+                "THRESHOLD_SNAPSHOT_INCOMPLETE",
+                f"tick {tick_id} lacks required thresholds",
+            )
+    except ValueError as exc:
+        _issue(issues, "MALFORMED_THRESHOLD_SNAPSHOT", str(exc))
+    return max_age, updates
+
+
+def audit_discovery_session(
+    conn: sqlite3.Connection,
+    session: date,
+    *,
+    database: str = "<connection>",
+    audit_code_version: str | None = None,
+) -> DailyDiscoveryAuditReport:
+    issues: list[AuditIssue] = []
+    if audit_code_version in {None, "", "unknown"}:
+        _issue(
+            issues,
+            "AUDIT_CODE_VERSION_UNKNOWN",
+            "audit logic revision was not supplied",
+            severity="warning",
+        )
+    original_row_factory = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        quick_check = [row[0] for row in conn.execute("PRAGMA quick_check").fetchall()]
+        if quick_check != ["ok"]:
+            _issue(issues, "DATABASE_INTEGRITY_FAILED", repr(quick_check))
+        required = {
+            "postmarket_discovery_ticks",
+            "postmarket_discovery_observations",
+            "postmarket_discovery_candidates",
+        }
+        present = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing = required - present
+        if missing:
+            raise ValueError(f"shadow database is missing tables: {sorted(missing)}")
+        ticks = conn.execute(
+            "SELECT * FROM postmarket_discovery_ticks WHERE session=? "
+            "ORDER BY tick_utc,tick_id",
+            (session.isoformat(),),
+        ).fetchall()
+        observations = conn.execute(
+            """
+            SELECT o.*,t.tick_utc,t.completed_utc,t.discovered_symbols,
+                   t.fetched_symbols,t.evaluated_symbols,t.candidate_observations,
+                   t.error_count,t.invariant_ok,t.data_feed AS tick_data_feed,
+                   t.market_data_provider AS tick_provider,
+                   t.bar_timeframe AS tick_timeframe
+            FROM postmarket_discovery_observations o
+            JOIN postmarket_discovery_ticks t ON t.tick_id=o.tick_id
+            WHERE t.session=? ORDER BY t.tick_utc,o.symbol
+            """,
+            (session.isoformat(),),
+        ).fetchall()
+        candidates = conn.execute(
+            "SELECT * FROM postmarket_discovery_candidates WHERE session=? "
+            "ORDER BY first_detected_at,symbol",
+            (session.isoformat(),),
+        ).fetchall()
+    finally:
+        conn.row_factory = original_row_factory
+
+    window = _session_window(session)
+    if window is None:
+        _issue(issues, "NON_TRADING_SESSION", f"{session} is not an XNYS session")
+    expected_start, expected_end = window if window else (None, None)
+    tick_times = [
+        _aware_datetime(row["tick_utc"], f"tick {row['tick_id']} tick_utc")
+        for row in ticks
+    ]
+    completed_times = [
+        _aware_datetime(row["completed_utc"], f"tick {row['tick_id']} completed_utc")
+        for row in ticks
+    ]
+    if not ticks:
+        _issue(issues, "NO_TICKS", "no discovery ticks exist for the session")
+    if len(tick_times) != len(set(tick_times)):
+        _issue(issues, "DUPLICATE_TICK_TIMESTAMPS", "tick timestamps are not unique")
+    if tick_times != sorted(tick_times):
+        _issue(issues, "OUT_OF_ORDER_TICKS", "tick timestamps are out of order")
+    if any(done < started for started, done in zip(tick_times, completed_times)):
+        _issue(issues, "NEGATIVE_PROCESSING_LATENCY", "a tick completed before it started")
+    gaps = [
+        (current - previous).total_seconds()
+        for previous, current in zip(tick_times, tick_times[1:])
+    ]
+    max_gap = max(gaps) if gaps else None
+    if max_gap is not None and max_gap > MAX_TICK_GAP_SECONDS:
+        _issue(issues, "TICK_GAP", f"maximum tick gap was {max_gap:.0f}s")
+
+    coverage_pct = 0.0
+    if tick_times and expected_start is not None and expected_end is not None:
+        if tick_times[0] > expected_start + timedelta(seconds=START_GRACE_SECONDS):
+            delay = (tick_times[0] - expected_start).total_seconds()
+            _issue(issues, "COVERAGE_STARTED_LATE", f"first tick was {delay:.0f}s after close")
+        if tick_times[-1] < expected_end - timedelta(seconds=END_GRACE_SECONDS):
+            early = (expected_end - tick_times[-1]).total_seconds()
+            _issue(issues, "COVERAGE_ENDED_EARLY", f"final tick was {early:.0f}s early")
+        if tick_times[0] < expected_start - timedelta(seconds=START_GRACE_SECONDS):
+            _issue(issues, "PREWINDOW_TICK", "a tick precedes the postmarket window")
+        if tick_times[-1] > expected_end + timedelta(seconds=END_GRACE_SECONDS):
+            _issue(issues, "POSTWINDOW_TICK", "a tick follows the postmarket window")
+        duration = (expected_end - expected_start).total_seconds()
+        covered = max(
+            0.0,
+            (
+                min(tick_times[-1], expected_end)
+                - max(tick_times[0], expected_start)
+            ).total_seconds(),
+        )
+        coverage_pct = round(100 * covered / duration, 2) if duration else 0.0
+
+    observation_counts = Counter(row["tick_id"] for row in observations)
+    observation_candidates = Counter(
+        row["tick_id"] for row in observations if row["outcome"] == "CANDIDATE"
+    )
+    observation_errors = Counter(
+        row["tick_id"] for row in observations if row["outcome"] == "FETCH_ERROR"
+    )
+    observations_by_symbol: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    source_observations: Counter[str] = Counter()
+    scheduled_symbols: set[str] = set()
+    max_source_ages: list[float] = []
+    updates_by_tick: dict[int, dict[str, datetime]] = {}
+    ticks_by_id = {row["tick_id"]: row for row in ticks}
+    for row, tick_time in zip(ticks, tick_times):
+        max_age, updates = _validate_tick_metadata(row, tick_time, issues)
+        if max_age is not None:
+            max_source_ages.append(max_age)
+        updates_by_tick[row["tick_id"]] = updates
+
+    for row in observations:
+        tick_id = row["tick_id"]
+        observations_by_symbol[row["symbol"]].append(row)
+        if row["event_date"] != session.isoformat():
+            _issue(issues, "EVENT_DATE_MISMATCH", f"{row['symbol']} has {row['event_date']}")
+        if (
+            row["data_feed"] != row["tick_data_feed"]
+            or row["market_data_provider"] != row["tick_provider"]
+            or row["bar_timeframe"] != row["tick_timeframe"]
+        ):
+            _issue(
+                issues,
+                "OBSERVATION_PROVENANCE_MISMATCH",
+                f"{row['symbol']} disagrees with tick {tick_id}",
+            )
+        try:
+            sources = _json_list(row["sources_json"], f"tick {tick_id} sources")
+            if not sources or any(not isinstance(source, str) for source in sources):
+                raise ValueError(f"tick {tick_id} sources must contain strings")
+            source_observations.update(sources)
+            if "scheduled_earnings" in sources:
+                scheduled_symbols.add(row["symbol"])
+            provider_sources = set(sources) - {"scheduled_earnings"}
+            if not provider_sources or not provider_sources <= SOURCE_ENDPOINT.keys():
+                _issue(
+                    issues,
+                    "OBSERVATION_SOURCE_INVALID",
+                    f"{row['symbol']} has invalid sources at tick {tick_id}",
+                )
+            evidence = _json_list(
+                row["screen_evidence_json"], f"tick {tick_id} screen evidence"
+            )
+            evidence_sources = {item.get("source") for item in evidence if isinstance(item, dict)}
+            if evidence_sources != provider_sources:
+                _issue(
+                    issues,
+                    "SCREEN_EVIDENCE_SOURCE_MISMATCH",
+                    f"{row['symbol']} source evidence disagrees at tick {tick_id}",
+                )
+            updates = updates_by_tick.get(tick_id, {})
+            evidence_pairs: list[tuple[str, int]] = []
+            for item in evidence:
+                if not isinstance(item, dict) or item.get("source") not in SOURCE_ENDPOINT:
+                    _issue(
+                        issues,
+                        "MALFORMED_SCREEN_EVIDENCE",
+                        f"{row['symbol']} has malformed evidence at tick {tick_id}",
+                    )
+                    continue
+                rank = item.get("rank")
+                top_n = ticks_by_id[tick_id]["requested_top_n"]
+                valid_rank = (
+                    isinstance(rank, int)
+                    and not isinstance(rank, bool)
+                    and 1 <= rank <= top_n
+                )
+                if not valid_rank:
+                    _issue(
+                        issues,
+                        "SCREEN_EVIDENCE_RANK_INVALID",
+                        f"{row['symbol']} has an invalid rank at tick {tick_id}",
+                    )
+                else:
+                    evidence_pairs.append((item["source"], rank))
+                endpoint = SOURCE_ENDPOINT[item["source"]]
+                updated = _aware_datetime(
+                    item.get("source_updated_at"),
+                    f"{row['symbol']} tick {tick_id} evidence timestamp",
+                )
+                if updates.get(endpoint) != updated:
+                    _issue(
+                        issues,
+                        "SCREEN_EVIDENCE_TIMESTAMP_MISMATCH",
+                        f"{row['symbol']} evidence timestamp disagrees at tick {tick_id}",
+                    )
+            if len(evidence_pairs) != len(set(evidence_pairs)):
+                _issue(
+                    issues,
+                    "SCREEN_EVIDENCE_DUPLICATED",
+                    f"{row['symbol']} duplicated source/rank evidence at tick {tick_id}",
+                )
+            ranks = _json_list(row["ranks_json"], f"tick {tick_id} ranks")
+            normalized_ranks = []
+            for item in ranks:
+                if (
+                    isinstance(item, list)
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                    and isinstance(item[1], int)
+                    and not isinstance(item[1], bool)
+                ):
+                    normalized_ranks.append((item[0], item[1]))
+            if (
+                len(normalized_ranks) != len(ranks)
+                or len(normalized_ranks) != len(evidence_pairs)
+                or set(normalized_ranks) != set(evidence_pairs)
+            ):
+                _issue(
+                    issues,
+                    "RANK_EVIDENCE_MISMATCH",
+                    f"{row['symbol']} ranks disagree with evidence at tick {tick_id}",
+                )
+        except ValueError as exc:
+            _issue(issues, "MALFORMED_OBSERVATION_EVIDENCE", str(exc))
+
+    for row in ticks:
+        tick_id = row["tick_id"]
+        conservation = (
+            row["universe_symbols"]
+            == row["discovered_symbols"] + row["not_returned_symbols"]
+            and row["screen_unique_symbols"]
+            == row["discovered_symbols"] + row["excluded_symbols"]
+            and 0 <= row["fetched_symbols"] <= row["discovered_symbols"]
+            and row["evaluated_symbols"] == row["discovered_symbols"]
+        )
+        if not row["invariant_ok"] or not conservation:
+            _issue(issues, "TICK_INVARIANT_FAILED", f"tick {tick_id} did not conserve symbols")
+        if observation_counts[tick_id] != row["evaluated_symbols"]:
+            _issue(
+                issues,
+                "OBSERVATION_COUNT_MISMATCH",
+                f"tick {tick_id} stored {observation_counts[tick_id]} observations for "
+                f"{row['evaluated_symbols']} evaluations",
+            )
+        if observation_candidates[tick_id] != row["candidate_observations"]:
+            _issue(issues, "CANDIDATE_COUNT_MISMATCH", f"tick {tick_id} candidate count drifted")
+        if observation_errors[tick_id] != row["error_count"]:
+            _issue(issues, "ERROR_COUNT_MISMATCH", f"tick {tick_id} error count drifted")
+        if row["error_count"] < row["discovered_symbols"] - row["fetched_symbols"]:
+            _issue(
+                issues,
+                "MISSING_FETCH_ERRORS",
+                f"tick {tick_id} did not explain every missing bulk response",
+            )
+        if row["screen_unique_symbols"] > row["screen_rows"]:
+            _issue(issues, "SCREEN_COUNT_INVALID", f"tick {tick_id} has impossible counts")
+        expected_rows = 4 * row["requested_top_n"]
+        if row["screen_rows"] != expected_rows:
+            _issue(
+                issues,
+                "SCREEN_SCOPE_UNDERFILLED",
+                f"tick {tick_id} stored {row['screen_rows']} rows; expected {expected_rows}",
+            )
+        if row["universe_symbols"] > 0 and row["discovered_symbols"] == 0:
+            _issue(issues, "NO_DISCOVERED_SYMBOLS", f"tick {tick_id} discovered no symbols")
+
+    if any(row["error_count"] for row in ticks):
+        _issue(issues, "FETCH_ERRORS", "one or more evaluations ended in FETCH_ERROR")
+    latencies = [row["latency_ms"] for row in ticks if row["latency_ms"] is not None]
+    if len(latencies) != len(ticks):
+        _issue(issues, "MISSING_PROCESSING_LATENCY", "one or more ticks has no latency")
+    if latencies and max(latencies) > MAX_PROCESSING_LATENCY_MS:
+        _issue(
+            issues,
+            "PROCESSING_LATENCY_HIGH",
+            f"maximum processing latency was {max(latencies)}ms",
+        )
+
+    metadata_checks = {
+        "DISCOVERY_VERSION_DRIFT": {row["discovery_version"] for row in ticks},
+        "CODE_VERSION_DRIFT": {row["code_version"] for row in ticks},
+        "DATA_FEED_DRIFT": {row["data_feed"] for row in ticks},
+        "PROVIDER_DRIFT": {row["market_data_provider"] for row in ticks},
+        "BAR_TIMEFRAME_DRIFT": {row["bar_timeframe"] for row in ticks},
+        "DISCOVERY_SCOPE_DRIFT": {row["discovery_scope"] for row in ticks},
+        "REQUESTED_TOP_N_DRIFT": {row["requested_top_n"] for row in ticks},
+        "ENDPOINT_DRIFT": {row["endpoints_json"] for row in ticks},
+        "THRESHOLD_DRIFT": {row["thresholds_json"] for row in ticks},
+        "UNIVERSE_COUNT_DRIFT": {row["universe_symbols"] for row in ticks},
+    }
+    for code, values in metadata_checks.items():
+        if len(values) > 1:
+            _issue(issues, code, f"session contains {len(values)} distinct values")
+    if any(row["code_version"] in {None, "", "unknown"} for row in ticks):
+        _issue(issues, "UNKNOWN_CODE_VERSION", "one or more ticks lacks a revision")
+    if any(row["data_feed"] != EXPECTED_FEED for row in ticks):
+        _issue(issues, "NON_SIP_DATA", "one or more discovery ticks did not use SIP")
+    if any(row["market_data_provider"] != EXPECTED_PROVIDER for row in ticks):
+        _issue(issues, "UNEXPECTED_PROVIDER", "one or more ticks used another provider")
+    if any(row["bar_timeframe"] != EXPECTED_TIMEFRAME for row in ticks):
+        _issue(issues, "UNEXPECTED_TIMEFRAME", "one or more ticks used another timeframe")
+    if any(row["discovery_scope"] != EXPECTED_SCOPE for row in ticks):
+        _issue(issues, "UNEXPECTED_DISCOVERY_SCOPE", "one or more ticks used another scope")
+    if any(not 1 <= row["requested_top_n"] <= 50 for row in ticks):
+        _issue(issues, "REQUESTED_TOP_N_INVALID", "one or more ticks used an invalid bound")
+
+    new_candidates_recorded = sum(row["new_candidates"] for row in ticks)
+    if new_candidates_recorded != len(candidates):
+        _issue(
+            issues,
+            "CANDIDATE_LEDGER_MISMATCH",
+            f"ticks recorded {new_candidates_recorded} new candidates but ledger has "
+            f"{len(candidates)}",
+        )
+    candidate_lifecycles: list[CandidateLifecycle] = []
+    candidate_symbols = {row["symbol"] for row in candidates}
+    for candidate in candidates:
+        rows = observations_by_symbol.get(candidate["symbol"], [])
+        qualifying = [row for row in rows if row["outcome"] == "CANDIDATE"]
+        if not qualifying:
+            _issue(
+                issues,
+                "CANDIDATE_WITHOUT_OBSERVATION",
+                f"{candidate['symbol']} has no qualifying observation",
+            )
+            continue
+        directions = {row["direction"] for row in qualifying}
+        if candidate["direction"] not in directions:
+            _issue(
+                issues,
+                "CANDIDATE_DIRECTION_MISMATCH",
+                f"{candidate['symbol']} ledger direction disagrees with observations",
+            )
+        if candidate["event_date"] != session.isoformat():
+            _issue(
+                issues,
+                "CANDIDATE_EVENT_DATE_MISMATCH",
+                f"{candidate['symbol']} has {candidate['event_date']}",
+            )
+        allowed_metadata = {
+            "code_version": {row["code_version"] for row in ticks},
+            "data_feed": {row["data_feed"] for row in ticks},
+            "market_data_provider": {row["market_data_provider"] for row in ticks},
+            "bar_timeframe": {row["bar_timeframe"] for row in ticks},
+        }
+        if any(candidate[key] not in values for key, values in allowed_metadata.items()):
+            _issue(
+                issues,
+                "CANDIDATE_PROVENANCE_MISMATCH",
+                f"{candidate['symbol']} metadata disagrees with session ticks",
+            )
+        try:
+            sources = tuple(sorted(_json_list(candidate["sources_json"], "candidate sources")))
+        except ValueError as exc:
+            _issue(issues, "MALFORMED_CANDIDATE_SOURCES", str(exc))
+            sources = ()
+        latest = rows[-1]
+        moves = [abs(float(row["move_pct"])) for row in rows if row["move_pct"] is not None]
+        notionals = [
+            float(row["cumulative_notional"])
+            for row in rows
+            if row["cumulative_notional"] is not None
+        ]
+        first_detected = _aware_datetime(
+            candidate["first_detected_at"], "candidate first_detected_at"
+        )
+        first_qualifying = min(
+            _aware_datetime(row["completed_utc"], "qualifying completed_utc")
+            for row in qualifying
+        )
+        if first_detected != first_qualifying:
+            _issue(
+                issues,
+                "CANDIDATE_DETECTION_TIME_MISMATCH",
+                f"{candidate['symbol']} ledger time disagrees with first qualifying tick",
+            )
+        candidate_lifecycles.append(
+            CandidateLifecycle(
+                symbol=candidate["symbol"],
+                direction=candidate["direction"],
+                first_detected_at=first_detected.isoformat(),
+                initial_move_pct=float(candidate["move_pct"]),
+                initial_notional=float(candidate["cumulative_notional"]),
+                observation_ticks=len(rows),
+                latest_outcome=latest["outcome"],
+                latest_observed_at=_aware_datetime(
+                    latest["tick_utc"], "candidate latest tick"
+                ).isoformat(),
+                max_abs_move_pct=max(moves) if moves else 0.0,
+                max_notional=max(notionals) if notionals else 0.0,
+                sources=sources,
+            )
+        )
+
+    near_misses = tuple(
+        sorted(
+            symbol
+            for symbol, rows in observations_by_symbol.items()
+            if symbol not in candidate_symbols
+            and any(
+                row["outcome"] in NEAR_MISS_OUTCOMES
+                or abs(float(row["move_pct"] or 0)) >= 5
+                for row in rows
+            )
+        )
+    )
+    blocking = tuple(issue for issue in issues if issue.severity == "blocker")
+    operational_clean = not blocking
+    session_evidence_eligible = (
+        operational_clean and audit_code_version not in {None, "", "unknown"}
+    )
+    universe_min, universe_max = _range(ticks, "universe_symbols")
+    screen_min, screen_max = _range(ticks, "screen_rows")
+    unique_min, unique_max = _range(ticks, "screen_unique_symbols")
+    discovered_min, discovered_max = _range(ticks, "discovered_symbols")
+    not_returned_min, not_returned_max = _range(ticks, "not_returned_symbols")
+    operational = OperationalMetrics(
+        ticks=len(ticks),
+        first_tick_utc=tick_times[0].isoformat() if tick_times else None,
+        final_tick_utc=tick_times[-1].isoformat() if tick_times else None,
+        expected_start_utc=expected_start.isoformat() if expected_start else None,
+        expected_end_utc=expected_end.isoformat() if expected_end else None,
+        window_coverage_pct=coverage_pct,
+        max_tick_gap_seconds=max_gap,
+        universe_symbols_min=universe_min,
+        universe_symbols_max=universe_max,
+        screen_rows_min=screen_min,
+        screen_rows_max=screen_max,
+        screen_unique_symbols_min=unique_min,
+        screen_unique_symbols_max=unique_max,
+        discovered_symbols_min=discovered_min,
+        discovered_symbols_max=discovered_max,
+        excluded_symbols_total=sum(row["excluded_symbols"] for row in ticks),
+        not_returned_symbols_min=not_returned_min,
+        not_returned_symbols_max=not_returned_max,
+        fetched_symbols_total=sum(row["fetched_symbols"] for row in ticks),
+        evaluated_symbols_total=sum(row["evaluated_symbols"] for row in ticks),
+        candidate_observations=sum(row["candidate_observations"] for row in ticks),
+        unique_candidates=len(candidates),
+        new_candidates_recorded=new_candidates_recorded,
+        fetch_errors=sum(row["error_count"] for row in ticks),
+        failed_invariants=sum(not row["invariant_ok"] for row in ticks),
+        average_latency_ms=(sum(latencies) / len(latencies) if latencies else None),
+        max_latency_ms=max(latencies) if latencies else None,
+        max_source_age_seconds=max(max_source_ages) if max_source_ages else None,
+        discovery_versions=tuple(sorted({row["discovery_version"] for row in ticks})),
+        code_versions=_unique_strings(ticks, "code_version"),
+        data_feeds=_unique_strings(ticks, "data_feed"),
+        market_data_providers=_unique_strings(ticks, "market_data_provider"),
+        bar_timeframes=_unique_strings(ticks, "bar_timeframe"),
+        discovery_scopes=_unique_strings(ticks, "discovery_scope"),
+        requested_top_ns=tuple(sorted({row["requested_top_n"] for row in ticks})),
+        endpoint_snapshots=len({row["endpoints_json"] for row in ticks}),
+        threshold_snapshots=len({row["thresholds_json"] for row in ticks}),
+        outcome_counts=dict(sorted(Counter(row["outcome"] for row in observations).items())),
+        source_observations=dict(sorted(source_observations.items())),
+        scheduled_overlap_symbols=len(scheduled_symbols),
+    )
+    return DailyDiscoveryAuditReport(
+        audit_version=AUDIT_VERSION,
+        audit_code_version=audit_code_version,
+        session=session.isoformat(),
+        database=database,
+        operational_clean=operational_clean,
+        session_evidence_eligible=session_evidence_eligible,
+        operational=operational,
+        candidates=tuple(candidate_lifecycles),
+        near_miss_symbols=near_misses,
+        issues=tuple(issues),
+    )
+
+
+def report_json(report: DailyDiscoveryAuditReport, *, compact: bool = False) -> str:
+    return json.dumps(
+        asdict(report),
+        indent=None if compact else 2,
+        separators=(",", ":") if compact else None,
+        sort_keys=True,
+    )
+
+
+def write_report_atomic(path: Path | str, report: DailyDiscoveryAuditReport) -> bool:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        return False
+    fd, raw_tmp = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    tmp_path = Path(raw_tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(report_json(report))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp_path, destination)
+        except FileExistsError:
+            tmp_path.unlink()
+            return False
+        tmp_path.unlink()
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return True
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def write_completed_discovery_audits(
+    db_path: Path | str,
+    output_dir: Path | str,
+    *,
+    now: datetime,
+    audit_code_version: str | None = None,
+) -> tuple[DailyDiscoveryAuditReport, ...]:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    database = Path(db_path)
+    if not database.exists():
+        return ()
+    conn = connect_readonly(database)
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "postmarket_discovery_ticks" not in tables:
+            return ()
+        sessions = [
+            date.fromisoformat(row[0])
+            for row in conn.execute(
+                "SELECT DISTINCT session FROM postmarket_discovery_ticks ORDER BY session"
+            ).fetchall()
+        ]
+        reports = []
+        for session in sessions:
+            window = _session_window(session)
+            if window is None or now.astimezone(timezone.utc) <= window[1]:
+                continue
+            destination = (
+                Path(output_dir)
+                / f"postmarket_discovery_audit_{session.isoformat()}_v{AUDIT_VERSION}.json"
+            )
+            if destination.exists():
+                existing = json.loads(destination.read_text(encoding="utf-8"))
+                if (
+                    existing.get("session") != session.isoformat()
+                    or existing.get("audit_version") != AUDIT_VERSION
+                ):
+                    raise ValueError(f"existing audit report is inconsistent: {destination}")
+                continue
+            report = audit_discovery_session(
+                conn,
+                session,
+                database=str(database),
+                audit_code_version=audit_code_version,
+            )
+            if write_report_atomic(destination, report):
+                reports.append(report)
+        return tuple(reports)
+    finally:
+        conn.close()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--audit-code-version", default=os.environ.get("GIT_SHA"))
+    parser.add_argument("--session", required=True, type=date.fromisoformat)
+    parser.add_argument("--compact", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        conn = connect_readonly(args.db)
+        try:
+            report = audit_discovery_session(
+                conn,
+                args.session,
+                database=str(args.db),
+                audit_code_version=args.audit_code_version,
+            )
+        finally:
+            conn.close()
+    except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError) as exc:
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+        return 2
+    print(report_json(report, compact=args.compact))
+    return 0 if report.operational_clean else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

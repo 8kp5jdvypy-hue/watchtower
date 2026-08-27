@@ -1,0 +1,424 @@
+"""Daily market-wide discovery audit coverage and integrity tests."""
+from __future__ import annotations
+
+import ast
+import json
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+from tradebot.postmarket import thresholds
+from tradebot.postmarket_discovery import connect
+from tradebot.postmarket_discovery_audit import (
+    _session_window,
+    audit_discovery_session,
+    report_json,
+    write_completed_discovery_audits,
+    write_report_atomic,
+)
+from tradebot import postmarket_discovery_shadow as discovery_shadow
+
+
+SESSION = date(2026, 8, 27)
+START = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
+END = datetime(2026, 8, 28, 0, 5, tzinfo=timezone.utc)
+ENDPOINTS = ("market_movers", "most_actives_volume", "most_actives_trades")
+
+
+def _compact(value) -> str:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+
+def _times(start=START, end=END):
+    values = []
+    current = start
+    while current <= end:
+        values.append(current)
+        current += timedelta(minutes=1)
+    return values
+
+
+def _seed_session(
+    conn,
+    *,
+    times=None,
+    source_age_seconds=0,
+    code_version="abc123",
+    missing_fetch=False,
+    malformed_rank=False,
+):
+    times = times or _times()
+    for index, tick_utc in enumerate(times):
+        source_updated = tick_utc - timedelta(seconds=source_age_seconds)
+        source_updates = {name: source_updated.isoformat() for name in ENDPOINTS}
+        fetched = 1 if missing_fetch else 2
+        error_count = 1 if missing_fetch else 0
+        rank_value = "one" if malformed_rank else 1
+        cursor = conn.execute(
+            """
+            INSERT INTO postmarket_discovery_ticks
+                (session,tick_utc,completed_utc,run_id,run_mode,discovery_version,
+                 code_version,data_feed,market_data_provider,bar_timeframe,
+                 discovery_scope,endpoints_json,source_updates_json,requested_top_n,
+                 universe_symbols,screen_rows,screen_unique_symbols,excluded_symbols,
+                 discovered_symbols,not_returned_symbols,fetched_symbols,
+                 evaluated_symbols,candidate_observations,new_candidates,invariant_ok,
+                 thresholds_json,latency_ms,error_count)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                SESSION.isoformat(),
+                tick_utc.isoformat(),
+                (tick_utc + timedelta(milliseconds=100)).isoformat(),
+                "run-1",
+                "postmarket-marketwide-shadow",
+                1,
+                code_version,
+                "sip",
+                "alpaca",
+                "5Min",
+                "alpaca_top_movers_and_actives",
+                _compact(ENDPOINTS),
+                _compact(source_updates),
+                50,
+                10,
+                200,
+                3,
+                1,
+                2,
+                8,
+                fetched,
+                2,
+                1,
+                int(index == 0),
+                1,
+                _compact(thresholds()),
+                100,
+                error_count,
+            ),
+        )
+        tick_id = cursor.lastrowid
+        common = (
+            SESSION.isoformat(),
+            tick_utc.isoformat(),
+            100.0,
+            109.0,
+            109.0,
+            109.0,
+            109.0,
+            1000,
+            1000,
+            109_000.0,
+            9.0,
+            "up",
+            2,
+            10.0,
+            "sip",
+            "alpaca",
+            "5Min",
+        )
+        conn.execute(
+            """
+            INSERT INTO postmarket_discovery_observations
+                (tick_id,symbol,sources_json,ranks_json,screen_evidence_json,
+                 screen_move_pct,outcome,reason,event_date,bar_open_ts_utc,
+                 rth_close,open,high,low,close,volume,cumulative_volume,
+                 cumulative_notional,move_pct,direction,persistence_bars,
+                 data_age_seconds,data_feed,market_data_provider,bar_timeframe)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                tick_id,
+                "CAND",
+                _compact(["market_gainer"]),
+                _compact([["market_gainer", rank_value]]),
+                _compact(
+                    [
+                        {
+                            "source": "market_gainer",
+                            "rank": rank_value,
+                            "source_updated_at": source_updated.isoformat(),
+                            "move_pct": 12.0,
+                            "price": 109.0,
+                            "volume": None,
+                            "trade_count": None,
+                        }
+                    ]
+                ),
+                12.0,
+                "CANDIDATE",
+                "qualified",
+                *common,
+            ),
+        )
+        quiet_outcome = "FETCH_ERROR" if missing_fetch else "BELOW_MOVE"
+        conn.execute(
+            """
+            INSERT INTO postmarket_discovery_observations
+                (tick_id,symbol,sources_json,ranks_json,screen_evidence_json,
+                 screen_move_pct,outcome,reason,event_date,bar_open_ts_utc,
+                 rth_close,open,high,low,close,volume,cumulative_volume,
+                 cumulative_notional,move_pct,direction,persistence_bars,
+                 data_age_seconds,data_feed,market_data_provider,bar_timeframe)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                tick_id,
+                "QUIET",
+                _compact(["most_active_volume", "scheduled_earnings"]),
+                _compact([["most_active_volume", 1]]),
+                _compact(
+                    [
+                        {
+                            "source": "most_active_volume",
+                            "rank": 1,
+                            "source_updated_at": source_updated.isoformat(),
+                            "move_pct": None,
+                            "price": None,
+                            "volume": 1_000_000,
+                            "trade_count": 10_000,
+                        }
+                    ]
+                ),
+                None,
+                quiet_outcome,
+                "quiet" if not missing_fetch else "missing bulk response",
+                SESSION.isoformat(),
+                tick_utc.isoformat() if not missing_fetch else None,
+                100.0 if not missing_fetch else None,
+                101.0 if not missing_fetch else None,
+                101.0 if not missing_fetch else None,
+                101.0 if not missing_fetch else None,
+                101.0 if not missing_fetch else None,
+                1000 if not missing_fetch else None,
+                1000 if not missing_fetch else None,
+                101_000.0 if not missing_fetch else None,
+                1.0 if not missing_fetch else None,
+                "up" if not missing_fetch else None,
+                0,
+                10.0 if not missing_fetch else None,
+                "sip",
+                "alpaca",
+                "5Min",
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO postmarket_discovery_candidates
+            (session,symbol,event_date,direction,discovery_version,
+             first_detected_at,bar_open_ts_utc,rth_close,close,move_pct,
+             cumulative_volume,cumulative_notional,sources_json,data_feed,
+             market_data_provider,bar_timeframe,code_version,run_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            SESSION.isoformat(),
+            "CAND",
+            SESSION.isoformat(),
+            "up",
+            1,
+            (times[0] + timedelta(milliseconds=100)).isoformat(),
+            times[0].isoformat(),
+            100.0,
+            109.0,
+            9.0,
+            1000,
+            109_000.0,
+            _compact(["market_gainer"]),
+            "sip",
+            "alpaca",
+            "5Min",
+            code_version,
+            "run-1",
+        ),
+    )
+    conn.commit()
+
+
+def test_complete_discovery_session_is_operationally_eligible(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn)
+
+    report = audit_discovery_session(
+        conn,
+        SESSION,
+        database="shadow.db",
+        audit_code_version="audit123",
+    )
+
+    assert report.operational_clean is True
+    assert report.session_evidence_eligible is True
+    assert report.operational.ticks == 246
+    assert report.operational.window_coverage_pct == 100.0
+    assert report.operational.max_tick_gap_seconds == 60
+    assert report.operational.max_source_age_seconds == 0
+    assert report.operational.unique_candidates == 1
+    assert report.operational.scheduled_overlap_symbols == 1
+    assert report.operational.source_observations == {
+        "market_gainer": 246,
+        "most_active_volume": 246,
+        "scheduled_earnings": 246,
+    }
+    assert report.candidates[0].symbol == "CAND"
+    assert report.candidates[0].observation_ticks == 246
+    assert report.near_miss_symbols == ()
+    assert report.issues == ()
+    assert json.loads(report_json(report))["operational_clean"] is True
+
+
+def test_partial_session_is_explicitly_ineligible(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(
+        conn,
+        times=_times(START + timedelta(minutes=15), START + timedelta(minutes=20)),
+    )
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational_clean is False
+    assert report.session_evidence_eligible is False
+    assert report.operational.window_coverage_pct < 3
+    assert {"COVERAGE_STARTED_LATE", "COVERAGE_ENDED_EARLY"} <= codes
+
+
+def test_stale_provider_timestamps_and_fetch_errors_are_blockers(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn, source_age_seconds=181, missing_fetch=True)
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational_clean is False
+    assert report.operational.fetch_errors == 246
+    assert report.operational.max_source_age_seconds == 181
+    assert {"SOURCE_TIMESTAMP_STALE", "FETCH_ERRORS"} <= codes
+
+
+def test_malformed_rank_is_reported_without_crashing_audit(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn, malformed_rank=True)
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational_clean is False
+    assert {"SCREEN_EVIDENCE_RANK_INVALID", "RANK_EVIDENCE_MISMATCH"} <= codes
+
+
+def test_session_window_uses_actual_early_close_and_est_postmarket_end():
+    window = _session_window(date(2026, 11, 27))
+
+    assert window == (
+        datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc),
+        datetime(2026, 11, 28, 1, 5, tzinfo=timezone.utc),
+    )
+
+
+def test_completed_audit_write_is_immutable_idempotent_and_after_window(tmp_path):
+    db_path = tmp_path / "shadow.db"
+    conn = connect(db_path)
+    _seed_session(conn)
+    output = tmp_path / "audits"
+
+    assert write_completed_discovery_audits(
+        db_path,
+        output,
+        now=END,
+        audit_code_version="audit123",
+    ) == ()
+    first = write_completed_discovery_audits(
+        db_path,
+        output,
+        now=END + timedelta(seconds=1),
+        audit_code_version="audit123",
+    )
+    second = write_completed_discovery_audits(
+        db_path,
+        output,
+        now=END + timedelta(minutes=1),
+        audit_code_version="different",
+    )
+
+    assert len(first) == 1
+    assert second == ()
+    path = output / "postmarket_discovery_audit_2026-08-27_v1.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["audit_code_version"] == "audit123"
+    assert payload["session_evidence_eligible"] is True
+
+
+def test_concurrent_audit_publication_creates_exactly_one_report(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn)
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    destination = tmp_path / "audit.json"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(lambda _: write_report_atomic(destination, report), range(20))
+        )
+
+    assert results.count(True) == 1
+    assert results.count(False) == 19
+    assert json.loads(destination.read_text(encoding="utf-8"))["session"] == "2026-08-27"
+
+
+def test_auditor_has_no_provider_delivery_or_trading_dependency():
+    source_path = (
+        Path(__file__).parents[1] / "tradebot" / "postmarket_discovery_audit.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    imports = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module)
+    forbidden = (
+        "tradebot.vendors",
+        "tradebot.alerts",
+        "tradebot.telegram_bot",
+        "tradebot.order",
+        "tradebot.broker",
+    )
+    assert not any(module.startswith(forbidden) for module in imports)
+
+
+def test_discovery_heartbeat_surfaces_latest_immutable_audit(monkeypatch):
+    latest = {
+        "session": "2026-08-27",
+        "operational_clean": False,
+        "session_evidence_eligible": False,
+        "issue_codes": ["COVERAGE_STARTED_LATE"],
+    }
+    monkeypatch.setattr(
+        discovery_shadow,
+        "write_due_discovery_audits",
+        lambda now: ({"session": "2026-08-27"},),
+    )
+    monkeypatch.setattr(
+        discovery_shadow,
+        "latest_discovery_audit_summary",
+        lambda: latest,
+    )
+
+    fields = discovery_shadow.discovery_audit_heartbeat_fields(END + timedelta(minutes=1))
+
+    assert fields == {
+        "audit_status": "written",
+        "audits_written": 1,
+        "latest_audit": latest,
+    }
+
+
+def test_discovery_heartbeat_makes_audit_failure_visible(monkeypatch):
+    def fail(now):
+        raise ValueError("malformed evidence")
+
+    monkeypatch.setattr(discovery_shadow, "write_due_discovery_audits", fail)
+
+    fields = discovery_shadow.discovery_audit_heartbeat_fields(END + timedelta(minutes=1))
+
+    assert fields["audit_status"] == "error"
+    assert "malformed evidence" in fields["audit_error"]

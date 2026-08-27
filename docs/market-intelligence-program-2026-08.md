@@ -194,6 +194,12 @@ evidence.
   bars, evaluations, and candidates are append-only in the already-backed-up
   shadow database. This slice has no delivery dependency and does not alter or
   reset the scheduled-earnings evidence program.
+- Slice 7, discovery evidence audit: implemented as a read-only immutable
+  session report pending review. It distinguishes partial calibration from a
+  complete close-through-8:05 PM ET evidence window; reconciles provider
+  freshness, top-N scope, ranks, universe/fetch/evaluation/candidate counts,
+  revision and threshold provenance; and preserves candidate plus near-miss
+  lifecycles in the already-backed-up audit directory.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the
