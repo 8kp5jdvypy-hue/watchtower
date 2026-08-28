@@ -19,6 +19,7 @@ from tradebot.postmarket_empirical import (
     SelectionRule,
     create_locked_experiment,
     evaluate_rank_experiment,
+    export_empirical_report,
     holdout_label_inventory,
     unblind_holdout,
 )
@@ -71,6 +72,9 @@ def parser() -> argparse.ArgumentParser:
     evaluate = commands.add_parser("evaluate", help="persist an immutable empirical report")
     evaluate.add_argument("--experiment-id", required=True)
     evaluate.add_argument("--split", choices=("development", "holdout"), required=True)
+    evaluate.add_argument(
+        "--output-dir", type=Path, default=Path("data/postmarket_audits")
+    )
     return root
 
 
@@ -140,7 +144,16 @@ def main(argv: list[str] | None = None) -> int:
                 conn, experiment_id=args.experiment_id, split=args.split,
                 evaluated_at=now, code_version=code_version(),
             )
-            _json(asdict(report))
+            artifact = export_empirical_report(
+                conn,
+                experiment_id=args.experiment_id,
+                split=args.split,
+                input_digest_sha256=report.input_digest_sha256,
+                output_dir=args.output_dir,
+            )
+            payload = asdict(report)
+            payload["artifact"] = asdict(artifact)
+            _json(payload)
     finally:
         conn.close()
     return 0

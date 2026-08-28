@@ -162,6 +162,12 @@ the final v2 evidence set. This prevents choosing a favorable date range,
 threshold, provider, or report revision after outcomes are visible. See
 `docs/postmarket-evidence-gate.md`.
 
+Market-wide empirical reports are exported from their append-only database row
+as immutable, digest-bound artifacts by
+`tradebot.postmarket_empirical.export_empirical_report`. The export refuses
+unknown revisions, digest/identity drift, and sealed holdout results, and enters
+the same encrypted off-box audit archive used by the operational evidence.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.

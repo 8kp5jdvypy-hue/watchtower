@@ -94,6 +94,8 @@ and operational gates pass.
   - [x] Lock the numeric eligibility definition, atomically ingest strict
     digest-bound blinded review manifests, and require inventory-digest
     confirmation before irreversible holdout unblinding.
+  - [x] Export the exact persisted empirical run as an immutable,
+    revision-attributed, digest-bound artifact covered by restore tests.
 - [x] Prospectively lock aggregate evidence dates, policy floors,
   feeds/providers, and eligible audit/observer revisions before the first
   covered session; require its digest in the final evidence package.

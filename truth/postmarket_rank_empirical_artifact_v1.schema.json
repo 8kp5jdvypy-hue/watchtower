@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_rank_empirical_artifact_v1.schema.json",
+  "title": "Postmarket rank empirical artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "empirical_run_id",
+    "experiment_id",
+    "split",
+    "evaluated_at_utc",
+    "code_version",
+    "input_digest_sha256",
+    "report_sha256",
+    "report"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "postmarket_rank_empirical"},
+    "empirical_run_id": {"type": "integer", "minimum": 1},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "split": {"enum": ["development", "holdout"]},
+    "evaluated_at_utc": {"type": "string", "format": "date-time"},
+    "code_version": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "input_digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report": {"type": "object"}
+  }
+}
