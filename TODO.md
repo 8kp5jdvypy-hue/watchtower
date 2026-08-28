@@ -50,6 +50,19 @@ all pointing at the one VPS.
 - [ ] Occasional health check: `ssh root@67.207.83.138`, then
   `cd /opt/perch && docker compose ps` — want all 5 services `Up`.
 
+## Active — signal-quality program
+
+The durable acceptance contract and ordered workstreams live in
+`docs/signal-quality-program.md`. This remains shadow-only until its empirical
+and operational gates pass.
+
+- [ ] Append-only postmarket outcome marks and quality reports.
+- [ ] Per-stage latency and missed-cycle attribution.
+- [ ] Independent full-universe recall census and miss report.
+- [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
+- [ ] Candidate lifecycle transitions and interpretable versioned rank.
+- [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.
+
 ## Nice to have / later
 
 - [ ] Ask me to wire `status.sh` (or an equivalent on the server) into a
