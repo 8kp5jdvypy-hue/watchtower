@@ -78,7 +78,9 @@ timing. See `docs/postmarket-timing-truth.md`.
 Implementation: `tradebot/postmarket_recall_census.py` snapshots and replays
 the active universe in bounded chunks, writes append-only per-symbol evidence,
 and publishes immutable miss reports. See `docs/postmarket-recall-census.md`.
-Independent provider comparison remains explicitly unconfigured.
+Candidate-level Massive comparison is implemented in the isolated external-
+context worker; the full-universe census still needs licensed second-provider
+coverage before its provider-independence gate can pass.
 
 ### 4. Context and tradability
 
@@ -92,9 +94,18 @@ Implementation: `tradebot/postmarket_context.py` writes bounded, append-only
 candidate context attempts covering prior-session ATR, SPY-relative movement,
 SIP quote spread/depth, RTH dollar liquidity, asset eligibility, completed-bar
 quality, and verified catalyst-ledger facts. Every source carries point-in-time
-and provider/feed provenance. Unsupported sector, fundamental, halt, implied-
-move, guidance, news, regulatory, and analyst inputs stay explicitly unavailable.
+and provider/feed provenance. Unsupported GICS/ETF mapping, replay-safe
+historical fundamentals/float, guidance, regulatory, and analyst inputs stay
+explicitly unavailable.
 See `docs/postmarket-context-tradability.md`.
+
+Point-in-time external evidence: `tradebot/postmarket_external_context.py`
+adds attributable option-implied-move and news observations plus exact-timestamp
+Massive price reconciliation, dated SIC/reference context, and Nasdaq Trader
+halt evidence in a separately supervised, default-off worker. Missing
+credentials, bars, float, replay-safe filing availability, and sector-ETF
+mappings remain explicit rather than inferred. See
+`docs/postmarket-point-in-time-external-context.md`.
 
 ### 5. Lifecycle and rank
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import io
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -627,6 +627,36 @@ def test_fetch_option_chain_logs_contracts_phase_then_chain_snapshot_phase(monke
 
     assert "operation=fetch_option_chain" in starts[1] and "client=option" in starts[1]
     assert "phase=chain_snapshot" in starts[1] and "symbol=TSLA" in starts[1]
+
+
+def test_fetch_news_maps_metadata_without_article_content(monkeypatch):
+    created = datetime(2026, 8, 27, 20, 5, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        id=42,
+        headline="ABC reports quarterly results",
+        source="benzinga",
+        url="https://example.test/news/42",
+        created_at=created,
+        updated_at=created,
+        symbols=["ABC", "SPY"],
+        content="must not be copied",
+    )
+
+    class _FakeNewsClient:
+        def get_news(self, request):
+            assert request.include_content is False
+            return SimpleNamespace(data={"news": [row]})
+
+    monkeypatch.setattr(alpaca_module, "_news_client", lambda: _FakeNewsClient())
+    items = alpaca_module.fetch_news(
+        "ABC", created - timedelta(hours=1), created + timedelta(hours=1)
+    )
+
+    assert len(items) == 1
+    assert items[0].provider_id == "42"
+    assert items[0].headline == row.headline
+    assert items[0].symbols == ("ABC", "SPY")
+    assert not hasattr(items[0], "content")
 
 
 def test_configure_logging_integration_with_a_real_observed_call():
