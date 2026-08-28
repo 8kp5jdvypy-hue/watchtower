@@ -9,11 +9,13 @@ import pytest
 
 from tradebot.postmarket_discovery import DISCOVERY_SCHEMA
 from tradebot.postmarket_empirical import (
+    EligibilityRule,
     ExperimentPolicy,
     SelectionRule,
     create_locked_experiment,
     ensure_empirical_schema,
     evaluate_rank_experiment,
+    holdout_label_inventory,
     record_independent_label,
     unblind_holdout,
 )
@@ -24,6 +26,9 @@ DEV = date(2026, 8, 20)
 HOLDOUT = date(2026, 8, 21)
 LOCKED_AT = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
 RULE = SelectionRule(minimum_evidence_score=60, maximum_ordinal_rank=2)
+ELIGIBILITY = EligibilityRule(
+    move_pct=8.0, min_cumulative_notional=250_000, persistence_bars=2,
+)
 POLICY = ExperimentPolicy(
     min_precision=0.90,
     min_recall=0.95,
@@ -50,6 +55,7 @@ def _lock(conn):
         label_method="blind_bar_review",
         development_sessions=(DEV,),
         holdout_sessions=(HOLDOUT,),
+        eligibility_rule=ELIGIBILITY,
         selection_rule=RULE,
         policy=POLICY,
     )
@@ -147,6 +153,7 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
             conn, experiment_id="rank-v1-exp-1", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
             development_sessions=(DEV,), holdout_sessions=(HOLDOUT,),
+            eligibility_rule=ELIGIBILITY,
             selection_rule=SelectionRule(61, 2), policy=POLICY,
         )
     with pytest.raises(ValueError, match="disjoint"):
@@ -154,6 +161,7 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
             conn, experiment_id="overlap", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
             development_sessions=(DEV,), holdout_sessions=(DEV,),
+            eligibility_rule=ELIGIBILITY,
             selection_rule=RULE, policy=POLICY,
         )
     with pytest.raises(ValueError, match="at least 0.95"):
@@ -161,6 +169,7 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
             conn, experiment_id="weak", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
             development_sessions=(DEV,), holdout_sessions=(HOLDOUT,),
+            eligibility_rule=ELIGIBILITY,
             selection_rule=RULE,
             policy=ExperimentPolicy(.9, .9, 3, 2),
         )
@@ -172,10 +181,21 @@ def test_label_writer_is_rank_blind_append_only_and_freezes_holdout():
     assert "postmarket_candidate_ranks" not in inspect.getsource(record_independent_label)
     first = _label(conn, HOLDOUT, "AAA", "eligible", "up")
     assert first > 0
+    inventory, count, _ = holdout_label_inventory(conn, "rank-v1-exp-1")
+    assert count == 1
+    with pytest.raises(ValueError, match="digest did not match"):
+        unblind_holdout(
+            conn, experiment_id="rank-v1-exp-1",
+            unblinded_at=datetime(2026, 8, 22, 1, tzinfo=timezone.utc),
+            unblinded_by="owner", reason="independent labels are complete",
+            expected_inventory_sha256="0" * 64,
+        )
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_holdout_unblinds").fetchone()[0] == 0
     digest = unblind_holdout(
         conn, experiment_id="rank-v1-exp-1",
         unblinded_at=datetime(2026, 8, 22, 1, tzinfo=timezone.utc),
         unblinded_by="owner", reason="independent labels are complete",
+        expected_inventory_sha256=inventory,
     )
     assert len(digest) == 64
     with pytest.raises(ValueError, match="frozen"):
@@ -229,6 +249,9 @@ def test_holdout_cannot_be_read_before_explicit_unblind_and_failures_are_named()
         conn, experiment_id="rank-v1-exp-1",
         unblinded_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
         unblinded_by="owner", reason="review complete",
+        expected_inventory_sha256=holdout_label_inventory(
+            conn, "rank-v1-exp-1"
+        )[0],
     )
     report = evaluate_rank_experiment(
         conn, experiment_id="rank-v1-exp-1", split="holdout",

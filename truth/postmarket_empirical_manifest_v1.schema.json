@@ -66,6 +66,7 @@
           "direction",
           "eligible_at_utc",
           "max_abs_move_pct",
+          "persistence_bars_observed",
           "cumulative_notional",
           "reason_code",
           "rationale"
@@ -76,6 +77,7 @@
           "direction": {"type": ["string", "null"], "enum": ["up", "down", null]},
           "eligible_at_utc": {"type": ["string", "null"], "format": "date-time"},
           "max_abs_move_pct": {"type": "number", "minimum": 0},
+          "persistence_bars_observed": {"type": "integer", "minimum": 0},
           "cumulative_notional": {"type": "number", "minimum": 0},
           "reason_code": {"type": "string", "minLength": 1},
           "rationale": {"type": "string", "minLength": 1}

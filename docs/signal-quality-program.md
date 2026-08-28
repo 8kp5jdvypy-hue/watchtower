@@ -145,10 +145,11 @@ See `docs/postmarket-quality-rank.md`.
   owner review before any customer delivery decision.
 
 Rank qualification implementation: `tradebot/postmarket_empirical.py` locks
-development/holdout sessions, selection rules, owner precision/sample floors,
-and the technical recall floor before holdout results. Independent append-only
-labels are rank-blind, and a one-way unblind record freezes the holdout before
-baseline-versus-rank evaluation. See
+development/holdout sessions, the ground-truth eligibility definition,
+selection rules, owner precision/sample floors, and the technical recall floor
+before holdout results. Strict digest-bound review manifests atomically append
+rank-blind labels, and a digest-confirmed one-way unblind record freezes the
+holdout before baseline-versus-rank evaluation. See
 `docs/postmarket-rank-empirical-qualification.md`.
 
 ## Anti-goals
