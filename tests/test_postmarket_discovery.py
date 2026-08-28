@@ -12,8 +12,12 @@ import pytest
 
 from tradebot.detectors import Bar
 from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
-from tradebot.postmarket_discovery import connect, select_discovery_symbols
-from tradebot.postmarket_discovery_shadow import discovery_enabled, run_discovery_tick
+from tradebot.postmarket_discovery import connect, plan_tick_schedule, select_discovery_symbols
+from tradebot.postmarket_discovery_shadow import (
+    active_poll_sleep_seconds,
+    discovery_enabled,
+    run_discovery_tick,
+)
 
 
 SESSION = date(2026, 8, 27)
@@ -165,6 +169,124 @@ def test_tick_bulk_fetches_bounded_union_and_conserves_missing_symbol(tmp_path):
     assert sources[2:] == (110.0, 110.0, 110.0, 110.0)
 
 
+def test_tick_records_schedule_stage_and_persistence_timing(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    values = iter((0.0, 0.100, 0.150, 0.400, 0.800))
+
+    result, _, _ = run_discovery_tick(
+        conn,
+        active_universe={"MOVER", "QUIET", "BROKEN", "UNSEEN"},
+        scheduled_earnings={"MOVER"},
+        now=NOW,
+        run_id="run-1",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: _screen(),
+        bars_fetch=lambda symbols, session: {
+            "MOVER": _bars("MOVER", [109, 110]),
+            "QUIET": _bars("QUIET", [101, 102]),
+        },
+        clock=lambda: next(values),
+    )
+
+    assert result.scheduled_lag_ms == 0
+    assert result.missed_cycles == 10
+    assert result.screen_latency_ms == 100
+    assert result.selection_latency_ms == 50
+    assert result.bar_fetch_latency_ms == 250
+    assert result.evaluation_latency_ms == 400
+    assert result.persistence_span_max_seconds == 300
+    assert result.latency_ms == 800
+    assert conn.execute(
+        """
+        SELECT scheduled_tick_utc,scheduled_lag_ms,missed_cycles,
+               screen_latency_ms,selection_latency_ms,bar_fetch_latency_ms,
+               evaluation_latency_ms,persistence_observations,
+               persistence_span_avg_seconds,persistence_span_max_seconds,
+               total_latency_ms
+        FROM postmarket_discovery_timing WHERE tick_id=?
+        """,
+        (result.tick_id,),
+    ).fetchone() == (
+        NOW.isoformat(),
+        0,
+        10,
+        100,
+        50,
+        250,
+        400,
+        1,
+        300.0,
+        300.0,
+        800,
+    )
+
+
+def test_schedule_planner_attributes_startup_and_between_tick_misses(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    first = plan_tick_schedule(
+        conn,
+        session=SESSION,
+        session_close=CLOSE,
+        actual_start=CLOSE + timedelta(minutes=10, milliseconds=2500),
+        interval_seconds=60,
+    )
+    assert first.scheduled_tick_utc == CLOSE + timedelta(minutes=10)
+    assert first.scheduled_lag_ms == 2500
+    assert first.missed_cycles == 10
+
+    conn.execute(
+        """
+        INSERT INTO postmarket_discovery_timing
+            (tick_id,session,scheduled_tick_utc,actual_start_utc,completed_utc,
+             scheduled_lag_ms,missed_cycles,screen_latency_ms,
+             selection_latency_ms,bar_fetch_latency_ms,evaluation_latency_ms,
+             persistence_observations,persistence_span_avg_seconds,
+             persistence_span_max_seconds,total_latency_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            99,
+            SESSION.isoformat(),
+            first.scheduled_tick_utc.isoformat(),
+            (CLOSE + timedelta(minutes=10, milliseconds=2500)).isoformat(),
+            (CLOSE + timedelta(minutes=10, milliseconds=2600)).isoformat(),
+            2500,
+            10,
+            20,
+            5,
+            50,
+            25,
+            0,
+            None,
+            None,
+            100,
+        ),
+    )
+    second = plan_tick_schedule(
+        conn,
+        session=SESSION,
+        session_close=CLOSE,
+        actual_start=CLOSE + timedelta(minutes=13, milliseconds=500),
+        interval_seconds=60,
+    )
+    assert second.scheduled_tick_utc == CLOSE + timedelta(minutes=13)
+    assert second.scheduled_lag_ms == 500
+    assert second.missed_cycles == 2
+
+
+def test_active_poll_sleep_stays_on_exchange_close_anchored_grid():
+    assert active_poll_sleep_seconds(
+        CLOSE + timedelta(seconds=2.5), session_close=CLOSE
+    ) == 57.5
+    assert active_poll_sleep_seconds(
+        CLOSE + timedelta(minutes=17, seconds=59.9), session_close=CLOSE
+    ) == pytest.approx(0.1)
+    assert active_poll_sleep_seconds(
+        CLOSE + timedelta(minutes=18, seconds=2), session_close=CLOSE
+    ) == 58
+
+
 def test_candidate_is_deduplicated_across_ticks(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     kwargs = dict(
@@ -225,6 +347,8 @@ def test_discovery_tables_are_append_only(tmp_path):
         conn.execute("DELETE FROM postmarket_discovery_observations")
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("DELETE FROM postmarket_discovery_candidates")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE postmarket_discovery_timing SET missed_cycles=99")
 
 
 def test_discovery_schema_coexists_with_scheduled_shadow_schema(tmp_path):
@@ -243,6 +367,7 @@ def test_discovery_schema_coexists_with_scheduled_shadow_schema(tmp_path):
         "postmarket_discovery_ticks",
         "postmarket_discovery_observations",
         "postmarket_discovery_candidates",
+        "postmarket_discovery_timing",
     } <= tables
 
 

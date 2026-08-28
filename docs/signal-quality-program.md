@@ -64,6 +64,11 @@ are in `docs/postmarket-outcome-quality.md`.
 - Per-stage screen, bar-fetch, evaluation, persistence, and total latency.
 - Heartbeat and audit attribution for every excessive gap.
 
+Implementation: `postmarket_discovery_timing` is committed atomically with
+each discovery tick, the service runs on an exchange-close-anchored grid, and
+discovery audit version 3 reconciles schedule, stage, persistence, and total
+timing. See `docs/postmarket-timing-truth.md`.
+
 ### 3. Coverage truth
 
 - Independent full-universe postmarket census after the window closes.

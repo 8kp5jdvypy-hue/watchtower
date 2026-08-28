@@ -22,14 +22,16 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as ecals
 
 
-AUDIT_VERSION = 2
+AUDIT_VERSION = 3
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "postmarket_shadow.db"
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 START_GRACE_SECONDS = 90
 END_GRACE_SECONDS = 90
 MAX_TICK_GAP_SECONDS = 150
+EXPECTED_POLL_SECONDS = 60
 MAX_PROCESSING_LATENCY_MS = 30_000
+MAX_SCHEDULED_LAG_MS = 30_000
 MAX_SOURCE_AGE_SECONDS = 180
 FINAL_BAR_GRACE = timedelta(minutes=5)
 EXPECTED_PROVIDER = "alpaca"
@@ -106,6 +108,15 @@ class OperationalMetrics:
     failed_invariants: int
     average_latency_ms: float | None
     max_latency_ms: int | None
+    timing_rows: int
+    average_scheduled_lag_ms: float | None
+    max_scheduled_lag_ms: int | None
+    missed_cycles: int
+    average_stage_latency_ms: dict[str, float]
+    max_stage_latency_ms: dict[str, int]
+    persistence_observations: int
+    average_persistence_span_seconds: float | None
+    max_persistence_span_seconds: float | None
     max_source_age_seconds: float | None
     discovery_versions: tuple[int, ...]
     code_versions: tuple[str, ...]
@@ -287,6 +298,7 @@ def audit_discovery_session(
             "postmarket_discovery_ticks",
             "postmarket_discovery_observations",
             "postmarket_discovery_candidates",
+            "postmarket_discovery_timing",
         }
         present = {
             row[0]
@@ -320,6 +332,11 @@ def audit_discovery_session(
             "ORDER BY first_detected_at,symbol",
             (session.isoformat(),),
         ).fetchall()
+        timing_rows = conn.execute(
+            "SELECT * FROM postmarket_discovery_timing WHERE session=? "
+            "ORDER BY scheduled_tick_utc,tick_id",
+            (session.isoformat(),),
+        ).fetchall()
     finally:
         conn.row_factory = original_row_factory
 
@@ -348,8 +365,142 @@ def audit_discovery_session(
         for previous, current in zip(tick_times, tick_times[1:])
     ]
     max_gap = max(gaps) if gaps else None
+
+    tick_rows_by_id = {int(row["tick_id"]): row for row in ticks}
+    timing_by_tick: dict[int, sqlite3.Row] = {}
+    stage_columns = {
+        "screen": "screen_latency_ms",
+        "selection": "selection_latency_ms",
+        "bar_fetch": "bar_fetch_latency_ms",
+        "evaluation": "evaluation_latency_ms",
+    }
+    stage_values: dict[str, list[int]] = {name: [] for name in stage_columns}
+    scheduled_lags: list[int] = []
+    missed_cycles = 0
+    persistence_observations = 0
+    persistence_weighted_seconds = 0.0
+    persistence_max_values: list[float] = []
+    if len(timing_rows) != len(ticks):
+        _issue(
+            issues,
+            "TIMING_EVIDENCE_MISSING",
+            f"stored {len(timing_rows)} timing rows for {len(ticks)} ticks",
+        )
+    scheduled_times: list[datetime] = []
+    previous_scheduled: datetime | None = None
+    for row in timing_rows:
+        tick_id = int(row["tick_id"])
+        if tick_id in timing_by_tick:
+            _issue(issues, "TIMING_TICK_DUPLICATED", f"tick {tick_id} has duplicate timing")
+            continue
+        timing_by_tick[tick_id] = row
+        tick = tick_rows_by_id.get(tick_id)
+        if tick is None:
+            _issue(issues, "TIMING_TICK_ORPHANED", f"timing references absent tick {tick_id}")
+            continue
+        scheduled = _aware_datetime(
+            row["scheduled_tick_utc"], f"tick {tick_id} scheduled_tick_utc"
+        )
+        actual = _aware_datetime(row["actual_start_utc"], f"tick {tick_id} actual_start_utc")
+        completed = _aware_datetime(row["completed_utc"], f"tick {tick_id} timing completed")
+        scheduled_times.append(scheduled)
+        tick_actual = _aware_datetime(tick["tick_utc"], f"tick {tick_id} tick_utc")
+        tick_completed = _aware_datetime(
+            tick["completed_utc"], f"tick {tick_id} completed_utc"
+        )
+        if row["session"] != session.isoformat() or actual != tick_actual or completed != tick_completed:
+            _issue(
+                issues,
+                "TIMING_TICK_MISMATCH",
+                f"timing metadata disagrees with tick {tick_id}",
+            )
+        expected_lag = round((actual - scheduled).total_seconds() * 1000)
+        lag = int(row["scheduled_lag_ms"])
+        if expected_lag < 0 or lag != expected_lag:
+            _issue(issues, "SCHEDULED_LAG_MISMATCH", f"tick {tick_id} lag is invalid")
+        scheduled_lags.append(lag)
+        if expected_start is not None:
+            if previous_scheduled is None:
+                expected_missed = int(
+                    (scheduled - expected_start).total_seconds() // EXPECTED_POLL_SECONDS
+                )
+            else:
+                expected_missed = (
+                    int(
+                        (scheduled - previous_scheduled).total_seconds()
+                        // EXPECTED_POLL_SECONDS
+                    )
+                    - 1
+                )
+            if int(row["missed_cycles"]) != max(0, expected_missed):
+                _issue(
+                    issues,
+                    "MISSED_CYCLE_COUNT_MISMATCH",
+                    f"tick {tick_id} missed-cycle count is inconsistent",
+                )
+        previous_scheduled = scheduled
+        missed_cycles += int(row["missed_cycles"])
+        stage_total = 0
+        for name, column in stage_columns.items():
+            value = int(row[column])
+            stage_values[name].append(value)
+            stage_total += value
+        total = int(row["total_latency_ms"])
+        if stage_total > total + 4 or tick["latency_ms"] != total:
+            _issue(
+                issues,
+                "STAGE_LATENCY_MISMATCH",
+                f"tick {tick_id} stage/total latency is inconsistent",
+            )
+        count = int(row["persistence_observations"])
+        average_span = row["persistence_span_avg_seconds"]
+        max_span = row["persistence_span_max_seconds"]
+        persistence_observations += count
+        if count == 0:
+            if average_span is not None or max_span is not None:
+                _issue(
+                    issues,
+                    "PERSISTENCE_TIMING_MISMATCH",
+                    f"tick {tick_id} has spans without observations",
+                )
+        elif (
+            average_span is None
+            or max_span is None
+            or float(average_span) < 0
+            or float(max_span) < float(average_span)
+        ):
+            _issue(
+                issues,
+                "PERSISTENCE_TIMING_MISMATCH",
+                f"tick {tick_id} persistence timing is invalid",
+            )
+        else:
+            persistence_weighted_seconds += float(average_span) * count
+            persistence_max_values.append(float(max_span))
+    if set(timing_by_tick) != set(tick_rows_by_id):
+        _issue(issues, "TIMING_TICK_SET_MISMATCH", "timing and tick ids do not match")
+    if scheduled_times != sorted(scheduled_times) or len(scheduled_times) != len(set(scheduled_times)):
+        _issue(issues, "SCHEDULE_GRID_INVALID", "scheduled tick timestamps are not ordered and unique")
+    if missed_cycles:
+        _issue(issues, "MISSED_CYCLES", f"timing ledger recorded {missed_cycles} missed cycles")
+    if scheduled_lags and max(scheduled_lags) > MAX_SCHEDULED_LAG_MS:
+        _issue(
+            issues,
+            "SCHEDULED_LAG_HIGH",
+            f"maximum scheduled lag was {max(scheduled_lags)}ms",
+        )
     if max_gap is not None and max_gap > MAX_TICK_GAP_SECONDS:
-        _issue(issues, "TICK_GAP", f"maximum tick gap was {max_gap:.0f}s")
+        detail = f"maximum tick gap was {max_gap:.0f}s"
+        gap_index = gaps.index(max_gap)
+        prior_tick_id = int(ticks[gap_index]["tick_id"])
+        prior_timing = timing_by_tick.get(prior_tick_id)
+        if prior_timing is not None:
+            slowest = max(stage_columns, key=lambda name: prior_timing[stage_columns[name]])
+            detail += (
+                f"; prior tick slowest stage was {slowest} "
+                f"({prior_timing[stage_columns[slowest]]}ms)"
+            )
+        _issue(issues, "TICK_GAP", detail)
 
     coverage_pct = 0.0
     if tick_times and expected_start is not None and expected_end is not None:
@@ -722,6 +873,29 @@ def audit_discovery_session(
         failed_invariants=sum(not row["invariant_ok"] for row in ticks),
         average_latency_ms=(sum(latencies) / len(latencies) if latencies else None),
         max_latency_ms=max(latencies) if latencies else None,
+        timing_rows=len(timing_rows),
+        average_scheduled_lag_ms=(
+            sum(scheduled_lags) / len(scheduled_lags) if scheduled_lags else None
+        ),
+        max_scheduled_lag_ms=max(scheduled_lags) if scheduled_lags else None,
+        missed_cycles=missed_cycles,
+        average_stage_latency_ms={
+            name: sum(values) / len(values)
+            for name, values in stage_values.items()
+            if values
+        },
+        max_stage_latency_ms={
+            name: max(values) for name, values in stage_values.items() if values
+        },
+        persistence_observations=persistence_observations,
+        average_persistence_span_seconds=(
+            persistence_weighted_seconds / persistence_observations
+            if persistence_observations
+            else None
+        ),
+        max_persistence_span_seconds=(
+            max(persistence_max_values) if persistence_max_values else None
+        ),
         max_source_age_seconds=max(max_source_ages) if max_source_ages else None,
         discovery_versions=tuple(sorted({row["discovery_version"] for row in ticks})),
         code_versions=_unique_strings(ticks, "code_version"),

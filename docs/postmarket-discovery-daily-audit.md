@@ -8,11 +8,11 @@ two observers have different universe and provenance contracts.
 Reports are written to:
 
 ```text
-data/postmarket_audits/postmarket_discovery_audit_<session>_v2.json
+data/postmarket_audits/postmarket_discovery_audit_<session>_v3.json
 ```
 
-Version 2 preserves any immutable version 1 report and publishes a separate
-corrected report; historical evidence is never rewritten.
+Version 3 preserves earlier immutable reports and adds required schedule and
+per-stage timing reconciliation; historical evidence is never rewritten.
 
 That directory is already included in the encrypted off-box backup and
 isolated restore drill. Existing files are never overwritten. The audit opens
@@ -41,6 +41,7 @@ The operational audit also rejects:
 - broken active-universe, screen, fetch, evaluation, candidate, or error-count
   conservation;
 - unexplained missing bulk responses, fetch errors, or excessive latency; and
+- missing, inconsistent, late, or skipped schedule/stage timing evidence; and
 - candidate ledger timestamps, directions, counts, or metadata that do not
   reconcile to qualifying observations.
 
@@ -48,6 +49,8 @@ Each report includes outcome/source counts, scheduled-earnings overlap,
 candidate lifecycles, and non-candidate near misses. Expected non-qualifying
 outcomes such as no after-hours trade, a sparse close, or a bar gap remain
 visible without being misrepresented as operational failures.
+
+The timing contract is documented in `docs/postmarket-timing-truth.md`.
 
 ## Automatic operation
 

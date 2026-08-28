@@ -22,8 +22,10 @@ from tradebot.postmarket import (
     fetch_error_evaluation,
 )
 from tradebot.postmarket_discovery import (
+    DiscoveryTiming,
     DiscoverySelection,
     connect as connect_discovery,
+    plan_tick_schedule,
     record_discovery_tick,
     select_discovery_symbols,
 )
@@ -74,11 +76,36 @@ class DiscoveryTickResult:
     candidate_observations: int
     new_candidates: int
     error_count: int
+    scheduled_lag_ms: int
+    missed_cycles: int
+    screen_latency_ms: int
+    selection_latency_ms: int
+    bar_fetch_latency_ms: int
+    evaluation_latency_ms: int
+    persistence_span_max_seconds: float | None
     latency_ms: int
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def active_poll_sleep_seconds(
+    now: datetime, *, session_close: datetime, interval_seconds: int = POLL_SECONDS,
+) -> float:
+    """Sleep to the next exchange-close-anchored slot without accumulating drift."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if session_close.tzinfo is None or session_close.utcoffset() is None:
+        raise ValueError("session_close must be timezone-aware")
+    elapsed = (now - session_close).total_seconds()
+    if elapsed < 0:
+        raise ValueError("now must not precede session_close")
+    next_slot = math.floor(elapsed / interval_seconds) + 1
+    next_tick = session_close + timedelta(seconds=next_slot * interval_seconds)
+    return max(0.1, (next_tick - now).total_seconds())
 
 
 def discovery_enabled(raw: str | None = None) -> bool:
@@ -187,20 +214,25 @@ def run_discovery_tick(
     screen_fetch: Callable[[int], MarketWideScreen] = _screen_fetch,
     bars_fetch: Callable[[list[str], date], dict] = _bars_fetch,
     top_n: int = SCREEN_TOP_N,
+    clock: Callable[[], float] | None = None,
 ) -> tuple[DiscoveryTickResult, DiscoverySelection, list[ReactionEvaluation]]:
     """Screen the market, bulk-fetch the bounded union, and conserve every row."""
     window = postmarket_window(now)
     if window is None or not (window[1] <= now <= window[2]):
         raise ValueError("run_discovery_tick requires an active postmarket window")
     session, session_close, _ = window
-    started = time.perf_counter()
+    timer = clock or time.perf_counter
+    started = timer()
     screen = screen_fetch(top_n)
+    screen_done = timer()
     _validate_screen(screen, now=now, data_feed=data_feed, top_n=top_n)
     if active_universe and not screen.entries:
         raise ValueError("market-wide screen returned no rows for a non-empty universe")
     selection = select_discovery_symbols(screen, active_universe, scheduled_earnings)
+    selection_done = timer()
     symbols = [row.symbol for row in selection.symbols]
     bars_by_symbol = bars_fetch(symbols, session)
+    fetch_done = timer()
     evaluations: list[ReactionEvaluation] = []
     for symbol in symbols:
         bars = bars_by_symbol.get(symbol)
@@ -224,7 +256,35 @@ def run_discovery_tick(
         except Exception as exc:
             logger.exception("postmarket discovery evaluation failed symbol=%s", symbol)
             evaluations.append(fetch_error_evaluation(symbol, session, exc))
-    latency_ms = round((time.perf_counter() - started) * 1000)
+    evaluation_done = timer()
+    screen_latency_ms = round((screen_done - started) * 1000)
+    selection_latency_ms = round((selection_done - screen_done) * 1000)
+    bar_fetch_latency_ms = round((fetch_done - selection_done) * 1000)
+    evaluation_latency_ms = round((evaluation_done - fetch_done) * 1000)
+    latency_ms = round((evaluation_done - started) * 1000)
+    spans = [
+        row.persistence_span_seconds
+        for row in evaluations
+        if row.persistence_span_seconds is not None
+    ]
+    schedule = plan_tick_schedule(
+        shadow_conn,
+        session=session,
+        session_close=session_close,
+        actual_start=now,
+        interval_seconds=POLL_SECONDS,
+    )
+    timing = DiscoveryTiming(
+        schedule=schedule,
+        screen_latency_ms=screen_latency_ms,
+        selection_latency_ms=selection_latency_ms,
+        bar_fetch_latency_ms=bar_fetch_latency_ms,
+        evaluation_latency_ms=evaluation_latency_ms,
+        persistence_observations=len(spans),
+        persistence_span_avg_seconds=(sum(spans) / len(spans) if spans else None),
+        persistence_span_max_seconds=(max(spans) if spans else None),
+        total_latency_ms=latency_ms,
+    )
     completed_utc = now + timedelta(milliseconds=latency_ms)
     tick_id, new_candidates = record_discovery_tick(
         shadow_conn,
@@ -240,6 +300,7 @@ def run_discovery_tick(
         code_version=version,
         data_feed=data_feed,
         latency_ms=latency_ms,
+        timing=timing,
     )
     result = DiscoveryTickResult(
         tick_id=tick_id,
@@ -251,6 +312,13 @@ def run_discovery_tick(
         candidate_observations=sum(row.outcome == "CANDIDATE" for row in evaluations),
         new_candidates=new_candidates,
         error_count=sum(row.outcome == "FETCH_ERROR" for row in evaluations),
+        scheduled_lag_ms=schedule.scheduled_lag_ms,
+        missed_cycles=schedule.missed_cycles,
+        screen_latency_ms=screen_latency_ms,
+        selection_latency_ms=selection_latency_ms,
+        bar_fetch_latency_ms=bar_fetch_latency_ms,
+        evaluation_latency_ms=evaluation_latency_ms,
+        persistence_span_max_seconds=timing.persistence_span_max_seconds,
         latency_ms=latency_ms,
     )
     return result, selection, evaluations
@@ -476,7 +544,7 @@ def main() -> int:
         try:
             window = postmarket_window(now)
             assert window is not None
-            session = window[0]
+            session, session_close, _ = window
             result, _, _ = run_discovery_tick(
                 shadow_conn,
                 active_universe=set(active_symbols(universe_conn)),
@@ -499,7 +567,8 @@ def main() -> int:
             logger.info(
                 "postmarket_discovery_tick tick=%s universe=%s screen_rows=%s "
                 "discovered=%s fetched=%s evaluated=%s candidates=%s new=%s "
-                "errors=%s latency_ms=%s",
+                "errors=%s lag_ms=%s missed=%s screen_ms=%s selection_ms=%s "
+                "fetch_ms=%s evaluation_ms=%s persistence_max_s=%s total_ms=%s",
                 result.tick_id,
                 result.universe_symbols,
                 result.screen_rows,
@@ -509,6 +578,13 @@ def main() -> int:
                 result.candidate_observations,
                 result.new_candidates,
                 result.error_count,
+                result.scheduled_lag_ms,
+                result.missed_cycles,
+                result.screen_latency_ms,
+                result.selection_latency_ms,
+                result.bar_fetch_latency_ms,
+                result.evaluation_latency_ms,
+                result.persistence_span_max_seconds,
                 result.latency_ms,
             )
             completed_now = _utc_now()
@@ -525,7 +601,12 @@ def main() -> int:
                     "ok", completed_now, **result.__dict__, **quality_fields
                 ),
             )
-        time.sleep(POLL_SECONDS)
+        sleep_now = _utc_now()
+        sleep_window = postmarket_window(sleep_now)
+        sleep_close = sleep_window[1] if sleep_window is not None else session_close
+        time.sleep(
+            active_poll_sleep_seconds(sleep_now, session_close=sleep_close)
+        )
 
 
 if __name__ == "__main__":

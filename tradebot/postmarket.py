@@ -169,6 +169,7 @@ class ReactionEvaluation:
     move_pct: float | None = None
     direction: str | None = None
     persistence_bars: int = 0
+    persistence_span_seconds: float | None = None
     data_age_seconds: float | None = None
 
 
@@ -193,6 +194,13 @@ def _valid_bar(bar: Bar) -> bool:
 def _notional(bar: Bar) -> float:
     typical_price = (bar.open + bar.high + bar.low + bar.close) / 4
     return typical_price * bar.volume
+
+
+def _persistence_span_seconds(bars: Sequence[Bar], count: int) -> float | None:
+    if count <= 0 or not bars:
+        return None
+    window = list(bars)[-count:]
+    return (bar_close_ts(window[-1]) - bar_close_ts(window[0])).total_seconds()
 
 
 def fetch_error_evaluation(symbol: str, event_date: date, error: Exception) -> ReactionEvaluation:
@@ -308,16 +316,22 @@ def evaluate_earnings_reaction(
             **common,
         )
     if len(lookback) < PERSISTENCE_BARS:
+        persisted = len(lookback)
         return ReactionEvaluation(
             outcome=OUTCOME_AWAITING_PERSISTENCE,
             reason=f"needs {PERSISTENCE_BARS} completed bars beyond threshold",
-            persistence_bars=len(lookback), **common,
+            persistence_bars=persisted,
+            persistence_span_seconds=_persistence_span_seconds(lookback, persisted),
+            **common,
         )
     if lookback[-1].ts - lookback[-2].ts != EXPECTED_BAR_INTERVAL:
         return ReactionEvaluation(
             outcome=OUTCOME_BAR_GAP,
             reason="persistence bars are not consecutive",
             persistence_bars=len(lookback),
+            persistence_span_seconds=_persistence_span_seconds(
+                lookback, len(lookback)
+            ),
             **common,
         )
     moves = [(bar.close / rth_close - 1) * 100 for bar in lookback]
@@ -339,6 +353,7 @@ def evaluate_earnings_reaction(
             outcome=OUTCOME_AWAITING_PERSISTENCE,
             reason="move has not persisted beyond threshold on consecutive bars",
             persistence_bars=persisted,
+            persistence_span_seconds=_persistence_span_seconds(lookback, persisted),
             **common,
         )
 
@@ -347,7 +362,11 @@ def evaluate_earnings_reaction(
         return ReactionEvaluation(
             outcome=OUTCOME_UNSTABLE_PRINT,
             reason=f"consecutive closes differ by {close_divergence:.2f}%",
-            persistence_bars=PERSISTENCE_BARS, **common,
+            persistence_bars=PERSISTENCE_BARS,
+            persistence_span_seconds=_persistence_span_seconds(
+                lookback, PERSISTENCE_BARS
+            ),
+            **common,
         )
     if cumulative_notional < MIN_CUMULATIVE_NOTIONAL:
         return ReactionEvaluation(
@@ -356,7 +375,11 @@ def evaluate_earnings_reaction(
                 f"${cumulative_notional:,.0f} cumulative postmarket notional is below "
                 f"${MIN_CUMULATIVE_NOTIONAL:,.0f}"
             ),
-            persistence_bars=PERSISTENCE_BARS, **common,
+            persistence_bars=PERSISTENCE_BARS,
+            persistence_span_seconds=_persistence_span_seconds(
+                lookback, PERSISTENCE_BARS
+            ),
+            **common,
         )
     return ReactionEvaluation(
         outcome=OUTCOME_CANDIDATE,
@@ -364,7 +387,11 @@ def evaluate_earnings_reaction(
             f"{move_pct:+.2f}% from RTH close persisted across {PERSISTENCE_BARS} bars "
             f"on ${cumulative_notional:,.0f} notional"
         ),
-        persistence_bars=PERSISTENCE_BARS, **common,
+        persistence_bars=PERSISTENCE_BARS,
+        persistence_span_seconds=_persistence_span_seconds(
+            lookback, PERSISTENCE_BARS
+        ),
+        **common,
     )
 
 

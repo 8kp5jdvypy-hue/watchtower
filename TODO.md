@@ -61,6 +61,9 @@ and operational gates pass.
   - [x] Bounded automatic backfill, explicit fetch failures, and immutable reports.
   - [ ] Deploy in shadow, verify live marks/reports, and accumulate eligible samples.
 - [ ] Per-stage latency and missed-cycle attribution.
+  - [x] Append-only schedule/stage timing ledger and drift-free anchored polling.
+  - [x] Persistence-span timing, heartbeat fields, and audit-v3 reconciliation.
+  - [ ] Deploy in shadow and verify a complete clean timing session.
 - [ ] Independent full-universe recall census and miss report.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
