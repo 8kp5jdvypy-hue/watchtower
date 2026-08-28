@@ -10,6 +10,7 @@ from pathlib import Path
 from tradebot.postmarket import thresholds
 from tradebot.postmarket_discovery import connect
 from tradebot.postmarket_discovery_audit import (
+    _audit_ready_at,
     _session_window,
     audit_discovery_session,
     report_json,
@@ -21,7 +22,8 @@ from tradebot import postmarket_discovery_shadow as discovery_shadow
 
 SESSION = date(2026, 8, 27)
 START = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
-END = datetime(2026, 8, 28, 0, 5, tzinfo=timezone.utc)
+END = datetime(2026, 8, 28, 0, 0, tzinfo=timezone.utc)
+AUDIT_READY = END + timedelta(minutes=5)
 ENDPOINTS = ("market_movers", "most_actives_volume", "most_actives_trades")
 
 
@@ -46,9 +48,20 @@ def _seed_session(
     code_version="abc123",
     missing_fetch=False,
     malformed_rank=False,
+    candidate_directions=None,
 ):
     times = times or _times()
+    directions = candidate_directions or ["up"] * len(times)
+    if len(directions) != len(times):
+        raise ValueError("candidate_directions must match times")
+    first_direction_indexes = {}
     for index, tick_utc in enumerate(times):
+        direction = directions[index]
+        first_direction_indexes.setdefault(direction, index)
+        candidate_source = "market_gainer" if direction == "up" else "market_loser"
+        candidate_close = 109.0 if direction == "up" else 91.0
+        candidate_move = 9.0 if direction == "up" else -9.0
+        screen_move = 12.0 if direction == "up" else -12.0
         source_updated = tick_utc - timedelta(seconds=source_age_seconds)
         source_updates = {name: source_updated.isoformat() for name in ENDPOINTS}
         fetched = 1 if missing_fetch else 2
@@ -90,7 +103,7 @@ def _seed_session(
                 fetched,
                 2,
                 1,
-                int(index == 0),
+                int(first_direction_indexes[direction] == index),
                 1,
                 _compact(thresholds()),
                 100,
@@ -102,15 +115,15 @@ def _seed_session(
             SESSION.isoformat(),
             tick_utc.isoformat(),
             100.0,
-            109.0,
-            109.0,
-            109.0,
-            109.0,
+            candidate_close,
+            candidate_close,
+            candidate_close,
+            candidate_close,
             1000,
             1000,
-            109_000.0,
-            9.0,
-            "up",
+            int(candidate_close * 1000),
+            candidate_move,
+            direction,
             2,
             10.0,
             "sip",
@@ -130,22 +143,22 @@ def _seed_session(
             (
                 tick_id,
                 "CAND",
-                _compact(["market_gainer"]),
-                _compact([["market_gainer", rank_value]]),
+                _compact([candidate_source]),
+                _compact([[candidate_source, rank_value]]),
                 _compact(
                     [
                         {
-                            "source": "market_gainer",
+                            "source": candidate_source,
                             "rank": rank_value,
                             "source_updated_at": source_updated.isoformat(),
-                            "move_pct": 12.0,
-                            "price": 109.0,
+                            "move_pct": screen_move,
+                            "price": candidate_close,
                             "volume": None,
                             "trade_count": None,
                         }
                     ]
                 ),
-                12.0,
+                screen_move,
                 "CANDIDATE",
                 "qualified",
                 *common,
@@ -202,36 +215,40 @@ def _seed_session(
                 "5Min",
             ),
         )
-    conn.execute(
-        """
-        INSERT INTO postmarket_discovery_candidates
-            (session,symbol,event_date,direction,discovery_version,
-             first_detected_at,bar_open_ts_utc,rth_close,close,move_pct,
-             cumulative_volume,cumulative_notional,sources_json,data_feed,
-             market_data_provider,bar_timeframe,code_version,run_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """,
-        (
-            SESSION.isoformat(),
-            "CAND",
-            SESSION.isoformat(),
-            "up",
-            1,
-            (times[0] + timedelta(milliseconds=100)).isoformat(),
-            times[0].isoformat(),
-            100.0,
-            109.0,
-            9.0,
-            1000,
-            109_000.0,
-            _compact(["market_gainer"]),
-            "sip",
-            "alpaca",
-            "5Min",
-            code_version,
-            "run-1",
-        ),
-    )
+    for direction, index in first_direction_indexes.items():
+        candidate_close = 109.0 if direction == "up" else 91.0
+        candidate_move = 9.0 if direction == "up" else -9.0
+        candidate_source = "market_gainer" if direction == "up" else "market_loser"
+        conn.execute(
+            """
+            INSERT INTO postmarket_discovery_candidates
+                (session,symbol,event_date,direction,discovery_version,
+                 first_detected_at,bar_open_ts_utc,rth_close,close,move_pct,
+                 cumulative_volume,cumulative_notional,sources_json,data_feed,
+                 market_data_provider,bar_timeframe,code_version,run_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                SESSION.isoformat(),
+                "CAND",
+                SESSION.isoformat(),
+                direction,
+                1,
+                (times[index] + timedelta(milliseconds=100)).isoformat(),
+                times[index].isoformat(),
+                100.0,
+                candidate_close,
+                candidate_move,
+                1000,
+                candidate_close * 1000,
+                _compact([candidate_source]),
+                "sip",
+                "alpaca",
+                "5Min",
+                code_version,
+                "run-1",
+            ),
+        )
     conn.commit()
 
 
@@ -248,22 +265,44 @@ def test_complete_discovery_session_is_operationally_eligible(tmp_path):
 
     assert report.operational_clean is True
     assert report.session_evidence_eligible is True
-    assert report.operational.ticks == 246
+    assert report.operational.ticks == 241
     assert report.operational.window_coverage_pct == 100.0
     assert report.operational.max_tick_gap_seconds == 60
     assert report.operational.max_source_age_seconds == 0
     assert report.operational.unique_candidates == 1
     assert report.operational.scheduled_overlap_symbols == 1
     assert report.operational.source_observations == {
-        "market_gainer": 246,
-        "most_active_volume": 246,
-        "scheduled_earnings": 246,
+        "market_gainer": 241,
+        "most_active_volume": 241,
+        "scheduled_earnings": 241,
     }
     assert report.candidates[0].symbol == "CAND"
-    assert report.candidates[0].observation_ticks == 246
+    assert report.candidates[0].observation_ticks == 241
     assert report.near_miss_symbols == ()
     assert report.issues == ()
     assert json.loads(report_json(report))["operational_clean"] is True
+
+
+def test_candidate_direction_reversal_reconciles_each_ledger_entry(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    times = _times()
+    _seed_session(
+        conn,
+        times=times,
+        candidate_directions=["down", "down"] + ["up"] * (len(times) - 2),
+    )
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+
+    assert report.operational_clean is True
+    assert report.operational.unique_candidates == 2
+    assert {(candidate.symbol, candidate.direction) for candidate in report.candidates} == {
+        ("CAND", "down"),
+        ("CAND", "up"),
+    }
+    assert "CANDIDATE_DETECTION_TIME_MISMATCH" not in {
+        issue.code for issue in report.issues
+    }
 
 
 def test_partial_session_is_explicitly_ineligible(tmp_path):
@@ -290,7 +329,7 @@ def test_stale_provider_timestamps_and_fetch_errors_are_blockers(tmp_path):
     codes = {issue.code for issue in report.issues}
 
     assert report.operational_clean is False
-    assert report.operational.fetch_errors == 246
+    assert report.operational.fetch_errors == 241
     assert report.operational.max_source_age_seconds == 181
     assert {"SOURCE_TIMESTAMP_STALE", "FETCH_ERRORS"} <= codes
 
@@ -311,7 +350,10 @@ def test_session_window_uses_actual_early_close_and_est_postmarket_end():
 
     assert window == (
         datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc),
-        datetime(2026, 11, 28, 1, 5, tzinfo=timezone.utc),
+        datetime(2026, 11, 28, 1, 0, tzinfo=timezone.utc),
+    )
+    assert _audit_ready_at(date(2026, 11, 27)) == datetime(
+        2026, 11, 28, 1, 5, tzinfo=timezone.utc
     )
 
 
@@ -320,30 +362,34 @@ def test_completed_audit_write_is_immutable_idempotent_and_after_window(tmp_path
     conn = connect(db_path)
     _seed_session(conn)
     output = tmp_path / "audits"
+    output.mkdir()
+    legacy_path = output / "postmarket_discovery_audit_2026-08-27_v1.json"
+    legacy_path.write_text('{"legacy":true}\n', encoding="utf-8")
 
     assert write_completed_discovery_audits(
         db_path,
         output,
-        now=END,
+        now=AUDIT_READY,
         audit_code_version="audit123",
     ) == ()
     first = write_completed_discovery_audits(
         db_path,
         output,
-        now=END + timedelta(seconds=1),
+        now=AUDIT_READY + timedelta(seconds=1),
         audit_code_version="audit123",
     )
     second = write_completed_discovery_audits(
         db_path,
         output,
-        now=END + timedelta(minutes=1),
+        now=AUDIT_READY + timedelta(minutes=1),
         audit_code_version="different",
     )
 
     assert len(first) == 1
     assert second == ()
-    path = output / "postmarket_discovery_audit_2026-08-27_v1.json"
+    path = output / "postmarket_discovery_audit_2026-08-27_v2.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
+    assert json.loads(legacy_path.read_text(encoding="utf-8")) == {"legacy": True}
     assert payload["audit_code_version"] == "audit123"
     assert payload["session_evidence_eligible"] is True
 
