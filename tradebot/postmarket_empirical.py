@@ -211,6 +211,7 @@ class WrittenEmpiricalArtifact:
     split: str
     input_digest_sha256: str
     report_sha256: str
+    experiment_manifest_sha256: str
 
 
 def ensure_empirical_schema(conn: sqlite3.Connection) -> None:
@@ -782,10 +783,12 @@ def export_empirical_report(
         raise ValueError("input_digest_sha256 must be a lowercase SHA-256 digest")
     row = conn.execute(
         """
-        SELECT empirical_run_id,experiment_id,split,evaluated_at_utc,code_version,
-               input_digest_sha256,report_json,report_sha256
-        FROM postmarket_rank_empirical_runs
-        WHERE experiment_id=? AND split=? AND input_digest_sha256=?
+        SELECT r.empirical_run_id,r.experiment_id,r.split,r.evaluated_at_utc,
+               r.code_version,r.input_digest_sha256,r.report_json,r.report_sha256,
+               e.manifest_sha256
+        FROM postmarket_rank_empirical_runs r
+        JOIN postmarket_rank_experiments e ON e.experiment_id=r.experiment_id
+        WHERE r.experiment_id=? AND r.split=? AND r.input_digest_sha256=?
         """,
         (experiment_id, split, digest),
     ).fetchone()
@@ -814,6 +817,12 @@ def export_empirical_report(
         raise ValueError("empirical run report identity does not match stored metadata")
     if split == "holdout" and report.get("holdout_unblinded") is not True:
         raise ValueError("holdout empirical report is not explicitly unblinded")
+    experiment_manifest_sha256 = row[8]
+    if (
+        not isinstance(experiment_manifest_sha256, str)
+        or not SHA256_PATTERN.fullmatch(experiment_manifest_sha256)
+    ):
+        raise ValueError("experiment manifest digest is invalid")
     if not isinstance(row[3], str):
         raise ValueError("empirical run evaluated_at_utc must be text")
     try:
@@ -833,6 +842,7 @@ def export_empirical_report(
         "code_version": code_version,
         "input_digest_sha256": digest,
         "report_sha256": report_digest,
+        "experiment_manifest_sha256": experiment_manifest_sha256,
         "report": report,
     }
     raw = (_canonical(payload) + "\n").encode()
@@ -849,7 +859,7 @@ def export_empirical_report(
             raise ValueError("existing empirical artifact does not match exact run")
         return WrittenEmpiricalArtifact(
             str(destination), artifact_sha256, False, experiment_id, split,
-            digest, report_digest,
+            digest, report_digest, experiment_manifest_sha256,
         )
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=directory
@@ -880,5 +890,5 @@ def export_empirical_report(
         raise
     return WrittenEmpiricalArtifact(
         str(destination), artifact_sha256, created, experiment_id, split,
-        digest, report_digest,
+        digest, report_digest, experiment_manifest_sha256,
     )

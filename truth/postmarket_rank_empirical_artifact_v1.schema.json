@@ -14,6 +14,7 @@
     "code_version",
     "input_digest_sha256",
     "report_sha256",
+    "experiment_manifest_sha256",
     "report"
   ],
   "properties": {
@@ -26,6 +27,10 @@
     "code_version": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
     "input_digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "experiment_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "report": {"type": "object"}
   }
 }

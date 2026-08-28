@@ -180,7 +180,7 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
 
 def test_label_writer_is_rank_blind_append_only_and_freezes_holdout():
     conn = _conn()
-    _lock(conn)
+    experiment_manifest_sha256 = _lock(conn)
     assert "postmarket_candidate_ranks" not in inspect.getsource(record_independent_label)
     first = _label(conn, HOLDOUT, "AAA", "eligible", "up")
     assert first > 0
@@ -232,7 +232,7 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
 
 def test_exact_empirical_run_exports_as_immutable_digest_bound_artifact(tmp_path):
     conn = _conn()
-    _lock(conn)
+    experiment_manifest_sha256 = _lock(conn)
     _seed_session(conn, DEV)
     _seed_labels(conn, DEV)
     report = evaluate_rank_experiment(
@@ -265,6 +265,7 @@ def test_exact_empirical_run_exports_as_immutable_digest_bound_artifact(tmp_path
     assert second.sha256 == first.sha256
     assert payload["code_version"] == "abc1234"
     assert payload["input_digest_sha256"] == report.input_digest_sha256
+    assert payload["experiment_manifest_sha256"] == experiment_manifest_sha256
     assert payload["report"]["passed_locked_policy"] is True
     assert artifact_path.stat().st_mode & 0o777 == 0o444
     assert list(tmp_path.glob("*.tmp")) == []
