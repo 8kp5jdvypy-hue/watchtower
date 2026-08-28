@@ -77,8 +77,11 @@ and operational gates pass.
     dated SIC/market-cap/share context, and official halt evidence.
   - [x] Add acceptance-bounded SEC filing SIC and XBRL fundamentals with a
     conservative dissemination lag and exact accession provenance.
-  - [ ] Add licensed point-in-time float shares and true GICS/sector-ETF mapping;
-    do not infer either from SEC public-float value or SIC.
+  - [x] Add a strict append-only contract for licensed point-in-time float
+    shares and true sector/ETF mapping; do not infer either from SEC
+    public-float value or SIC.
+  - [ ] Contract with/configure an authorized provider, ingest live manifests,
+    and verify candidate bindings in shadow.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
   - [x] Direct off-screen tracking and append-only completed-bar observations.
   - [x] Versioned qualifying, confirmed, strengthening, fading, dequalified,

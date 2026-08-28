@@ -44,14 +44,22 @@ canonical payload digest, revision, run, attempt, status, and error code.
   negative income/equity is preserved. SEC public float is explicitly a
   dollar value, not float shares. These facts remain outside rank until
   holdout evidence justifies a versioned scoring change.
+- `LICENSED_POINT_IN_TIME_REFERENCE` binds an operator-ingested provider row
+  containing true classification, a declared sector benchmark, and optional
+  float shares only when its effective, publication, and Perch-observation
+  times precede candidate detection. The manifest and rows are digest-bound
+  and append-only. `license_reference` is an operator attestation, not technical
+  license verification, and these facts remain outside rank. See
+  `docs/postmarket-licensed-reference-manifest.md`.
 - `HALT_STATE` comes from Nasdaq Trader's official trade-halt RSS feed. The
   worker requests halts begun or resumed on the session at most once per batch,
   distinguishes a successful no-match from failure, and never infers a halt
   from missing bars.
 
 Alpaca SIP versus Alpaca IEX is never called independent-provider agreement.
-Float shares, GICS/ETF mapping, and carry-forward halts begun on earlier
-sessions remain explicit gaps.
+Without an eligible licensed manifest, float shares and true sector/ETF mapping
+remain explicit gaps. Carry-forward halts begun on earlier sessions also remain
+an explicit gap.
 
 ## Operational isolation
 
