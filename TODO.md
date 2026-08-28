@@ -67,7 +67,9 @@ and operational gates pass.
 - [ ] Independent full-universe recall census and miss report.
   - [x] Bounded full-universe completed-bar replay and append-only attempts.
   - [x] Stage-1 false-negative reasons, detection delay, recall, and miss reports.
-  - [ ] Configure an independent comparison provider and verify live census load.
+  - [x] Add next-day full-universe Massive SIP flat-file comparison with
+    independent recall, eligible-pair agreement, and exact-bar divergence.
+  - [ ] Configure Massive S3 credentials and verify live census load/entitlement.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
   - [x] Append-only ATR, SPY-relative, quote/depth, liquidity, asset, and catalyst evidence.
   - [x] Explicit unavailable states and bounded retryable enrichment orchestration.
@@ -89,8 +91,10 @@ and operational gates pass.
   isolated default-off enrichment worker.
 - [x] Implement isolated Massive candidate-price/reference and Nasdaq Trader halt
   adapters; never substitute same-provider feed comparison.
-- [ ] Configure the licensed Massive key in production, validate entitlement and
-  agreement in shadow, and extend the second provider to the full-universe census.
+- [ ] Configure the licensed Massive REST key in production and validate
+  candidate-level entitlement/agreement in shadow.
+- [ ] Configure separate Massive S3 flat-file credentials and accumulate clean
+  next-day full-universe provider-proof reports.
 
 ## Nice to have / later
 

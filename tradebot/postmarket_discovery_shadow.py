@@ -49,6 +49,12 @@ from tradebot.postmarket_recall_census import (
     run_recall_census,
     write_census_report,
 )
+from tradebot.postmarket_recall_provider import (
+    latest_provider_proof_summary,
+    next_due_provider_proof,
+    run_provider_proof,
+    write_provider_proof_report,
+)
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.universe import active_symbols, connect as connect_universe
 
@@ -150,6 +156,20 @@ def _census_bars_fetch(symbols: list[str], start: datetime, end: datetime):
     from tradebot.vendors.alpaca import fetch_intraday_bars_window_bulk
 
     return fetch_intraday_bars_window_bulk(symbols, start=start, end=end)
+
+
+def _provider_flatfile_configured() -> bool:
+    from tradebot.vendors.massive_flatfiles import configured
+
+    return configured()
+
+
+def _provider_flatfile_fetch(session, symbols, start, end):
+    from tradebot.vendors.massive_flatfiles import fetch_minute_aggregates
+
+    return fetch_minute_aggregates(
+        session, symbols=symbols, start=start, end=end,
+    )
 
 
 def _daily_bars_fetch(symbols: list[str]):
@@ -610,6 +630,93 @@ def recall_census_heartbeat_fields(
         }
 
 
+def provider_proof_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    *,
+    version: str | None,
+    primary_fetch: Callable[[list[str], datetime, datetime], dict] = _census_bars_fetch,
+    independent_fetch: Callable = _provider_flatfile_fetch,
+    provider_configured: Callable[[], bool] = _provider_flatfile_configured,
+) -> dict:
+    """Run at most one next-day full-universe provider proof per idle cycle."""
+    try:
+        if not provider_configured():
+            return {
+                "provider_proof_status": "unconfigured",
+                "latest_provider_proof": latest_provider_proof_summary(AUDIT_DIR),
+            }
+        due = next_due_provider_proof(shadow_conn, now=now)
+        if due is None:
+            return {
+                "provider_proof_status": "current",
+                "latest_provider_proof": latest_provider_proof_summary(AUDIT_DIR),
+            }
+        census_id, session = due
+        result, _ = run_provider_proof(
+            shadow_conn,
+            census_id=census_id,
+            session=session,
+            now=now,
+            run_id=new_run_id(),
+            code_version=version,
+            primary_fetch=primary_fetch,
+            independent_fetch=independent_fetch,
+        )
+        report, written = write_provider_proof_report(
+            shadow_conn, AUDIT_DIR, result.comparison_id,
+        )
+        logger.info(
+            "postmarket_provider_proof session=%s attempt=%s status=%s "
+            "universe=%s comparable=%s coverage=%s primary_pairs=%s "
+            "independent_pairs=%s agreement=%s independent_recall=%s "
+            "price_disagreements=%s errors=%s latency_ms=%s report_written=%s",
+            result.session, result.attempt, result.status, result.universe_symbols,
+            result.comparable_symbols, result.comparable_coverage,
+            result.primary_eligible_pairs, result.independent_eligible_pairs,
+            result.eligible_pair_agreement, result.independent_recall,
+            result.price_disagreement_bars, result.error_count, result.latency_ms,
+            written,
+        )
+        return {
+            "provider_proof_status": result.status,
+            "provider_proof_session": result.session,
+            "provider_proof_attempt": result.attempt,
+            "provider_proof_universe": result.universe_symbols,
+            "provider_proof_comparable": result.comparable_symbols,
+            "provider_proof_coverage": result.comparable_coverage,
+            "provider_proof_pair_agreement": result.eligible_pair_agreement,
+            "provider_proof_independent_recall": result.independent_recall,
+            "provider_proof_price_disagreements": result.price_disagreement_bars,
+            "provider_proof_errors": result.error_count,
+            "provider_proof_latency_ms": result.latency_ms,
+            "provider_proof_report_written": written,
+            "latest_provider_proof": {
+                "session": report.session,
+                "report_version": report.report_version,
+                "operational_complete": report.operational_complete,
+                "evidence_eligible": report.evidence_eligible,
+                "independent_recall": report.metrics["independent_recall"],
+                "eligible_pair_agreement": report.metrics["eligible_pair_agreement"],
+                "comparable_coverage": report.metrics["comparable_coverage"],
+                "issue_codes": list(report.issue_codes),
+            },
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket full-universe provider proof failed")
+        try:
+            latest = latest_provider_proof_summary(AUDIT_DIR)
+        except Exception as summary_exc:
+            latest = {
+                "status": "error",
+                "error": f"{type(summary_exc).__name__}: {summary_exc}"[:1000],
+            }
+        return {
+            "provider_proof_status": "error",
+            "provider_proof_error": f"{type(exc).__name__}: {exc}"[:1000],
+            "latest_provider_proof": latest,
+        }
 def context_backfill_heartbeat_fields(
     now: datetime,
     shadow_conn,
@@ -854,6 +961,11 @@ def main() -> int:
                 data_feed=data_feed,
                 version=version,
             )
+            provider_fields = provider_proof_heartbeat_fields(
+                now,
+                shadow_conn,
+                version=version,
+            )
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
@@ -865,6 +977,7 @@ def main() -> int:
                     **rank_fields,
                     **quality_fields,
                     **census_fields,
+                    **provider_fields,
                 ),
             )
             time.sleep(idle_sleep_seconds(now))
