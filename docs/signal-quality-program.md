@@ -102,6 +102,13 @@ See `docs/postmarket-context-tradability.md`.
 - An interpretable rank whose components and penalties are stored with the
   candidate. Historical qualification never masquerades as current actionability.
 
+Lifecycle implementation: `tradebot/postmarket_lifecycle.py` directly tracks
+every admitted market-wide candidate through the window, even after Stage 1
+stops returning it. It stores distinct completed-bar observations plus
+`NEWLY_QUALIFYING`, `CONFIRMED`, `STRENGTHENING`, `FADING`, `DEQUALIFIED`,
+`REQUALIFIED`, and `CLOSED` transitions. See
+`docs/postmarket-candidate-lifecycle.md`.
+
 ### 6. Empirical qualification
 
 - Blinded labeling, walk-forward evaluation, cohort metrics, and miss review.

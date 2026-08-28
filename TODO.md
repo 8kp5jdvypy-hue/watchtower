@@ -73,6 +73,10 @@ and operational gates pass.
   - [x] Explicit unavailable states and bounded retryable enrichment orchestration.
   - [ ] Add point-in-time sector, float, market-cap, halt, implied-move, and news sources.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
+  - [x] Direct off-screen tracking and append-only completed-bar observations.
+  - [x] Versioned qualifying, confirmed, strengthening, fading, dequalified,
+    requalified, and closed transitions with explicit actionability.
+  - [ ] Deterministic decomposable quality rank and unavailable-data penalties.
 - [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.
 
 ## Nice to have / later
