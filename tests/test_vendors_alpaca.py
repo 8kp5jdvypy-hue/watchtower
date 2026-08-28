@@ -404,6 +404,8 @@ class _FakeQuote:
         self.timestamp = ts
         self.bid_price = 100.0
         self.ask_price = 100.2
+        self.bid_size = 500
+        self.ask_size = 400
 
 
 def test_fetch_latest_quotes_logs_correct_chunk_context_and_no_symbol_list(monkeypatch, caplog):
@@ -419,6 +421,8 @@ def test_fetch_latest_quotes_logs_correct_chunk_context_and_no_symbol_list(monke
         result = alpaca_module.fetch_latest_quotes(symbols)
 
     assert set(result.keys()) == {"AAA", "BBB", "CCC"}
+    assert result["AAA"].bid_size == 500
+    assert result["AAA"].ask_size == 400
 
     starts = [r.message for r in caplog.records if "vendor_call_start" in r.message]
     assert len(starts) == 2

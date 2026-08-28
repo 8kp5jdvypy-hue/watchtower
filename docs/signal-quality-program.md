@@ -88,6 +88,14 @@ Independent provider comparison remains explicitly unconfigured.
 - Earnings, guidance, filing, news, regulatory, analyst, and unexplained catalyst
   categories with source timestamps and confidence boundaries.
 
+Implementation: `tradebot/postmarket_context.py` writes bounded, append-only
+candidate context attempts covering prior-session ATR, SPY-relative movement,
+SIP quote spread/depth, RTH dollar liquidity, asset eligibility, completed-bar
+quality, and verified catalyst-ledger facts. Every source carries point-in-time
+and provider/feed provenance. Unsupported sector, fundamental, halt, implied-
+move, guidance, news, regulatory, and analyst inputs stay explicitly unavailable.
+See `docs/postmarket-context-tradability.md`.
+
 ### 5. Lifecycle and rank
 
 - Append-only state transitions derived from completed bars only.

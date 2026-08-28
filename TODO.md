@@ -69,6 +69,9 @@ and operational gates pass.
   - [x] Stage-1 false-negative reasons, detection delay, recall, and miss reports.
   - [ ] Configure an independent comparison provider and verify live census load.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
+  - [x] Append-only ATR, SPY-relative, quote/depth, liquidity, asset, and catalyst evidence.
+  - [x] Explicit unavailable states and bounded retryable enrichment orchestration.
+  - [ ] Add point-in-time sector, float, market-cap, halt, implied-move, and news sources.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
 - [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.
 
