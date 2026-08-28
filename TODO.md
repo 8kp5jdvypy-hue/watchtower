@@ -75,7 +75,10 @@ and operational gates pass.
   - [x] Explicit unavailable states and bounded retryable enrichment orchestration.
   - [x] Add pre-close implied-move, news, exact second-provider candidate bars,
     dated SIC/market-cap/share context, and official halt evidence.
-  - [ ] Add licensed replay-safe float/fundamentals and true sector/ETF mapping.
+  - [x] Add acceptance-bounded SEC filing SIC and XBRL fundamentals with a
+    conservative dissemination lag and exact accession provenance.
+  - [ ] Add licensed point-in-time float shares and true GICS/sector-ETF mapping;
+    do not infer either from SEC public-float value or SIC.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
   - [x] Direct off-screen tracking and append-only completed-bar observations.
   - [x] Versioned qualifying, confirmed, strengthening, fading, dequalified,

@@ -14,6 +14,7 @@ from tradebot.postmarket_discovery import DISCOVERY_SCHEMA
 from tradebot.postmarket_external_context import (
     build_pre_event_expectation,
     current_option_context_fact,
+    filing_snapshot_facts,
     halt_state_fact,
     independent_price_comparison_fact,
     news_fact,
@@ -28,6 +29,7 @@ from tradebot.postmarket_external_context_shadow import (
 )
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
+from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot, ReportedFact
 
 
 SESSION = date(2026, 8, 27)
@@ -174,6 +176,70 @@ def test_ticker_reference_facts_are_context_not_replay_safe_rank_inputs():
     assert fundamentals.payload["temporal_semantic"].endswith("not_replay_safe")
 
 
+def _filing_snapshot():
+    accepted = DETECTED - timedelta(days=30)
+    return PointInTimeSnapshot(
+        "ABC", "0000000001", DETECTED, DETECTED - timedelta(minutes=15),
+        "0000000001-26-000001", accepted, "7372",
+        "SERVICES-PREPACKAGED SOFTWARE",
+        (
+            ReportedFact(
+                "common_shares_outstanding", "dei",
+                "EntityCommonStockSharesOutstanding", "shares", 1_000_000,
+                None, date(2026, 6, 30), "0000000001-26-000001", "10-Q",
+                date(2026, 7, 31), accepted, 2026, "Q2", "CY2026Q2I",
+            ),
+            ReportedFact(
+                "net_income", "us-gaap", "NetIncomeLoss", "USD", -50_000,
+                date(2026, 4, 1), date(2026, 6, 30),
+                "0000000001-26-000001", "10-Q", date(2026, 7, 31),
+                accepted, 2026, "Q2", "CY2026Q2",
+            ),
+        ),
+        40, 38, (),
+    )
+
+
+def test_sec_filing_facts_are_acceptance_bounded_and_semantically_explicit():
+    classification, fundamentals = filing_snapshot_facts(
+        _candidate(), snapshot=_filing_snapshot(), observed_at=DETECTED,
+        code_version="x", run_id="run",
+    )
+    assert classification.status == "AVAILABLE"
+    assert classification.provider == "sec_edgar"
+    assert classification.payload["classification_system"] == "SEC_SIC"
+    assert "not_gics" in classification.payload["semantic"]
+    assert fundamentals.status == "AVAILABLE"
+    assert fundamentals.payload["dissemination_safety_lag_seconds"] == 900
+    assert fundamentals.payload["available_fact_names"] == [
+        "common_shares_outstanding", "net_income",
+    ]
+    assert fundamentals.payload["facts"][1]["value"] == -50_000
+    assert fundamentals.payload["missing_concepts_are_not_zero"] is True
+
+
+def test_sec_fact_builder_rejects_post_cutoff_acceptance():
+    snapshot = _filing_snapshot()
+    future = ReportedFact(
+        "assets", "us-gaap", "Assets", "USD", 100,
+        None, date(2026, 8, 27), "0000000001-26-000004", "10-Q",
+        date(2026, 8, 27), DETECTED, 2026, "Q3", "CY2026Q3I",
+    )
+    invalid = PointInTimeSnapshot(
+        snapshot.symbol, snapshot.cik, snapshot.candidate_cutoff_utc,
+        snapshot.eligible_cutoff_utc, snapshot.classification_accession,
+        snapshot.classification_accepted_at_utc, snapshot.sic_code,
+        snapshot.sic_description, snapshot.facts + (future,),
+        snapshot.recent_submission_count, snapshot.eligible_submission_count,
+        snapshot.errors,
+    )
+    with pytest.raises(ValueError, match="accepted after"):
+        filing_snapshot_facts(
+            _candidate(), snapshot=invalid, observed_at=DETECTED,
+            code_version="x", run_id="run",
+        )
+
+
 def test_halt_fact_uses_official_records_not_missing_bar_inference():
     record = HaltRecord(
         "ABC", "ABC Corp", "Q", "LUDP", "10.00",
@@ -289,7 +355,7 @@ def test_backfill_records_available_and_explicit_unconfigured_facts_idempotently
         news_fetch=lambda symbol, start, end: (item,),
     )
     assert result.candidates_planned == 1
-    assert result.facts_written == 7
+    assert result.facts_written == 9
     assert result.available_facts == 2
     rows = dict(conn.execute(
         "SELECT fact_kind,status FROM postmarket_external_fact_events WHERE candidate_id=?",
@@ -305,7 +371,7 @@ def test_backfill_records_available_and_explicit_unconfigured_facts_idempotently
         news_fetch=lambda symbol, start, end: (item,),
     )
     assert again.candidates_planned == 0
-    assert conn.execute("SELECT COUNT(*) FROM postmarket_external_fact_events").fetchone()[0] == 7
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_external_fact_events").fetchone()[0] == 9
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("UPDATE postmarket_external_fact_events SET status='AVAILABLE'")
 
@@ -331,16 +397,25 @@ def test_backfill_wires_independent_reference_and_official_halt_sources():
         news_fetch=lambda symbol, start, end: (item,),
         independent_fetch=lambda symbol, start, end: _comparison_bars(),
         reference_fetch=lambda symbol, as_of: reference,
+        filing_context_fetch=lambda symbol, cutoff: _filing_snapshot(),
+        completion_clock=lambda: DETECTED + timedelta(seconds=3),
         halt_fetch=fetch_halts,
     )
     rows = dict(conn.execute(
         "SELECT fact_kind,status FROM postmarket_external_fact_events WHERE candidate_id=?",
         (candidate_id,),
     ).fetchall())
-    assert result.facts_written == 7
+    assert result.facts_written == 9
     assert rows["INDEPENDENT_PRICE_COMPARISON"] == "AVAILABLE"
     assert rows["SECTOR_CLASSIFICATION"] == "AVAILABLE"
     assert rows["FUNDAMENTALS"] == "AVAILABLE"
+    assert rows["FILING_INDUSTRY_CLASSIFICATION"] == "AVAILABLE"
+    assert rows["FILING_FUNDAMENTALS"] == "AVAILABLE"
+    assert conn.execute(
+        """SELECT observed_at_utc FROM postmarket_external_fact_events
+           WHERE candidate_id=? AND fact_kind='FILING_FUNDAMENTALS'""",
+        (candidate_id,),
+    ).fetchone()[0] == (DETECTED + timedelta(seconds=3)).isoformat()
     assert rows["HALT_STATE"] == "AVAILABLE_NO_MATCHES"
     assert halt_calls == [SESSION]
 

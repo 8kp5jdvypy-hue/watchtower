@@ -21,6 +21,7 @@ from tradebot.marketdata import NewsItem, OptionChain, Quote, XNYS
 from tradebot.postmarket_context import CandidateFact
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
+from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot
 
 
 EXTERNAL_CONTEXT_VERSION = 1
@@ -33,6 +34,8 @@ FACT_KINDS = {
     "NEWS",
     "SECTOR_CLASSIFICATION",
     "FUNDAMENTALS",
+    "FILING_INDUSTRY_CLASSIFICATION",
+    "FILING_FUNDAMENTALS",
     "HALT_STATE",
     "INDEPENDENT_PRICE_COMPARISON",
 }
@@ -725,6 +728,101 @@ def ticker_reference_facts(
     return sector, fundamentals
 
 
+def filing_snapshot_facts(
+    candidate: CandidateFact,
+    *,
+    snapshot: PointInTimeSnapshot,
+    observed_at: datetime,
+    code_version: str | None,
+    run_id: str,
+) -> tuple[ExternalFact, ExternalFact]:
+    """Convert accession-joined SEC evidence without retroactive leakage."""
+    observed = _utc(observed_at, "observed_at")
+    detected = _utc(candidate.detected_at, "candidate.detected_at")
+    if snapshot.symbol != candidate.symbol or snapshot.candidate_cutoff_utc != detected:
+        raise ValueError("SEC point-in-time snapshot identity did not match candidate")
+    if snapshot.eligible_cutoff_utc > detected:
+        raise ValueError("SEC eligible cutoff cannot follow candidate detection")
+    if any(fact.accepted_at_utc > snapshot.eligible_cutoff_utc for fact in snapshot.facts):
+        raise ValueError("SEC fact was accepted after the eligible cutoff")
+    if (
+        snapshot.classification_accepted_at_utc is not None
+        and snapshot.classification_accepted_at_utc > snapshot.eligible_cutoff_utc
+    ):
+        raise ValueError("SEC classification filing was accepted after the eligible cutoff")
+    common = {
+        "cik": snapshot.cik,
+        "candidate_cutoff_utc": detected.isoformat(),
+        "eligible_cutoff_utc": snapshot.eligible_cutoff_utc.isoformat(),
+        "dissemination_safety_lag_seconds": int(
+            (detected - snapshot.eligible_cutoff_utc).total_seconds()
+        ),
+        "recent_submission_count": snapshot.recent_submission_count,
+        "eligible_submission_count": snapshot.eligible_submission_count,
+        "source_errors": list(snapshot.errors),
+        "temporal_semantic": "accession_acceptance_bounded_with_conservative_api_lag",
+    }
+    classification_available = bool(snapshot.sic_code and snapshot.sic_description)
+    classification = ExternalFact(
+        candidate.candidate_id, candidate.session.isoformat(), candidate.symbol,
+        "FILING_INDUSTRY_CLASSIFICATION",
+        "AVAILABLE" if classification_available else "UNAVAILABLE_NO_DATA",
+        (
+            snapshot.classification_accepted_at_utc.isoformat()
+            if snapshot.classification_accepted_at_utc else None
+        ),
+        observed.isoformat(), "sec_edgar", "submissions_and_filing_header",
+        "submissions_recent_plus_accession_index_headers",
+        {
+            **common,
+            "accession_number": snapshot.classification_accession,
+            "accepted_at_utc": (
+                snapshot.classification_accepted_at_utc.isoformat()
+                if snapshot.classification_accepted_at_utc else None
+            ),
+            "sic_code": snapshot.sic_code,
+            "sic_description": snapshot.sic_description,
+            "classification_system": "SEC_SIC",
+            "semantic": "filing_time_industry_classification_not_gics_or_sector_etf",
+        },
+        code_version, run_id,
+    )
+    fact_rows = tuple({
+        "name": fact.name,
+        "taxonomy": fact.taxonomy,
+        "concept": fact.concept,
+        "unit": fact.unit,
+        "value": fact.value,
+        "period_start": fact.period_start.isoformat() if fact.period_start else None,
+        "period_end": fact.period_end.isoformat(),
+        "accession_number": fact.accession_number,
+        "form": fact.form,
+        "filed": fact.filed.isoformat(),
+        "accepted_at_utc": fact.accepted_at_utc.isoformat(),
+        "fiscal_year": fact.fiscal_year,
+        "fiscal_period": fact.fiscal_period,
+        "frame": fact.frame,
+    } for fact in snapshot.facts)
+    latest = max((fact.accepted_at_utc for fact in snapshot.facts), default=None)
+    fundamentals = ExternalFact(
+        candidate.candidate_id, candidate.session.isoformat(), candidate.symbol,
+        "FILING_FUNDAMENTALS", "AVAILABLE" if fact_rows else "UNAVAILABLE_NO_DATA",
+        latest.isoformat() if latest else None, observed.isoformat(), "sec_edgar",
+        "companyfacts_joined_to_submissions",
+        "api_xbrl_companyfacts_plus_submissions_recent",
+        {
+            **common,
+            "facts": list(fact_rows),
+            "available_fact_names": sorted(row["name"] for row in fact_rows),
+            "public_float_semantic": "dei_entity_public_float_is_usd_value_not_float_shares",
+            "missing_concepts_are_not_zero": True,
+            "semantic": "accepted_filing_facts_for_replay_context_not_yet_rank_input",
+        },
+        code_version, run_id,
+    )
+    return classification, fundamentals
+
+
 def halt_state_fact(
     candidate: CandidateFact,
     *,
@@ -842,6 +940,8 @@ def _pending_candidates(conn: sqlite3.Connection, limit: int) -> list[CandidateF
             UNION ALL SELECT 'NEWS'
             UNION ALL SELECT 'SECTOR_CLASSIFICATION'
             UNION ALL SELECT 'FUNDAMENTALS'
+            UNION ALL SELECT 'FILING_INDUSTRY_CLASSIFICATION'
+            UNION ALL SELECT 'FILING_FUNDAMENTALS'
             UNION ALL SELECT 'HALT_STATE'
             UNION ALL SELECT 'INDEPENDENT_PRICE_COMPARISON'
           ) required
@@ -873,13 +973,16 @@ def run_external_context_backfill(
     news_fetch: Callable[[str, datetime, datetime], Sequence[NewsItem]],
     independent_fetch: Callable[[str, datetime, datetime], Sequence[Bar]] | None = None,
     reference_fetch: Callable[[str, date], TickerReference] | None = None,
+    filing_context_fetch: Callable[[str, datetime], PointInTimeSnapshot] | None = None,
     halt_fetch: Callable[[date], Sequence[HaltRecord]] | None = None,
+    completion_clock: Callable[[], datetime] | None = None,
     limit: int = MAX_BATCH,
 ) -> ExternalBackfillResult:
     current = _utc(now, "now")
     if limit <= 0:
         raise ValueError("limit must be positive")
     started = clock.perf_counter()
+    completion_clock = completion_clock or (lambda: datetime.now(timezone.utc))
     candidates = _pending_candidates(conn, limit)
     written = available = errors = 0
     halt_cache: dict[date, Sequence[HaltRecord] | Exception] = {}
@@ -965,6 +1068,51 @@ def run_external_context_backfill(
                         for kind in ("SECTOR_CLASSIFICATION", "FUNDAMENTALS")
                     )
             for fact in reference_facts:
+                if fact.fact_kind in completed:
+                    continue
+                record_external_fact(conn, fact)
+                written += 1
+                available += int(fact.status.startswith("AVAILABLE"))
+        filing_kinds = (
+            "FILING_INDUSTRY_CLASSIFICATION", "FILING_FUNDAMENTALS",
+        )
+        if any(kind not in completed for kind in filing_kinds):
+            if filing_context_fetch is None:
+                filing_facts = tuple(
+                    unavailable_fact(
+                        candidate, fact_kind=kind, observed_at=current,
+                        provider="none", feed="none", endpoint="unconfigured",
+                        reason="NO_ACCEPTANCE_BOUNDED_SEC_CONTEXT_CONFIGURED",
+                        code_version=code_version, run_id=run_id,
+                    )
+                    for kind in filing_kinds
+                )
+            else:
+                try:
+                    snapshot = filing_context_fetch(
+                        candidate.symbol,
+                        _utc(candidate.detected_at, "candidate.detected_at"),
+                    )
+                    filing_observed = _utc(completion_clock(), "completion_clock")
+                    filing_facts = filing_snapshot_facts(
+                        candidate,
+                        snapshot=snapshot, observed_at=filing_observed,
+                        code_version=code_version, run_id=run_id,
+                    )
+                except Exception as exc:
+                    errors += 1
+                    failed_at = _utc(completion_clock(), "completion_clock")
+                    filing_facts = tuple(
+                        ExternalFact(
+                            candidate.candidate_id, candidate.session.isoformat(),
+                            candidate.symbol, kind, "FETCH_ERROR", None,
+                            failed_at.isoformat(), "sec_edgar", "submissions_and_xbrl",
+                            "point_in_time_filing_context", {}, code_version, run_id,
+                            type(exc).__name__,
+                        )
+                        for kind in filing_kinds
+                    )
+            for fact in filing_facts:
                 if fact.fact_kind in completed:
                     continue
                 record_external_fact(conn, fact)

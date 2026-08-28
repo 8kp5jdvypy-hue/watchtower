@@ -96,16 +96,17 @@ Implementation: `tradebot/postmarket_context.py` writes bounded, append-only
 candidate context attempts covering prior-session ATR, SPY-relative movement,
 SIP quote spread/depth, RTH dollar liquidity, asset eligibility, completed-bar
 quality, and verified catalyst-ledger facts. Every source carries point-in-time
-and provider/feed provenance. Unsupported GICS/ETF mapping, replay-safe
-historical fundamentals/float, guidance, regulatory, and analyst inputs stay
-explicitly unavailable.
+and provider/feed provenance. Unsupported GICS/ETF mapping, float shares,
+guidance, regulatory, and analyst inputs stay explicitly unavailable.
 See `docs/postmarket-context-tradability.md`.
 
 Point-in-time external evidence: `tradebot/postmarket_external_context.py`
 adds attributable option-implied-move and news observations plus exact-timestamp
-Massive price reconciliation, dated SIC/reference context, and Nasdaq Trader
-halt evidence in a separately supervised, default-off worker. Missing
-credentials, bars, float, replay-safe filing availability, and sector-ETF
+Massive price reconciliation, dated SIC/reference context, Nasdaq Trader halt
+evidence, and acceptance-bounded SEC filing SIC/XBRL facts in a separately
+supervised, default-off worker. SEC facts join accessions to submission
+acceptance and apply a 15-minute safety lag. They remain outside rank pending
+holdout evidence. Missing credentials, bars, float shares, and sector-ETF
 mappings remain explicit rather than inferred. See
 `docs/postmarket-point-in-time-external-context.md`.
 
