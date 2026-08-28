@@ -501,6 +501,42 @@ def test_fetch_intraday_bars_bulk_conserves_missing_symbols_and_chunk_context(
         assert symbol not in all_messages
 
 
+def test_fetch_intraday_window_bulk_uses_exact_bounds_and_conserves_missing(monkeypatch):
+    start = datetime(2026, 8, 27, 19, 55, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 28, 0, 0, tzinfo=timezone.utc)
+    requests_seen = []
+
+    class _FakeBar:
+        timestamp = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
+        open = high = low = close = 100.0
+        volume = 1000
+
+    class _FakeResponse:
+        def __init__(self, symbols):
+            self.data = {symbol: [_FakeBar()] for symbol in symbols if symbol != "MISSING"}
+
+    class _FakeClient:
+        def get_stock_bars(self, request):
+            requests_seen.append(request)
+            return _FakeResponse(request.symbol_or_symbols)
+
+    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeClient())
+    monkeypatch.setattr(alpaca_module, "BULK_FETCH_CHUNK_SIZE", 2)
+    result = alpaca_module.fetch_intraday_bars_window_bulk(
+        ["AAA", "MISSING", "CCC"], start=start, end=end
+    )
+
+    assert set(result) == {"AAA", "CCC"}
+    assert len(requests_seen) == 2
+    assert all(
+        request.start == start.replace(tzinfo=None)
+        and request.end == end.replace(tzinfo=None)
+        for request in requests_seen
+    )
+    with pytest.raises(ValueError, match="end must follow start"):
+        alpaca_module.fetch_intraday_bars_window_bulk(["AAA"], start=end, end=start)
+
+
 def test_intraday_request_window_covers_complete_est_postmarket_hour():
     start, end = alpaca_module._intraday_request_window(date(2026, 12, 15))
 

@@ -352,6 +352,54 @@ def fetch_intraday_bars_bulk(
     return out
 
 
+def fetch_intraday_bars_window_bulk(
+    symbols: list[str], *, start: datetime, end: datetime,
+) -> dict[str, list[Bar]]:
+    """Five-minute bars for an explicit bounded UTC window and symbol set.
+
+    The recall census uses this to request only the final RTH bar plus the
+    postmarket window, rather than materializing a full calendar day for the
+    complete active universe. Missing symbols remain absent.
+    """
+    if not symbols:
+        return {}
+    if start.tzinfo is None or start.utcoffset() is None:
+        raise ValueError("start must be timezone-aware")
+    if end.tzinfo is None or end.utcoffset() is None:
+        raise ValueError("end must be timezone-aware")
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
+    if end_utc <= start_utc:
+        raise ValueError("end must follow start")
+    if end_utc - start_utc > timedelta(days=1):
+        raise ValueError("intraday window must not exceed one day")
+    client = _client()
+    out: dict[str, list[Bar]] = {}
+    chunk_count = math.ceil(len(symbols) / BULK_FETCH_CHUNK_SIZE)
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockBarsRequest(
+            symbol_or_symbols=chunk,
+            timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+            start=start_utc,
+            end=end_utc,
+            feed=DETECTOR_DATA_FEED,
+        )
+        response = _observed_call(
+            "fetch_intraday_bars_window_bulk",
+            lambda r=request: _with_backoff(lambda: client.get_stock_bars(r)),
+            client="stock",
+            chunk_index=i // BULK_FETCH_CHUNK_SIZE + 1,
+            chunk_count=chunk_count,
+            chunk_size=len(chunk),
+            start=start_utc.isoformat(),
+            end=end_utc.isoformat(),
+        )
+        for symbol, raw_bars in response.data.items():
+            out[symbol] = _to_bars(symbol, raw_bars)
+    return out
+
+
 def _intraday_request_window(session_date: date) -> tuple[datetime, datetime]:
     """UTC bounds for one complete New York trading date.
 
