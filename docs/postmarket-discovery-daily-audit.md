@@ -8,8 +8,11 @@ two observers have different universe and provenance contracts.
 Reports are written to:
 
 ```text
-data/postmarket_audits/postmarket_discovery_audit_<session>_v1.json
+data/postmarket_audits/postmarket_discovery_audit_<session>_v2.json
 ```
+
+Version 2 preserves any immutable version 1 report and publishes a separate
+corrected report; historical evidence is never rewritten.
 
 That directory is already included in the encrypted off-box backup and
 isolated restore drill. Existing files are never overwritten. The audit opens
@@ -18,12 +21,14 @@ broker, or order-routing dependency.
 
 ## Session verdict
 
-The expected window begins at the actual XNYS session close, including early
-closes, and ends after the 8:00 PM ET bar has had five minutes to complete. A
-session is ineligible when coverage starts late, ends early, contains excessive
-tick gaps, or crosses a holiday/non-session boundary incorrectly. Today can
-therefore be preserved as a useful partial calibration without being described
-as a complete qualification session.
+The expected observation window begins at the actual XNYS session close,
+including early closes, and ends at 8:00 PM ET. Publication waits an additional
+five minutes so the final 8:00 PM bar has had time to complete; that processing
+grace is not misrepresented as missing observer coverage. A session is
+ineligible when coverage starts late, ends early, contains excessive tick gaps,
+or crosses a holiday/non-session boundary incorrectly. Partial sessions can
+therefore be preserved as useful calibration without being described as a
+complete qualification session.
 
 The operational audit also rejects:
 

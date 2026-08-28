@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as ecals
 
 
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "postmarket_shadow.db"
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
@@ -178,7 +178,13 @@ def _session_window(session: date) -> tuple[datetime, datetime] | None:
         return None
     start = CALENDAR.session_close(session).to_pydatetime().astimezone(timezone.utc)
     end = datetime.combine(session, time(20, 0), tzinfo=ET).astimezone(timezone.utc)
-    return start, end + FINAL_BAR_GRACE
+    return start, end
+
+
+def _audit_ready_at(session: date) -> datetime | None:
+    """Return when the final 8:00 PM bar has had time to become observable."""
+    window = _session_window(session)
+    return window[1] + FINAL_BAR_GRACE if window else None
 
 
 def connect_readonly(path: Path | str) -> sqlite3.Connection:
@@ -592,8 +598,10 @@ def audit_discovery_session(
                 f"{candidate['symbol']} has no qualifying observation",
             )
             continue
-        directions = {row["direction"] for row in qualifying}
-        if candidate["direction"] not in directions:
+        directional_qualifying = [
+            row for row in qualifying if row["direction"] == candidate["direction"]
+        ]
+        if not directional_qualifying:
             _issue(
                 issues,
                 "CANDIDATE_DIRECTION_MISMATCH",
@@ -632,11 +640,15 @@ def audit_discovery_session(
         first_detected = _aware_datetime(
             candidate["first_detected_at"], "candidate first_detected_at"
         )
-        first_qualifying = min(
-            _aware_datetime(row["completed_utc"], "qualifying completed_utc")
-            for row in qualifying
+        first_qualifying = (
+            min(
+                _aware_datetime(row["completed_utc"], "qualifying completed_utc")
+                for row in directional_qualifying
+            )
+            if directional_qualifying
+            else None
         )
-        if first_detected != first_qualifying:
+        if first_qualifying is not None and first_detected != first_qualifying:
             _issue(
                 issues,
                 "CANDIDATE_DETECTION_TIME_MISMATCH",
@@ -809,8 +821,8 @@ def write_completed_discovery_audits(
         ]
         reports = []
         for session in sessions:
-            window = _session_window(session)
-            if window is None or now.astimezone(timezone.utc) <= window[1]:
+            audit_ready_at = _audit_ready_at(session)
+            if audit_ready_at is None or now.astimezone(timezone.utc) <= audit_ready_at:
                 continue
             destination = (
                 Path(output_dir)
