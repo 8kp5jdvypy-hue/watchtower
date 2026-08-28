@@ -123,6 +123,13 @@ See `docs/postmarket-quality-rank.md`.
 - Shadow deployment, daily immutable audits, backups, restore drills, and final
   owner review before any customer delivery decision.
 
+Rank qualification implementation: `tradebot/postmarket_empirical.py` locks
+development/holdout sessions, selection rules, owner precision/sample floors,
+and the technical recall floor before holdout results. Independent append-only
+labels are rank-blind, and a one-way unblind record freezes the holdout before
+baseline-versus-rank evaluation. See
+`docs/postmarket-rank-empirical-qualification.md`.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.

@@ -79,7 +79,10 @@ and operational gates pass.
   - [x] Deterministic decomposable evidence rank and unavailable-data penalties.
   - [ ] Empirically tune or replace heuristic weights only on walk-forward data;
     never present version 1 as probability, confidence, or expected return.
-- [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.
+- [x] Append-only rank-blind labels, locked walk-forward splits/rules, explicit
+  holdout unblinding, and baseline-versus-rank empirical metrics.
+- [ ] Accumulate independently reviewed holdout labels, complete provider
+  comparison, satisfy the aggregate evidence gate, and obtain owner review.
 
 ## Nice to have / later
 
