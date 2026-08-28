@@ -57,6 +57,9 @@ The durable acceptance contract and ordered workstreams live in
 and operational gates pass.
 
 - [ ] Append-only postmarket outcome marks and quality reports.
+  - [x] Provider-free mark schema, completed-bar semantics, MFE/MAE, and tests.
+  - [x] Bounded automatic backfill, explicit fetch failures, and immutable reports.
+  - [ ] Deploy in shadow, verify live marks/reports, and accumulate eligible samples.
 - [ ] Per-stage latency and missed-cycle attribution.
 - [ ] Independent full-universe recall census and miss report.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
