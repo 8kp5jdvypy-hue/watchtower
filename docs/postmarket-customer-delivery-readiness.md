@@ -116,6 +116,16 @@ verdict. Reviews are campaign/case/reviewer unique and append-only in
 not cryptographic proof of a human identity; the final release review must
 still verify reviewer identity and independence outside the software.
 
+`tradebot.postmarket_customer_dry_run_gate` is the final aggregate dry-run
+check. It reopens the append-only database read-only, recomputes every covered
+daily audit, verifies the exact campaign and four control digests, reconciles
+unique actionable routes, reproduces every review payload and blinded case,
+and applies the preregistered session, latency, case-count, approval, and
+zero-failure rules. Its strongest possible verdict is
+`ELIGIBLE_FOR_SEPARATE_CUSTOMER_DELIVERY_REVIEW`; the report always records
+`customer_delivery_enabled=false`. Passing is not permission to send alerts
+and cannot create or operate a customer-delivery path.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed
