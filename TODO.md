@@ -71,7 +71,9 @@ and operational gates pass.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
   - [x] Append-only ATR, SPY-relative, quote/depth, liquidity, asset, and catalyst evidence.
   - [x] Explicit unavailable states and bounded retryable enrichment orchestration.
-  - [ ] Add point-in-time sector, float, market-cap, halt, implied-move, and news sources.
+  - [x] Add pre-close implied-move, news, exact second-provider candidate bars,
+    dated SIC/market-cap/share context, and official halt evidence.
+  - [ ] Add licensed replay-safe float/fundamentals and true sector/ETF mapping.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
   - [x] Direct off-screen tracking and append-only completed-bar observations.
   - [x] Versioned qualifying, confirmed, strengthening, fading, dequalified,
@@ -83,6 +85,12 @@ and operational gates pass.
   holdout unblinding, and baseline-versus-rank empirical metrics.
 - [ ] Accumulate independently reviewed holdout labels, complete provider
   comparison, satisfy the aggregate evidence gate, and obtain owner review.
+- [x] Add append-only point-in-time option-implied-move/news evidence in an
+  isolated default-off enrichment worker.
+- [x] Implement isolated Massive candidate-price/reference and Nasdaq Trader halt
+  adapters; never substitute same-provider feed comparison.
+- [ ] Configure the licensed Massive key in production, validate entitlement and
+  agreement in shadow, and extend the second provider to the full-universe census.
 
 ## Nice to have / later
 

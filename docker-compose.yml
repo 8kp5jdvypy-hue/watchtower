@@ -1,9 +1,9 @@
-# Production stack for a single VPS. Six services on the scanner/bot
+# Production stack for a single VPS. Seven services on the scanner/bot
 # side, one image (see Dockerfile) — mirrors what scripts/start.sh runs
 # on bare metal, but supervised by Docker instead of pidfiles:
 # `restart: unless-stopped` is this deployment's watchdog, so
 # scripts/watchdog.sh and the LaunchAgent plists are the macOS-laptop
-# equivalent and are not used here. `caddy` is the seventh service — the
+# equivalent and are not used here. `caddy` is the eighth service — the
 # only thing with a port published to the host — terminating TLS for
 # api.perchmarkets.com and reverse-proxying to `api`. See
 # docs/DEPLOYMENT.md for the DNS record `api` needs.
@@ -119,6 +119,32 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-m", "tradebot.postmarket_discovery_health", "--heartbeat", "data/postmarket_discovery_heartbeat.json", "--max-age", "600"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  postmarket-external-context:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    command: python -m tradebot.postmarket_external_context_shadow
+    env_file: .env
+    environment:
+      # Slow options/news enrichment is isolated from the one-minute
+      # discovery loop and remains independently default-off.
+      POSTMARKET_EXTERNAL_CONTEXT_ENABLED: ${POSTMARKET_EXTERNAL_CONTEXT_ENABLED:-0}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "tradebot.postmarket_external_context_health", "--heartbeat", "data/postmarket_external_context_heartbeat.json", "--max-age", "600"]
       interval: 1m
       timeout: 10s
       retries: 3

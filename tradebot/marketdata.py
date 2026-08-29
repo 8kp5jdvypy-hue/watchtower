@@ -71,6 +71,8 @@ class OptionContract:
     # doesn't carry it; see vendors.alpaca.fetch_option_day_volume). None
     # means "not looked up," not "zero" — costs.py treats them differently.
     day_volume: int | None = None
+    quote_ts: datetime | None = None
+    quote_feed: str | None = None
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,19 @@ class OptionChain:
     symbol: str
     expiry: date
     contracts: Sequence[OptionContract]
+
+
+@dataclass(frozen=True)
+class NewsItem:
+    """Provider news metadata captured without copying article content."""
+
+    provider_id: str
+    headline: str
+    source: str
+    url: str | None
+    created_at: datetime
+    updated_at: datetime
+    symbols: tuple[str, ...]
 
 
 @dataclass(frozen=True)

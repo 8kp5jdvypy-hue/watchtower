@@ -19,12 +19,14 @@ from requests.adapters import HTTPAdapter
 from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed, MarketType, MostActivesBy, OptionsFeed
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
+from alpaca.data.historical.news import NewsClient
 from alpaca.data.historical.screener import ScreenerClient
 from alpaca.data.requests import (
     MarketMoversRequest,
     MostActivesRequest,
     OptionBarsRequest,
     OptionChainRequest,
+    NewsRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
 )
@@ -37,6 +39,7 @@ from tradebot.detectors import Bar
 from tradebot.marketdata import AssetInfo as MDAssetInfo
 from tradebot.marketdata import MarketScreenEntry as MDMarketScreenEntry
 from tradebot.marketdata import MarketWideScreen as MDMarketWideScreen
+from tradebot.marketdata import NewsItem as MDNewsItem
 from tradebot.marketdata import OptionChain as MDOptionChain
 from tradebot.marketdata import OptionContract as MDOptionContract
 from tradebot.marketdata import Quote as MDQuote
@@ -159,6 +162,11 @@ def _trading_client() -> TradingClient:
 def _screener_client() -> ScreenerClient:
     key_id, secret_key = _credentials()
     return _bound_timeout(ScreenerClient(key_id, secret_key))
+
+
+def _news_client() -> NewsClient:
+    key_id, secret_key = _credentials()
+    return _bound_timeout(NewsClient(key_id, secret_key))
 
 
 def _with_backoff(fn, max_retries: int = 5, base_delay: float = 2.0):
@@ -639,9 +647,77 @@ def fetch_option_chain(symbol: str, expiry: date) -> MDOptionChain:
                 theta=float(greeks.theta) if greeks and greeks.theta is not None else None,
                 open_interest=int(meta.open_interest) if meta.open_interest is not None else 0,
                 implied_volatility=float(snap.implied_volatility) if snap.implied_volatility is not None else None,
+                quote_ts=(
+                    quote.timestamp.astimezone(timezone.utc)
+                    if getattr(quote, "timestamp", None) is not None else None
+                ),
+                quote_feed="indicative",
             )
         )
     return MDOptionChain(symbol=symbol, expiry=expiry, contracts=contracts)
+
+
+def fetch_nearest_option_chain(symbol: str, session: date, spot: float) -> MDOptionChain:
+    """Fetch the first non-empty weekly expiry after the observed session.
+
+    `spot` is accepted to keep the external-context fetch interface explicit;
+    strike selection remains provider-free in postmarket_external_context.
+    """
+    if not math.isfinite(spot) or spot <= 0:
+        raise ValueError("spot must be finite and positive")
+    first = session + timedelta(days=1)
+    first_friday = first + timedelta(days=(4 - first.weekday()) % 7)
+    last = MDOptionChain(symbol=symbol, expiry=first_friday, contracts=[])
+    for week in range(4):
+        expiry = first_friday + timedelta(days=7 * week)
+        last = fetch_option_chain(symbol, expiry)
+        if last.contracts:
+            return last
+    return last
+
+
+def fetch_news(symbol: str, start: datetime, end: datetime) -> list[MDNewsItem]:
+    """Return attributable news metadata for one bounded symbol window."""
+    if start.tzinfo is None or start.utcoffset() is None:
+        raise ValueError("start must be timezone-aware")
+    if end.tzinfo is None or end.utcoffset() is None:
+        raise ValueError("end must be timezone-aware")
+    if end < start:
+        raise ValueError("end must not precede start")
+    client = _news_client()
+    response = _observed_call(
+        "fetch_news",
+        lambda: _with_backoff(
+            lambda: client.get_news(
+                NewsRequest(
+                    symbols=symbol,
+                    start=start.astimezone(timezone.utc),
+                    end=end.astimezone(timezone.utc),
+                    sort="asc",
+                    limit=50,
+                    include_content=False,
+                    exclude_contentless=False,
+                )
+            )
+        ),
+        client="news",
+        symbol=symbol,
+    )
+    items = []
+    for rows in response.data.values():
+        for row in rows:
+            items.append(
+                MDNewsItem(
+                    provider_id=str(row.id),
+                    headline=row.headline,
+                    source=row.source,
+                    url=row.url,
+                    created_at=row.created_at.astimezone(timezone.utc),
+                    updated_at=row.updated_at.astimezone(timezone.utc),
+                    symbols=tuple(sorted({value.upper() for value in row.symbols})),
+                )
+            )
+    return sorted(items, key=lambda row: (row.created_at, row.provider_id))
 
 
 # Alpaca's bars endpoint takes the symbol list as a URL query parameter —
