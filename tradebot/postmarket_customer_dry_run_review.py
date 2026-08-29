@@ -321,6 +321,11 @@ def write_review_case_atomic(path: Path | str, case: Mapping[str, object]) -> st
             os.fchmod(handle.fileno(), stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
             os.fsync(handle.fileno())
         os.link(temporary, output, follow_symlinks=False)
+        directory_fd = os.open(output.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     finally:
         temporary.unlink(missing_ok=True)
     return hashlib.sha256(raw).hexdigest()

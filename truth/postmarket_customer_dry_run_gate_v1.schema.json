@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_gate_v1.schema.json",
+  "title": "Postmarket customer dry-run aggregate gate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "gate_version", "gate_code_version", "generated_at_utc", "campaign_id",
+    "campaign_sha256", "coverage_start", "coverage_end", "verdict",
+    "ready_for_customer_delivery_review", "customer_delivery_enabled",
+    "evidence_package_sha256", "metrics", "checks", "audit_digests",
+    "control_digests"
+  ],
+  "properties": {
+    "gate_version": {"const": 1},
+    "gate_code_version": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "generated_at_utc": {"type": "string", "format": "date-time"},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "campaign_sha256": {"$ref": "#/$defs/digest"},
+    "coverage_start": {"type": "string", "format": "date"},
+    "coverage_end": {"type": "string", "format": "date"},
+    "verdict": {
+      "enum": ["NOT_READY", "ELIGIBLE_FOR_SEPARATE_CUSTOMER_DELIVERY_REVIEW"]
+    },
+    "ready_for_customer_delivery_review": {"type": "boolean"},
+    "customer_delivery_enabled": {"const": false},
+    "evidence_package_sha256": {"$ref": "#/$defs/digest"},
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "expected_sessions", "supplied_audits", "clean_sessions",
+        "dirty_sessions", "minimum_coverage_pct",
+        "maximum_scheduled_lag_seconds", "maximum_tick_latency_seconds",
+        "unique_eligible_decisions", "reviewed_cases", "approved_cases",
+        "rejected_cases", "review_approval_rate", "distinct_reviewed_symbols",
+        "critical_review_findings", "review_evidence_failures", "passing_controls"
+      ],
+      "properties": {
+        "expected_sessions": {"type": "integer", "minimum": 0},
+        "supplied_audits": {"type": "integer", "minimum": 0},
+        "clean_sessions": {"type": "integer", "minimum": 0},
+        "dirty_sessions": {"type": "integer", "minimum": 0},
+        "minimum_coverage_pct": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "maximum_scheduled_lag_seconds": {"type": ["number", "null"], "minimum": 0},
+        "maximum_tick_latency_seconds": {"type": ["number", "null"], "minimum": 0},
+        "unique_eligible_decisions": {"type": "integer", "minimum": 0},
+        "reviewed_cases": {"type": "integer", "minimum": 0},
+        "approved_cases": {"type": "integer", "minimum": 0},
+        "rejected_cases": {"type": "integer", "minimum": 0},
+        "review_approval_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "distinct_reviewed_symbols": {"type": "integer", "minimum": 0},
+        "critical_review_findings": {"type": "integer", "minimum": 0},
+        "review_evidence_failures": {"type": "integer", "minimum": 0},
+        "passing_controls": {"type": "integer", "minimum": 0, "maximum": 4}
+      }
+    },
+    "checks": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "passed", "observed", "required"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"},
+          "observed": {},
+          "required": {}
+        }
+      }
+    },
+    "audit_digests": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["session", "sha256"],
+        "properties": {
+          "session": {"type": "string", "format": "date"},
+          "sha256": {"$ref": "#/$defs/digest"}
+        }
+      }
+    },
+    "control_digests": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "sha256"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/digest"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
