@@ -194,7 +194,9 @@ owner review remain unfinished gates.
 
 Deployment preflight: `scripts/postmarket_signal_quality_preflight.py` verifies
 the exact clean `origin/main` revision, live SQLite integrity, recent
-digest-valid backup and evidence custody, disk headroom, shadow switches,
+digest-valid backup of all five signal-quality databases (including Stage-1
+screening evidence in `universe.db`), evidence custody, disk headroom, shadow
+switches,
 independent-provider credential presence, exact-revision controls, and the
 licensed reference contract without printing secrets or changing production.
 It distinguishes safe shadow deployment from full evidence-campaign readiness.

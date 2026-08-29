@@ -177,10 +177,10 @@ output going to shell history).
 BACKUP_DIR=/opt/perch/backups scripts/backup.sh
 ```
 It writes gzip'd, timestamped online snapshots of `journal.db`, `users.db`,
-`evaluations.db`, `postmarket_shadow.db`, and (when present) `universe.db` to
-`$BACKUP_DIR` (`./backups` by default). The first four are required; a missing
-one makes the job fail loudly. `universe.db` is optional because it can be
-rebuilt from the asset catalog.
+`evaluations.db`, `postmarket_shadow.db`, and `universe.db` to `$BACKUP_DIR`
+(`./backups` by default). All five are required; a missing one makes the job
+fail loudly. Although the asset catalog inside `universe.db` is rebuildable,
+its Stage-1 screening ticks and per-symbol decisions are not.
 
 The job also archives `data/postmarket_audits/` and
 `data/postmarket_evidence/` when present. Every SQLite snapshot passes
@@ -193,17 +193,21 @@ older than `RETAIN_DAYS` (14 by default).
 **These local backups are not enough on their own** — they live on the
 same disk as the data they're backing up, so a VPS or disk failure
 takes out both simultaneously. `scripts/backup.sh` also ships
-`journal.db`, `users.db`, `evaluations.db`, `postmarket_shadow.db`, the
-postmarket artifact archive, the set manifest, and `.env` off-box
-(`universe.db` is skipped because it is rebuildable), GPG-encrypted before
-upload, once the setup below is done. With `RCLONE_REMOTE` unset, the job is
+`journal.db`, `users.db`, `evaluations.db`, `postmarket_shadow.db`,
+`universe.db`, the postmarket artifact archive, the set manifest, and `.env`
+off-box, GPG-encrypted before upload, once the setup below is done. With
+`RCLONE_REMOTE` unset, the job is
 explicitly local-only. If a remote is configured but its encryption key is
 missing, the job fails instead of silently downgrading to local-only custody.
-The encrypted off-box manifest is generated from that exact remote payload, so
-an isolated disaster restore never requires the intentionally omitted
-`universe.db`; the local manifest continues to cover it when present.
+The encrypted off-box manifest is generated from that exact remote payload.
 The remote must include a non-empty path (`remote:bucket-or-prefix`); remote-root
 retention is refused.
+
+The isolated restore verifier remains backward-compatible with historical
+off-box sets created before `universe.db` became mandatory. Those sets restore
+the four databases they actually contain, but they are not valid inputs to the
+current signal-quality campaign preflight because their Stage-1 screening
+evidence is absent.
 
 ### Off-box setup (one-time)
 
@@ -286,8 +290,7 @@ install -m 0644 /tmp/perch-restore-<stamp>/data/journal.db data/journal.db
 install -m 0644 /tmp/perch-restore-<stamp>/data/users.db data/users.db
 install -m 0644 /tmp/perch-restore-<stamp>/data/evaluations.db data/evaluations.db
 install -m 0644 /tmp/perch-restore-<stamp>/data/postmarket_shadow.db data/postmarket_shadow.db
-[[ ! -f /tmp/perch-restore-<stamp>/data/universe.db ]] || \
-  install -m 0644 /tmp/perch-restore-<stamp>/data/universe.db data/universe.db
+install -m 0644 /tmp/perch-restore-<stamp>/data/universe.db data/universe.db
 [[ ! -d /tmp/perch-restore-<stamp>/data/postmarket_audits ]] || \
   cp -a /tmp/perch-restore-<stamp>/data/postmarket_audits/. data/postmarket_audits/
 [[ ! -d /tmp/perch-restore-<stamp>/data/postmarket_evidence ]] || \
@@ -308,6 +311,7 @@ rclone copy do-spaces:perch-backups/journal_<stamp>.db.gz.gpg . --config ~/.conf
 rclone copy do-spaces:perch-backups/users_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/evaluations_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/postmarket_shadow_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
+rclone copy do-spaces:perch-backups/universe_<stamp>.db.gz.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/postmarket_artifacts_<stamp>.tar.gz.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/manifest_<stamp>.sha256.gpg . --config ~/.config/rclone/rclone.conf
 rclone copy do-spaces:perch-backups/env_<stamp>.gpg . --config ~/.config/rclone/rclone.conf
@@ -316,6 +320,7 @@ gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d users_<stamp>.db.gz.gpg > users_<stamp>.db.gz
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d evaluations_<stamp>.db.gz.gpg > evaluations_<stamp>.db.gz
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d postmarket_shadow_<stamp>.db.gz.gpg > postmarket_shadow_<stamp>.db.gz
+gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d universe_<stamp>.db.gz.gpg > universe_<stamp>.db.gz
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d postmarket_artifacts_<stamp>.tar.gz.gpg > postmarket_artifacts_<stamp>.tar.gz
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d manifest_<stamp>.sha256.gpg > manifest_<stamp>.sha256
 gpg --batch --yes --pinentry-mode loopback --passphrase-file /opt/perch/.backup-passphrase -d env_<stamp>.gpg > .env.restored

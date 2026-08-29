@@ -249,6 +249,15 @@ def _backup_checks(
             raise ValueError("backup manifest cannot be a symlink")
         stamp, rows = _parse_manifest(manifest)
         verified = _verify_files(manifest.parent, rows)
+        backed_up_databases = {
+            kind for _, _, kind in rows if kind != "postmarket_artifacts"
+        }
+        missing_databases = set(REQUIRED_DATABASES) - backed_up_databases
+        if missing_databases:
+            raise ValueError(
+                "backup set is missing signal-quality databases: "
+                f"{sorted(missing_databases)!r}"
+            )
         backup_at = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(
             tzinfo=timezone.utc
         )
