@@ -15,6 +15,13 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
+if __package__ in {None, ""}:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from tradebot.screening_archive import verify_screening_archive
+
 
 MANIFEST_PATTERN = re.compile(r"^manifest_(\d{8}T\d{6}Z)\.sha256$")
 DIGEST_LINE_PATTERN = re.compile(r"^([0-9a-f]{64}) [ *]([A-Za-z0-9_.-]+)$")
@@ -23,7 +30,7 @@ DATABASES = {"journal", "users", "universe", "evaluations", "postmarket_shadow"}
 # not include it. Keep isolated disaster restore backward-compatible; current
 # backup generation and signal-quality preflight separately require universe.db.
 REQUIRED_DATABASES = {"journal", "users", "evaluations", "postmarket_shadow"}
-ARTIFACT_ROOTS = {"postmarket_audits", "postmarket_evidence"}
+ARTIFACT_ROOTS = {"postmarket_audits", "postmarket_evidence", "screening_archives"}
 ARTIFACT_FILES = {
     "postmarket_customer_delivery_policy.json",
     "postmarket_customer_delivery_authorization.json",
@@ -159,6 +166,14 @@ def _restore_artifacts(archive_path: Path, data_dir: Path) -> tuple[str, ...]:
         members = _safe_artifact_members(archive)
         for member in members:
             relative = PurePosixPath(member.name)
+            if (
+                member.isfile()
+                and relative.parts[0] == "screening_archives"
+                and len(relative.parts) != 2
+            ):
+                raise ValueError(
+                    f"screening archive must be directly beneath its root: {member.name!r}"
+                )
             destination = data_dir.joinpath(*relative.parts)
             if member.isdir():
                 destination.mkdir(parents=True, exist_ok=True)
@@ -171,12 +186,43 @@ def _restore_artifacts(archive_path: Path, data_dir: Path) -> tuple[str, ...]:
                 shutil.copyfileobj(source, target)
                 target.flush()
                 os.fsync(target.fileno())
+            if relative.parts[0] == "screening_archives":
+                verify_screening_archive(destination)
     return tuple(sorted(member.name for member in members if member.isfile()))
+
+
+def _validate_screening_members(
+    archive: tarfile.TarFile,
+    members: tuple[tarfile.TarInfo, ...],
+) -> None:
+    screening = [
+        member
+        for member in members
+        if member.isfile() and PurePosixPath(member.name).parts[0] == "screening_archives"
+    ]
+    if not screening:
+        return
+    with tempfile.TemporaryDirectory(prefix="perch-screening-archive-check.") as directory:
+        root = Path(directory)
+        for member in screening:
+            relative = PurePosixPath(member.name)
+            if len(relative.parts) != 2:
+                raise ValueError(
+                    f"screening archive must be directly beneath its root: {member.name!r}"
+                )
+            source = archive.extractfile(member)
+            if source is None:
+                raise tarfile.ExtractError(f"cannot read artifact {member.name!r}")
+            destination = root / relative.name
+            with source, destination.open("xb") as target:
+                shutil.copyfileobj(source, target)
+            verify_screening_archive(destination)
 
 
 def validate_artifact_archive(archive_path: Path) -> tuple[str, ...]:
     with tarfile.open(archive_path, "r:gz") as archive:
         members = _safe_artifact_members(archive)
+        _validate_screening_members(archive, members)
     return tuple(sorted(member.name for member in members if member.isfile()))
 
 

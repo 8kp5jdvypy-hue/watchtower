@@ -1,0 +1,10 @@
+[Unit]
+Description=Archive Perch Stage-1 screening evidence nightly
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+Unit=perch-screening-archive.service
+
+[Install]
+WantedBy=timers.target

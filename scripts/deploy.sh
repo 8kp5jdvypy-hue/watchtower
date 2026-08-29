@@ -104,7 +104,12 @@ SYSTEMD_DIR="${PERCH_SYSTEMD_DIR:-/etc/systemd/system}"
 install -m 0644 systemd/perch.service "$SYSTEMD_DIR/perch.service"
 install -m 0644 systemd/perch-backup.service "$SYSTEMD_DIR/perch-backup.service"
 install -m 0644 systemd/perch-backup.timer "$SYSTEMD_DIR/perch-backup.timer"
+install -m 0644 systemd/perch-screening-archive.service \
+  "$SYSTEMD_DIR/perch-screening-archive.service"
+install -m 0644 systemd/perch-screening-archive.timer \
+  "$SYSTEMD_DIR/perch-screening-archive.timer"
 systemctl daemon-reload
+systemctl enable --now perch-screening-archive.timer
 
 SHORT_REVISION="${RESOLVED_REVISION:0:7}"
 echo "Building and starting revision $SHORT_REVISION..."

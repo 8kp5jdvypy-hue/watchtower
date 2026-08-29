@@ -125,6 +125,27 @@ CREATE TABLE IF NOT EXISTS screening_events (
 );
 CREATE INDEX IF NOT EXISTS idx_screening_events_symbol ON screening_events(symbol);
 CREATE INDEX IF NOT EXISTS idx_screening_events_tick ON screening_events(tick_id, outcome);
+
+CREATE TRIGGER IF NOT EXISTS screening_ticks_no_update
+BEFORE UPDATE ON screening_ticks
+BEGIN
+    SELECT RAISE(ABORT, 'screening_ticks is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS screening_ticks_no_delete
+BEFORE DELETE ON screening_ticks
+BEGIN
+    SELECT RAISE(ABORT, 'screening_ticks is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS screening_events_no_update
+BEFORE UPDATE ON screening_events
+BEGIN
+    SELECT RAISE(ABORT, 'screening_events is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS screening_events_no_delete
+BEFORE DELETE ON screening_events
+BEGIN
+    SELECT RAISE(ABORT, 'screening_events is append-only');
+END;
 """
 
 # Retention, DOCUMENTED BUT NOT ENFORCED -- nothing in this module
@@ -404,4 +425,3 @@ def screening_history_for_symbol(conn: sqlite3.Connection, symbol: str, session:
         for (tick_utc, outcome, screen_score, rank, reasons, detail, promotion_limit,
              screen_version, counts, invariant_ok, audit_mode, run_id, run_mode) in rows
     ]
-

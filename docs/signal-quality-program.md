@@ -202,6 +202,12 @@ licensed reference contract without printing secrets or changing production.
 It distinguishes safe shadow deployment from full evidence-campaign readiness.
 See `docs/postmarket-signal-quality-preflight.md`.
 
+Stage-1 retention prerequisite: `tradebot/screening_archive.py` publishes
+deterministic SHA-256-addressed archives for every completed screening session,
+with nightly catch-up before encrypted backup and full creation/restore
+verification. It deletes nothing; pruning remains separately gated on real
+archive and restore evidence. See `docs/screening-evidence-archive.md`.
+
 Customer-delivery readiness foundation:
 `tradebot/postmarket_delivery_readiness.py` provides a pure, default-off,
 evidence-bound policy decision for a future dry-run router. It requires exact

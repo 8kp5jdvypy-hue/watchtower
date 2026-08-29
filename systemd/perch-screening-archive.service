@@ -1,0 +1,13 @@
+[Unit]
+Description=Perch immutable Stage-1 screening evidence archive
+After=perch.service
+Requires=perch.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/perch
+ExecStart=/usr/bin/docker compose exec -T runner python3 -m tradebot.screening_archive
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
