@@ -16,6 +16,7 @@ backup.
 | `requirements.txt` | Pinned direct dependencies for the image |
 | `docker-compose.yml` | worker / bot / runner / scheduled and market-wide postmarket shadows / api / caddy services with restart policies and market-aware healthchecks |
 | `docs/postmarket-discovery-daily-audit.md` | Immutable daily coverage, provenance, lifecycle, and conservation audit for market-wide discovery |
+| `docs/postmarket-signal-quality-preflight.md` | Read-only exact-revision, database, backup, control, credential, and licensed-reference preflight before the complete shadow stack is deployed |
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |
@@ -32,6 +33,11 @@ Both probes require the running revision and observer identity to match.
 Discovery also fails on any explicit subsystem `error`. A `degraded` evidence
 result remains visible but does not trigger a restart loop; missing market data
 is not the same as a dead worker.
+
+Before deploying the complete signal-quality stack, run the fail-closed
+preflight in `docs/postmarket-signal-quality-preflight.md`. A safe shadow
+verdict is distinct from full evidence-campaign readiness, and neither enables
+customer delivery.
 
 ## First-time VPS setup
 
