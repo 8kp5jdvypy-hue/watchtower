@@ -94,6 +94,9 @@ and operational gates pass.
   - [x] Lock the numeric eligibility definition, atomically ingest strict
     digest-bound blinded review manifests, and require inventory-digest
     confirmation before irreversible holdout unblinding.
+- [x] Prospectively lock aggregate evidence dates, policy floors,
+  feeds/providers, and eligible audit/observer revisions before the first
+  covered session; require its digest in the final evidence package.
 - [ ] Accumulate independently reviewed holdout labels, complete provider
   comparison, satisfy the aggregate evidence gate, and obtain owner review.
 - [x] Add append-only point-in-time option-implied-move/news evidence in an

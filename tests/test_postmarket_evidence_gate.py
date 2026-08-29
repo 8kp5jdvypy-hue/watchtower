@@ -155,6 +155,10 @@ def _policy() -> dict:
         "max_detection_latency_seconds": 330,
         "allowed_data_feeds": ["sip"],
         "allowed_market_data_providers": ["alpaca"],
+        "allowed_audit_versions": [1],
+        "allowed_observer_versions": [1],
+        "allowed_audit_code_versions": ["audit123"],
+        "allowed_observer_code_versions": ["observer123"],
         "require_zero_dirty_sessions": True,
         "require_zero_direction_mismatches": True,
         "require_complete_session_inventory": True,
@@ -169,6 +173,7 @@ def _materialize(
     controls=("failure_injection", "kill_switch", "rollback_runbook"),
     policy: dict | None = None,
 ) -> tuple[Path, dict]:
+    effective_policy = policy or _policy()
     reports = reports or [_session_report(session) for session in sessions]
     report_artifacts = []
     for session, report in zip(sessions, reports):
@@ -204,14 +209,29 @@ def _materialize(
                 "completed_at_utc": "2026-09-11T10:00:00+00:00",
             }
         )
-    manifest = {
+    campaign_relative = Path("campaigns") / "postmarket-shadow-campaign-1.json"
+    campaign_payload = {
         "schema_version": 1,
         "status": "locked",
-        "evidence_set_version": "postmarket-shadow-v1",
+        "campaign_id": "postmarket-shadow-campaign-1",
+        "locked_at_utc": "2026-08-26T12:00:00+00:00",
+        "coverage_start": COVERAGE_START.isoformat(),
+        "coverage_end": COVERAGE_END.isoformat(),
+        "policy": effective_policy,
+    }
+    campaign_digest = _write_json(tmp_path / campaign_relative, campaign_payload)
+    manifest = {
+        "schema_version": 2,
+        "status": "locked",
+        "evidence_set_version": "postmarket-shadow-v2",
         "created_at_utc": "2026-09-11T12:00:00+00:00",
         "coverage_start": COVERAGE_START.isoformat(),
         "coverage_end": COVERAGE_END.isoformat(),
-        "policy": policy or _policy(),
+        "campaign_artifact": {
+            "path": str(campaign_relative),
+            "sha256": campaign_digest,
+        },
+        "policy": effective_policy,
         "session_reports": report_artifacts,
         "control_artifacts": control_artifacts,
     }
@@ -240,11 +260,10 @@ def test_ten_clean_scored_sessions_and_controls_reach_owner_review(tmp_path):
     assert all(check.passed for check in report.checks)
 
 
-def test_current_partial_session_is_honestly_not_ready(tmp_path):
+def test_current_partial_report_against_prospective_range_is_not_ready(tmp_path):
     session = (date(2026, 8, 26),)
     reports = [_session_report(session[0], clean=False, empirical=False)]
     manifest_path, manifest = _materialize(tmp_path, reports=reports, sessions=session)
-    manifest["coverage_start"] = manifest["coverage_end"] = "2026-08-26"
     _write_json(manifest_path, manifest)
 
     report = evaluate_evidence_gate(load_evidence_manifest(manifest_path))
@@ -391,6 +410,20 @@ def test_unapproved_feed_or_provider_era_cannot_be_mixed_in(tmp_path):
     assert report.verdict == VERDICT_NOT_READY
 
 
+def test_unregistered_report_revision_cannot_be_substituted_after_campaign_lock(
+    tmp_path,
+):
+    reports = [_session_report(session) for session in SESSIONS]
+    reports[4] = deepcopy(reports[4])
+    reports[4]["audit_code_version"] = "later-audit-revision"
+    manifest_path, _ = _materialize(tmp_path, reports=reports)
+
+    report = evaluate_evidence_gate(load_evidence_manifest(manifest_path))
+
+    assert "ALLOWED_AUDIT_CODE_VERSIONS" in _failed_checks(report)
+    assert report.verdict == VERDICT_NOT_READY
+
+
 def test_tampered_session_artifact_fails_before_metrics(tmp_path):
     manifest_path, manifest = _materialize(tmp_path)
     path = tmp_path / manifest["session_reports"][0]["path"]
@@ -406,6 +439,45 @@ def test_relative_artifacts_cannot_escape_evidence_directory(tmp_path):
     _write_json(manifest_path, manifest)
 
     with pytest.raises(ValueError, match="stay inside"):
+        load_evidence_manifest(manifest_path)
+
+
+def test_prospective_campaign_is_required(tmp_path):
+    manifest_path, manifest = _materialize(tmp_path)
+    manifest.pop("campaign_artifact")
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="campaign_artifact"):
+        load_evidence_manifest(manifest_path)
+
+
+def test_tampered_prospective_campaign_is_rejected(tmp_path):
+    manifest_path, manifest = _materialize(tmp_path)
+    campaign_path = tmp_path / manifest["campaign_artifact"]["path"]
+    campaign_path.write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        load_evidence_manifest(manifest_path)
+
+
+def test_campaign_locked_after_first_open_is_rejected(tmp_path):
+    manifest_path, manifest = _materialize(tmp_path)
+    campaign_path = tmp_path / manifest["campaign_artifact"]["path"]
+    campaign = json.loads(campaign_path.read_text(encoding="utf-8"))
+    campaign["locked_at_utc"] = "2026-08-27T14:00:00+00:00"
+    manifest["campaign_artifact"]["sha256"] = _write_json(campaign_path, campaign)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="before its first session opens"):
+        load_evidence_manifest(manifest_path)
+
+
+def test_campaign_policy_must_match_final_evidence_policy(tmp_path):
+    manifest_path, manifest = _materialize(tmp_path)
+    manifest["policy"]["min_precision"] = 0.95
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(ValueError, match="campaign policy does not match"):
         load_evidence_manifest(manifest_path)
 
 
@@ -472,7 +544,6 @@ def test_cli_exit_status_distinguishes_owner_review_not_ready_and_invalid(
         reports=[_session_report(partial_session[0], clean=False, empirical=False)],
         sessions=partial_session,
     )
-    partial_manifest["coverage_start"] = partial_manifest["coverage_end"] = "2026-08-26"
     _write_json(partial_path, partial_manifest)
     assert main([str(partial_path), "--compact"]) == 1
     partial = json.loads(capsys.readouterr().out)

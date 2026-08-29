@@ -35,7 +35,10 @@ The program is complete only when all of the following are true:
 8. Threshold and rank changes use walk-forward development data and a blinded,
    independently labeled empirical holdout. Tuning examples never count as
    independent evidence.
-9. The evidence package satisfies at least the existing floors: ten clean
+9. Before the first evaluation session opens, a prospective campaign locks the
+   exact range, technical/owner floors, feeds/providers, and eligible
+   audit/observer schema and code revisions. The final evidence package
+   SHA-256-pins that campaign and satisfies at least the existing floors: ten clean
    sessions, zero dirty sessions in the locked range, at least 95% recall,
    worst-case detection latency no greater than 330 seconds, zero ambiguous
    labels or direction mismatches, and passing control artifacts. Owner-declared
@@ -151,6 +154,13 @@ before holdout results. Strict digest-bound review manifests atomically append
 rank-blind labels, and a digest-confirmed one-way unblind record freezes the
 holdout before baseline-versus-rank evaluation. See
 `docs/postmarket-rank-empirical-qualification.md`.
+
+Aggregate campaign implementation: `tradebot/postmarket_evidence_campaign.py`
+exclusively creates the immutable pre-session campaign, while
+`tradebot/postmarket_evidence_gate.py` requires its digest and exact policy in
+the final v2 evidence set. This prevents choosing a favorable date range,
+threshold, provider, or report revision after outcomes are visible. See
+`docs/postmarket-evidence-gate.md`.
 
 ## Anti-goals
 

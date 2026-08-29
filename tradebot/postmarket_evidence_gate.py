@@ -21,7 +21,8 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as ecals
 
 
-EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2
+CAMPAIGN_SCHEMA_VERSION = 1
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +36,7 @@ ROOT_FIELDS = {
     "created_at_utc",
     "coverage_start",
     "coverage_end",
+    "campaign_artifact",
     "policy",
     "session_reports",
     "control_artifacts",
@@ -48,12 +50,21 @@ POLICY_FIELDS = {
     "max_detection_latency_seconds",
     "allowed_data_feeds",
     "allowed_market_data_providers",
+    "allowed_audit_versions",
+    "allowed_observer_versions",
+    "allowed_audit_code_versions",
+    "allowed_observer_code_versions",
     "require_zero_dirty_sessions",
     "require_zero_direction_mismatches",
     "require_complete_session_inventory",
 }
 REPORT_ARTIFACT_FIELDS = {"session", "path", "sha256"}
 CONTROL_ARTIFACT_FIELDS = {"kind", "path", "sha256", "revision", "completed_at_utc"}
+CAMPAIGN_ARTIFACT_FIELDS = {"path", "sha256"}
+CAMPAIGN_FIELDS = {
+    "schema_version", "status", "campaign_id", "locked_at_utc",
+    "coverage_start", "coverage_end", "policy",
+}
 CONTROL_EVIDENCE_FIELDS = {
     "schema_version",
     "kind",
@@ -75,6 +86,10 @@ class GatePolicy:
     max_detection_latency_seconds: float
     allowed_data_feeds: tuple[str, ...]
     allowed_market_data_providers: tuple[str, ...]
+    allowed_audit_versions: tuple[int, ...]
+    allowed_observer_versions: tuple[int, ...]
+    allowed_audit_code_versions: tuple[str, ...]
+    allowed_observer_code_versions: tuple[str, ...]
     require_zero_dirty_sessions: bool
     require_zero_direction_mismatches: bool
     require_complete_session_inventory: bool
@@ -97,11 +112,20 @@ class ControlArtifact:
 
 
 @dataclass(frozen=True)
+class CampaignArtifact:
+    campaign_id: str
+    locked_at_utc: datetime
+    path: Path
+    sha256: str
+
+
+@dataclass(frozen=True)
 class EvidenceManifest:
     evidence_set_version: str
     created_at_utc: datetime
     coverage_start: date
     coverage_end: date
+    campaign_artifact: CampaignArtifact
     policy: GatePolicy
     session_reports: tuple[SessionArtifact, ...]
     control_artifacts: tuple[ControlArtifact, ...]
@@ -130,6 +154,7 @@ class AggregateMetrics:
     candidate_observations: int
     unique_candidates: int
     audit_code_versions: tuple[str, ...]
+    audit_versions: tuple[int, ...]
     observer_versions: tuple[int, ...]
     observer_code_versions: tuple[str, ...]
     data_feeds: tuple[str, ...]
@@ -151,6 +176,9 @@ class EvidenceGateReport:
     verdict: str
     coverage_start: str
     coverage_end: str
+    campaign_id: str
+    campaign_locked_at_utc: str
+    campaign_sha256: str
     policy: GatePolicy
     metrics: AggregateMetrics
     checks: tuple[GateCheck, ...]
@@ -245,6 +273,15 @@ def _string_list(raw: Any, context: str) -> tuple[str, ...]:
     return values
 
 
+def _positive_int_list(raw: Any, context: str) -> tuple[int, ...]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{context} must be a non-empty list")
+    values = tuple(_positive_int(value, context) for value in raw)
+    if len(values) != len(set(values)):
+        raise ValueError(f"{context} must not contain duplicates")
+    return values
+
+
 def _relative_artifact_path(root: Path, raw: Any, context: str) -> Path:
     value = Path(_nonempty_string(raw, context))
     if value.is_absolute() or ".." in value.parts:
@@ -323,9 +360,86 @@ def _parse_policy(raw: Any) -> GatePolicy:
             _required(raw, "allowed_market_data_providers", "policy"),
             "policy.allowed_market_data_providers",
         ),
+        allowed_audit_versions=_positive_int_list(
+            _required(raw, "allowed_audit_versions", "policy"),
+            "policy.allowed_audit_versions",
+        ),
+        allowed_observer_versions=_positive_int_list(
+            _required(raw, "allowed_observer_versions", "policy"),
+            "policy.allowed_observer_versions",
+        ),
+        allowed_audit_code_versions=_string_list(
+            _required(raw, "allowed_audit_code_versions", "policy"),
+            "policy.allowed_audit_code_versions",
+        ),
+        allowed_observer_code_versions=_string_list(
+            _required(raw, "allowed_observer_code_versions", "policy"),
+            "policy.allowed_observer_code_versions",
+        ),
         require_zero_dirty_sessions=zero_dirty,
         require_zero_direction_mismatches=zero_direction,
         require_complete_session_inventory=complete_inventory,
+    )
+
+
+def _parse_campaign_artifact(
+    raw: Any,
+    *,
+    root: Path,
+    coverage_start: date,
+    coverage_end: date,
+    policy: GatePolicy,
+) -> CampaignArtifact:
+    if not isinstance(raw, dict):
+        raise ValueError("campaign_artifact must be an object")
+    _exact_fields(raw, CAMPAIGN_ARTIFACT_FIELDS, "campaign_artifact")
+    path = _relative_artifact_path(
+        root, _required(raw, "path", "campaign_artifact"), "campaign_artifact.path"
+    )
+    digest = _sha256(
+        _required(raw, "sha256", "campaign_artifact"), "campaign_artifact.sha256"
+    )
+    campaign_raw = _verify_digest(path, digest, "prospective campaign")
+    try:
+        payload = json.loads(campaign_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("prospective campaign is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("prospective campaign root must be an object")
+    _exact_fields(payload, CAMPAIGN_FIELDS, "prospective campaign")
+    schema = payload["schema_version"]
+    if (
+        not isinstance(schema, int)
+        or isinstance(schema, bool)
+        or schema != CAMPAIGN_SCHEMA_VERSION
+    ):
+        raise ValueError("prospective campaign schema_version must be 1")
+    if payload["status"] != "locked":
+        raise ValueError("prospective campaign status must be locked")
+    campaign_start = _iso_date(payload["coverage_start"], "campaign.coverage_start")
+    campaign_end = _iso_date(payload["coverage_end"], "campaign.coverage_end")
+    if (campaign_start, campaign_end) != (coverage_start, coverage_end):
+        raise ValueError("prospective campaign coverage does not match evidence set")
+    campaign_policy = _parse_policy(payload["policy"])
+    if campaign_policy != policy:
+        raise ValueError("prospective campaign policy does not match evidence set")
+    expected = _expected_sessions(campaign_start, campaign_end)
+    if not expected:
+        raise ValueError("prospective campaign contains no XNYS sessions")
+    if len(expected) < campaign_policy.min_clean_sessions:
+        raise ValueError(
+            "prospective campaign contains fewer XNYS sessions than "
+            "policy.min_clean_sessions"
+        )
+    locked_at = _aware_datetime(payload["locked_at_utc"], "campaign.locked_at_utc")
+    first_open = CALENDAR.session_open(expected[0]).to_pydatetime().astimezone(timezone.utc)
+    if locked_at >= first_open:
+        raise ValueError("prospective campaign must be locked before its first session opens")
+    return CampaignArtifact(
+        _nonempty_string(payload["campaign_id"], "campaign.campaign_id"),
+        locked_at,
+        path,
+        digest,
     )
 
 
@@ -428,6 +542,14 @@ def load_evidence_manifest(path: Path | str) -> EvidenceManifest:
         raise ValueError("control artifact kinds must be unique")
     if any(control.completed_at_utc > created_at for control in controls):
         raise ValueError("control artifacts cannot complete after the manifest is locked")
+    policy = _parse_policy(_required(payload, "policy", "evidence manifest"))
+    campaign = _parse_campaign_artifact(
+        _required(payload, "campaign_artifact", "evidence manifest"),
+        root=root,
+        coverage_start=coverage_start,
+        coverage_end=coverage_end,
+        policy=policy,
+    )
     return EvidenceManifest(
         evidence_set_version=_nonempty_string(
             _required(payload, "evidence_set_version", "evidence manifest"),
@@ -436,7 +558,8 @@ def load_evidence_manifest(path: Path | str) -> EvidenceManifest:
         created_at_utc=created_at,
         coverage_start=coverage_start,
         coverage_end=coverage_end,
-        policy=_parse_policy(_required(payload, "policy", "evidence manifest")),
+        campaign_artifact=campaign,
+        policy=policy,
         session_reports=reports,
         control_artifacts=controls,
     )
@@ -733,6 +856,9 @@ def evaluate_evidence_gate(manifest: EvidenceManifest) -> EvidenceGateReport:
     max_latency = max(max_latencies) if max_latencies else None
     operational_rows = [payload["operational"] for _, payload in session_payloads]
     audit_versions = tuple(
+        sorted({payload["audit_version"] for _, payload in session_payloads})
+    )
+    audit_code_versions = tuple(
         sorted({payload["audit_code_version"] for _, payload in session_payloads})
     )
     observer_code_versions = tuple(
@@ -786,7 +912,8 @@ def evaluate_evidence_gate(manifest: EvidenceManifest) -> EvidenceGateReport:
         max_detection_latency_seconds=max_latency,
         candidate_observations=sum(row["candidate_observations"] for row in operational_rows),
         unique_candidates=sum(row["unique_candidates"] for row in operational_rows),
-        audit_code_versions=audit_versions,
+        audit_code_versions=audit_code_versions,
+        audit_versions=audit_versions,
         observer_versions=evaluator_versions,
         observer_code_versions=observer_code_versions,
         data_feeds=data_feeds,
@@ -794,7 +921,7 @@ def evaluate_evidence_gate(manifest: EvidenceManifest) -> EvidenceGateReport:
     )
     policy = manifest.policy
     control_kinds = {artifact.kind for artifact in manifest.control_artifacts}
-    evidence_revisions = set(audit_versions) | set(observer_code_versions)
+    evidence_revisions = set(audit_code_versions) | set(observer_code_versions)
     control_revisions = {artifact.revision for artifact in manifest.control_artifacts}
     checks = (
         _check(
@@ -877,6 +1004,30 @@ def evaluate_evidence_gate(manifest: EvidenceManifest) -> EvidenceGateReport:
             list(policy.allowed_market_data_providers),
             set(providers) <= set(policy.allowed_market_data_providers),
         ),
+        _check(
+            "ALLOWED_AUDIT_VERSIONS",
+            list(audit_versions),
+            list(policy.allowed_audit_versions),
+            set(audit_versions) <= set(policy.allowed_audit_versions),
+        ),
+        _check(
+            "ALLOWED_OBSERVER_VERSIONS",
+            list(evaluator_versions),
+            list(policy.allowed_observer_versions),
+            set(evaluator_versions) <= set(policy.allowed_observer_versions),
+        ),
+        _check(
+            "ALLOWED_AUDIT_CODE_VERSIONS",
+            list(audit_code_versions),
+            list(policy.allowed_audit_code_versions),
+            set(audit_code_versions) <= set(policy.allowed_audit_code_versions),
+        ),
+        _check(
+            "ALLOWED_OBSERVER_CODE_VERSIONS",
+            list(observer_code_versions),
+            list(policy.allowed_observer_code_versions),
+            set(observer_code_versions) <= set(policy.allowed_observer_code_versions),
+        ),
     )
     verdict = VERDICT_OWNER_REVIEW if all(check.passed for check in checks) else VERDICT_NOT_READY
     return EvidenceGateReport(
@@ -885,6 +1036,9 @@ def evaluate_evidence_gate(manifest: EvidenceManifest) -> EvidenceGateReport:
         verdict=verdict,
         coverage_start=manifest.coverage_start.isoformat(),
         coverage_end=manifest.coverage_end.isoformat(),
+        campaign_id=manifest.campaign_artifact.campaign_id,
+        campaign_locked_at_utc=manifest.campaign_artifact.locked_at_utc.isoformat(),
+        campaign_sha256=manifest.campaign_artifact.sha256,
         policy=policy,
         metrics=metrics,
         checks=checks,
