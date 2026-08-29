@@ -69,8 +69,11 @@ if the symbols had been promoted earlier.
    contract remains an honest absence. Option day-range API failures likewise
    propagate and log, while a successful response with no trade bars remains
    distinguishable as no range. Sibling contracts continue backfilling.
-8. Similar-setup/tier/hour populations still need one consistent
-   `news_driven` exclusion contract and explicit coverage-era scoping.
+8. **Resolved:** similar-setup, kind, tier, and hour statistics now share
+   one clean-technical population: current-feed, watchlist-origin,
+   non-news-driven detections with real marks. Tier/hour results expose the
+   number of otherwise-eligible news-driven rows excluded, and regressions
+   prevent feed-era, screening-origin, or event-driven contamination.
 9. **Resolved:** direct live and replay loop regressions inject a failure in
    one symbol's evaluation, prove every later symbol in the same market pass
    still reaches evaluation, and require the failure to appear in

@@ -123,20 +123,15 @@ number.
 siblings do, and add a regression test asserting all four functions agree
 in sign on a shared fixture.*
 
-**8. `tradebot/journal.py:479-516` (`tier_performance`) — missing the `news_driven` exclusion its sibling functions apply, mixing event-driven noise into dashboard tier stats**
-`historical_performance` and `kind_performance` both explicitly exclude
-`news_driven=1` rows with a docstring reasoning that continuation rates for
-technical setups shouldn't be diluted by earnings/FOMC/8-K moves.
-`tier_performance`'s query has no such filter (and `hour_performance` has
-the same gap). `/performance` (`api/app.py:550-551`) returns `by_tier` and
-`by_kind` from the same underlying table in one payload, inviting a direct
-comparison between a filtered and an unfiltered population that looks like
-it should match.
-*Fix: add the same `(d.news_driven IS NULL OR d.news_driven = 0)` filter
-to `tier_performance`/`hour_performance`; add a
-`test_tier_performance_excludes_news_driven_rows` test mirroring the
-existing kind/historical ones (their absence for tier is itself a signal
-this was an oversight).*
+**8. RESOLVED — one technical-performance population contract**
+
+`historical_performance`, `kind_performance`, `tier_performance`, and
+`hour_performance` now all use current-feed, watchlist-origin,
+non-news-driven detections with real outcome marks. Tier/hour results retain
+`excluded_news_driven` counts so the exclusion is visible rather than a
+silent denominator change; the Performance UI and hour report display it.
+Regression fixtures mix old-feed, screening-origin, and news-driven rows and
+prove none can contaminate the clean technical sample.
 
 **9. RESOLVED — `web-app/src/components/SignalDetail.jsx` no longer infers every missing mark as "pending"**
 `afterDetectionRows()`/`pendingResolutionLabel()` always renders either a
