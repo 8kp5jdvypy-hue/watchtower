@@ -68,6 +68,54 @@ def test_missed_alerts_are_read_from_the_real_validator_rejection_counters(tmp_p
     assert data.total_missed_alerts == 3
 
 
+def test_operational_failure_table_surfaces_every_recorded_failure_family(tmp_path):
+    metrics_path = tmp_path / "metrics.json"
+    metrics.increment("dedup_check_failed", path=metrics_path)
+    metrics.increment("decision_event_write_failed", path=metrics_path, stage="dedup")
+    metrics.increment("evaluation_write_failed", path=metrics_path, outcome="NO_DETECTION")
+    metrics.increment("screening_persist_failed", path=metrics_path)
+    metrics.increment("contract_outcome_backfill_failed", path=metrics_path, stage="forward_mid")
+    metrics.increment("data_health_suppression", path=metrics_path, reason="bar_gap")
+    metrics.increment("duplicate_suppression", path=metrics_path, symbol="TSLA")
+    metrics.increment("duplicate_suppression", path=metrics_path, symbol="AAPL")
+    metrics.increment("event_window_suppression", path=metrics_path, kind="earnings")
+    metrics.increment("event_window_downgrade", path=metrics_path, kind="earnings")
+    metrics.increment("suppression", path=metrics_path, category="data_integrity")
+    metrics.increment("plausibility_floor_rejection", path=metrics_path, stage="baseline")
+    metrics.increment("provider_error", path=metrics_path, provider="example")
+    metrics.increment("universe_stage1_runs", path=metrics_path)
+    metrics.increment("validator_rejection", path=metrics_path, rule="stale_quote")
+
+    conn = connect(":memory:")
+    data = status_page.collect_status_data(
+        conn,
+        now=NOW,
+        incidents_path=tmp_path / "incidents.jsonl",
+        metrics_path=metrics_path,
+    )
+
+    assert data.operational_failures_by_family == {
+        "contract_outcome_backfill_failed": 1,
+        "data_health_suppression": 1,
+        "decision_event_write_failed": 1,
+        "dedup_check_failed": 1,
+        "duplicate_suppression": 2,
+        "evaluation_write_failed": 1,
+        "event_window_downgrade": 1,
+        "event_window_suppression": 1,
+        "plausibility_floor_rejection": 1,
+        "provider_error": 1,
+        "screening_persist_failed": 1,
+        "suppression": 1,
+    }
+    assert "universe_stage1_runs" not in data.operational_failures_by_family
+    assert not any(
+        key.startswith("validator_rejection")
+        for key in data.operational_failures_by_family
+    )
+    assert data.missed_alerts_by_rule == {"stale_quote": 1}
+
+
 def test_alerts_vs_no_trade_counter_matches_performance_track_record(tmp_path):
     conn = connect(":memory:")
     for i in range(6):
@@ -93,6 +141,7 @@ def test_render_status_page_includes_the_beta_label_and_core_sections():
         generated_at=NOW, uptime_pct=99.5, tracked_since=NOW - timedelta(days=10), total_incident_seconds=3600,
         incidents=[{"kind": "halt", "detail": "fixing a bug", "started_at": NOW.isoformat(), "ended_at": None}],
         missed_alerts_by_rule={"stale_quote": 2}, total_missed_alerts=2,
+        operational_failures_by_family={"dedup_check_failed": 1},
         total_alerts_published=10, total_no_trade=3, no_trade_tracked_count=10,
     )
     html_out = status_page.render_status_page(data)
@@ -100,6 +149,9 @@ def test_render_status_page_includes_the_beta_label_and_core_sections():
     assert "99.50%" in html_out
     assert "Incident log" in html_out
     assert "stale_quote" in html_out
+    assert "Operational failures, suppressions, and downgrades" in html_out
+    assert "dedup_check_failed" in html_out
+    assert "not added into a fabricated incident total" in html_out
     assert "3 of 10" in html_out
     assert "ONGOING" in html_out
 
@@ -108,6 +160,7 @@ def test_render_status_page_never_fabricates_100_percent_uptime():
     data = status_page.StatusPageData(
         generated_at=NOW, uptime_pct=None, tracked_since=None, total_incident_seconds=0,
         incidents=[], missed_alerts_by_rule={}, total_missed_alerts=0,
+        operational_failures_by_family={},
         total_alerts_published=0, total_no_trade=0, no_trade_tracked_count=0,
     )
     html_out = status_page.render_status_page(data)

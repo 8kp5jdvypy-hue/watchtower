@@ -212,15 +212,16 @@ silent reset erases exactly the evidence needed to notice a failure spike.
 *Fix: write via temp file + `os.replace()`; on decode failure, log loudly
 and back up the corrupt file instead of silently discarding it.*
 
-**16. `tradebot/status_page.py:69-76` (`_missed_alerts_by_rule`) — the public status page is blind to most of the failure counters the codebase already writes**
-Only `metrics.json` keys prefixed `validator_rejection` are surfaced.
-`dedup_check_failed`, `event_window_downgrade`, `event_window_suppression`,
-`duplicate_suppression`, and `data_health_suppression` are all recorded
-(see `runner.py:300,304,353,372,398,409`) but never displayed — the one
-page meant to catch exactly this class of problem has an undetected blind
-spot for most of what it could show.
-*Fix: surface all `*_suppression`/`*_failed` metric families on the status
-page, not just `validator_rejection`.*
+**16. RESOLVED — the public status page surfaces every recorded operational failure family**
+The original page exposed only `validator_rejection`. It now retains that
+separately defined missed-alert-by-rule view and adds every rejection,
+suppression, downgrade, and `*_failed` family, including later-added decision,
+evaluation, screening, and contract-outcome persistence failures. Labelled
+keys aggregate by family so symbol cardinality cannot make the static public
+artifact unbounded. The page explicitly warns that overlapping counter
+increments are not a deduplicated incident total; neutral throughput counters
+remain excluded. Regression tests pin all current failure families,
+aggregation, the validator non-duplication boundary, and rendered disclosure.
 
 **17. `tradebot/journal.py:149-157` (`_add_column_if_missing`) — unconditionally treats any `sqlite3.OperationalError` from `ALTER TABLE` as "column already exists"**
 If the real cause is a full disk, a corrupted DB, or a permissions issue,
@@ -346,7 +347,7 @@ cross-referenced rather than repeated in full.
 | 4 | `tradebot/universe.py:70-135`, `vendors/alpaca.py:318-354` | Empty fetch → mass "found nothing = succeeded" | See finding #6 |
 | 5 | `tradebot/runner.py` (`_forward_mid`) | **Resolved:** provider failures propagate to the per-selection logger | See finding #12 |
 | 6 | `tradebot/runner.py` + `vendors/alpaca.py` (`fetch_option_day_range`) | **Resolved:** API failure propagates/logs; successful no-bars remains `None` | Provider outage no longer masquerades as "no trades" |
-| 7 | `tradebot/status_page.py:69-76` | Monitoring layer itself has a blind spot | See finding #16 |
+| 7 | `tradebot/status_page.py` | **Resolved:** every recorded operational failure family is disclosed without fabricating a unique-event total | See finding #16 |
 | 8 | `tradebot/runner.py:843-853`, `:1144-1154` | Secondary `except Exception: pass` around the alert-of-a-failure | If the alert itself fails (outbox locked/corrupt), that's fully swallowed with zero logging |
 | 9 | `tradebot/journal.py:149-157` (`_add_column_if_missing`) | Overbroad exception match | See finding #17 |
 | 10 | `tradebot/runner.py:242-259` (`TelegramHaltChecker.check()`) | Network error → fail-open as "not halted" | See finding #18 |
