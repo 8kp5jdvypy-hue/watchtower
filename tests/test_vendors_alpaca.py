@@ -659,6 +659,37 @@ def test_fetch_news_maps_metadata_without_article_content(monkeypatch):
     assert not hasattr(items[0], "content")
 
 
+def test_fetch_option_day_range_returns_none_for_successful_no_bar_response(monkeypatch):
+    class _FakeOptionClient:
+        def get_option_bars(self, request):
+            return SimpleNamespace(data={})
+
+    monkeypatch.setattr(alpaca_module, "_option_client", lambda: _FakeOptionClient())
+    monkeypatch.setattr(alpaca_module, "_with_backoff", lambda fn: fn())
+
+    assert alpaca_module.fetch_option_day_range(
+        "TSLA260814C00100000", date(2026, 8, 14)
+    ) is None
+
+
+def test_fetch_option_day_range_propagates_api_failure_for_attribution(monkeypatch):
+    original = _fake_api_error(503)
+
+    class _FakeOptionClient:
+        def get_option_bars(self, request):
+            raise original
+
+    monkeypatch.setattr(alpaca_module, "_option_client", lambda: _FakeOptionClient())
+    monkeypatch.setattr(alpaca_module, "_with_backoff", lambda fn: fn())
+
+    with pytest.raises(APIError) as exc_info:
+        alpaca_module.fetch_option_day_range(
+            "TSLA260814C00100000", date(2026, 8, 14)
+        )
+
+    assert exc_info.value is original
+
+
 def test_configure_logging_integration_with_a_real_observed_call():
     """PR #67's own tests already prove any watchtower.* child inherits
     visibility generically (using a bare logging.getLogger(...) call) --

@@ -59,10 +59,16 @@ if the symbols had been promoted earlier.
    `relative_strength_break` joins symbol and proxy bars by exact timestamp.
    Missing or duplicate required proxy timestamps fail closed. Regression
    tests cover both former false-signal paths after a silently omitted bar.
-6. Manual/cron cache acquisition can still finish with `gave up` while
-   exiting zero, and final-path CSV writes are not atomic.
-7. Contract-forward outcome fetches still conflate vendor failure with a
-   genuinely absent contract in some paths.
+6. **Resolved:** manual/cron cache acquisition returns nonzero when any
+   symbol exhausts its session search or a real-session fetch is empty, while
+   legitimate cached/holiday no-ops still return zero. CSVs are written to a
+   same-directory temporary file and atomically replaced only after a complete
+   write; failure tests prove no partial final path remains.
+7. **Resolved:** contract-chain fetch exceptions now propagate to the
+   per-selection backfill logger while a successful chain missing the target
+   contract remains an honest absence. Option day-range API failures likewise
+   propagate and log, while a successful response with no trade bars remains
+   distinguishable as no range. Sibling contracts continue backfilling.
 8. Similar-setup/tier/hour populations still need one consistent
    `news_driven` exclusion contract and explicit coverage-era scoping.
 9. The per-symbol live exception-isolation loop needs a direct regression

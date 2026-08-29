@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from tradebot import metrics as metrics_mod
 from tradebot.alerts import AlertBudget, ConsoleAlerter, Decision
 from tradebot.detectors import DailyAnchors, Detection, bar_close_ts
 from tradebot.events import add_event_window
@@ -2120,11 +2121,11 @@ def test_guard_rejected_path_still_rolls_the_whole_cluster_back_on_a_crash(tmp_p
         fresh.close()
 
 
-def _fake_contract(right, strike, bid, ask):
+def _fake_contract(right, strike, bid, ask, symbol="X"):
     from tradebot.marketdata import OptionContract
 
     return OptionContract(
-        symbol="X", expiry=date(2026, 8, 14), strike=strike, right=right,
+        symbol=symbol, expiry=date(2026, 8, 14), strike=strike, right=right,
         bid=bid, ask=ask, last=(bid + ask) / 2, delta=None, theta=None, open_interest=100,
     )
 
@@ -2159,13 +2160,21 @@ def test_forward_mid_none_when_the_short_leg_is_missing_from_the_chain():
     assert mid is None
 
 
-def test_forward_mid_none_when_the_chain_fetch_raises():
+def test_forward_mid_propagates_chain_fetch_failure_for_attribution():
     def _raise(s, expiry):
         raise RuntimeError("vendor hiccup")
 
     md = {"TSLA": type("MD", (), {"chain": staticmethod(_raise)})()}
-    mid = runner_mod._forward_mid(md, "TSLA", "put", 365.0, "2026-08-14", is_vertical=False, short_strike=None)
-    assert mid is None
+    with pytest.raises(RuntimeError, match="vendor hiccup"):
+        runner_mod._forward_mid(
+            md,
+            "TSLA",
+            "put",
+            365.0,
+            "2026-08-14",
+            is_vertical=False,
+            short_strike=None,
+        )
 
 
 def _write_minimal_detection(conn, entry_ts, symbol="GOOGL"):
@@ -2199,7 +2208,7 @@ def test_backfill_pending_contract_mids_writes_a_real_fetched_mid(tmp_path):
     assert mid_30 == pytest.approx(3.95)
 
 
-def test_backfill_pending_contract_mids_one_failure_does_not_block_another(tmp_path):
+def test_backfill_pending_contract_mids_one_failure_does_not_block_another(tmp_path, caplog):
     from tradebot.journal import record_contract_selection
 
     conn = journal_connect(":memory:")
@@ -2224,12 +2233,20 @@ def test_backfill_pending_contract_mids_one_failure_does_not_block_another(tmp_p
         "TSLA": type("MD", (), {"chain": staticmethod(_raise)})(),
     }
 
-    runner_mod.backfill_pending_contract_mids(conn, md, entry_ts + timedelta(minutes=31))
+    with caplog.at_level("ERROR", logger="watchtower.runner"):
+        runner_mod.backfill_pending_contract_mids(conn, md, entry_ts + timedelta(minutes=31))
 
     ok_mid = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (ok_id,)).fetchone()[0]
     broken_mid = conn.execute("SELECT mid_30m FROM contract_selections WHERE detection_id = ?", (broken_id,)).fetchone()[0]
     assert ok_mid == pytest.approx(3.95)
     assert broken_mid is None  # never fabricated, and didn't stop the other from backfilling
+    failures = [r for r in caplog.records if "contract forward-mid backfill failed" in r.message]
+    assert len(failures) == 2  # +15m and +30m are both due and independently attributable
+    assert all(broken_id in r.message for r in failures)
+    assert all("exception=RuntimeError" in r.message for r in failures)
+    assert metrics_mod.read_all() == {
+        "contract_outcome_backfill_failed{exception=RuntimeError,stage=forward_mid}": 2,
+    }
 
 
 def test_backfill_pending_contract_close_mids_uses_the_close_sentinel(tmp_path):
@@ -2249,6 +2266,40 @@ def test_backfill_pending_contract_close_mids_uses_the_close_sentinel(tmp_path):
 
     mid_close = conn.execute("SELECT mid_close FROM contract_selections WHERE detection_id = ?", (detection_id,)).fetchone()[0]
     assert mid_close == pytest.approx(3.55)
+
+
+def test_backfill_pending_contract_close_mids_attributes_failure(tmp_path, caplog):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+    detection_id = _write_minimal_detection(conn, entry_ts, symbol="TSLA")
+    record_contract_selection(
+        conn, detection_id, symbol="TSLA", right="call", strike=100.0,
+        expiry=date(2026, 8, 14), dte=13, delta=0.50, entry_mid=2.00,
+        entry_ts=entry_ts,
+    )
+
+    def _raise(s, expiry):
+        raise TimeoutError("provider response body must not be logged")
+
+    md = {"TSLA": type("MD", (), {"chain": staticmethod(_raise)})()}
+    with caplog.at_level("ERROR", logger="watchtower.runner"):
+        runner_mod.backfill_pending_contract_close_mids(conn, md, date(2026, 7, 23))
+
+    row = conn.execute(
+        "SELECT mid_close FROM contract_selections WHERE detection_id = ?",
+        (detection_id,),
+    ).fetchone()
+    assert row == (None,)
+    failures = [r for r in caplog.records if "contract close-mid backfill failed" in r.message]
+    assert len(failures) == 1
+    assert detection_id in failures[0].message
+    assert "exception=TimeoutError" in failures[0].message
+    assert "provider response body" not in failures[0].message
+    assert metrics_mod.read_all() == {
+        "contract_outcome_backfill_failed{exception=TimeoutError,stage=close_mid}": 1,
+    }
 
 
 # ---------------------------------------------------------------------- #
@@ -2342,6 +2393,68 @@ def test_backfill_contract_day_ranges_one_failure_does_not_block_another(tmp_pat
     broken_row = conn.execute("SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?", (broken_id,)).fetchone()
     assert ok_row == (1.43, 3.90)
     assert broken_row == (None, None)  # never fabricated, and didn't stop the other
+
+
+def test_backfill_contract_day_ranges_logs_vendor_failure_and_continues(
+    tmp_path, monkeypatch, caplog
+):
+    from tradebot.journal import record_contract_selection
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    ok_id = _write_minimal_detection(conn, entry_ts, symbol="META")
+    broken_id = _write_minimal_detection(conn, entry_ts, symbol="TSLA")
+    record_contract_selection(
+        conn, ok_id, symbol="META", right="call", strike=600.0,
+        expiry=date(2026, 4, 17), dte=9, delta=0.45, entry_mid=2.96,
+        entry_ts=entry_ts,
+    )
+    record_contract_selection(
+        conn, broken_id, symbol="TSLA", right="call", strike=100.0,
+        expiry=date(2026, 8, 14), dte=13, delta=0.50, entry_mid=2.00,
+        entry_ts=entry_ts,
+    )
+    md = {
+        "META": type(
+            "MD", (),
+            {"chain": staticmethod(lambda s, expiry: _fake_chain(
+                _fake_contract("call", 600.0, 1.80, 1.90, symbol="META260417C00600000")
+            ))},
+        )(),
+        "TSLA": type(
+            "MD", (),
+            {"chain": staticmethod(lambda s, expiry: _fake_chain(
+                _fake_contract("call", 100.0, 1.00, 1.10, symbol="TSLA260814C00100000")
+            ))},
+        )(),
+    }
+
+    def _fetch(occ_symbol, session_date):
+        if occ_symbol.startswith("TSLA"):
+            raise RuntimeError("provider outage")
+        return (1.43, 3.90)
+
+    monkeypatch.setattr("tradebot.vendors.alpaca.fetch_option_day_range", _fetch)
+    with caplog.at_level("ERROR", logger="watchtower.runner"):
+        runner_mod.backfill_contract_day_ranges(conn, md, date(2026, 4, 8))
+
+    ok_row = conn.execute(
+        "SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?",
+        (ok_id,),
+    ).fetchone()
+    broken_row = conn.execute(
+        "SELECT day_low, day_high FROM contract_selections WHERE detection_id = ?",
+        (broken_id,),
+    ).fetchone()
+    assert ok_row == (1.43, 3.90)
+    assert broken_row == (None, None)
+    failures = [r for r in caplog.records if "contract day-range backfill failed" in r.message]
+    assert len(failures) == 1
+    assert broken_id in failures[0].message
+    assert "exception=RuntimeError" in failures[0].message
+    assert metrics_mod.read_all() == {
+        "contract_outcome_backfill_failed{exception=RuntimeError,stage=day_range}": 1,
+    }
 
 
 # ---------------------------------------------------------------------- #
