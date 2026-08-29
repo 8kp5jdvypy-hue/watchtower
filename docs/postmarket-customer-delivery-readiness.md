@@ -90,6 +90,19 @@ inconsistency makes both `operational_clean` and
 `truth/postmarket_customer_dry_run_audit_v1.schema.json` and are written
 exclusively under `data/postmarket_audits` without replacement.
 
+Before any session may count, an owner-approved dry-run campaign must be
+locked with `tradebot.postmarket_customer_dry_run_campaign`. The immutable
+contract names every expected XNYS session and binds the exact delivery
+policy, owner authorization, release, rank/router/audit versions, four control
+artifacts, operational limits, case-count floors, and independent-review
+requirements. It must be created before the first covered session opens, and
+the authorization must remain valid through the final session audit. The
+campaign requires at least ten clean sessions, twenty eligible decisions,
+twenty independently reviewed cases across at least ten symbols, at least 90%
+review approval, exact schedule coverage, and zero critical or ledger-control
+failures. Locking a campaign records requirements only; it does not create an
+authorization or enable the default-off supervisor.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed

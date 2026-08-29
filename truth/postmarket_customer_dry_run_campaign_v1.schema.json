@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_campaign_v1.schema.json",
+  "title": "Postmarket customer-readiness dry-run campaign v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "campaign_id", "locked_at_utc",
+    "coverage_start", "coverage_end", "expected_sessions",
+    "delivery_policy_sha256", "owner_authorization_sha256",
+    "owner_authorization_expires_at_utc", "release_id", "router_version",
+    "rank_version", "control_evidence_sha256s", "policy"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "status": {"const": "locked"},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "locked_at_utc": {"type": "string", "format": "date-time"},
+    "coverage_start": {"type": "string", "format": "date"},
+    "coverage_end": {"type": "string", "format": "date"},
+    "expected_sessions": {
+      "type": "array", "minItems": 10, "uniqueItems": true,
+      "items": {"type": "string", "format": "date"}
+    },
+    "delivery_policy_sha256": {"$ref": "#/$defs/digest"},
+    "owner_authorization_sha256": {"$ref": "#/$defs/digest"},
+    "owner_authorization_expires_at_utc": {"type": "string", "format": "date-time"},
+    "release_id": {"type": "string", "minLength": 1},
+    "router_version": {"const": 1},
+    "rank_version": {"type": "integer", "minimum": 1},
+    "control_evidence_sha256s": {
+      "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/digest"}
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_clean_sessions", "min_eligible_decisions",
+        "min_independently_reviewed_cases", "min_distinct_reviewed_symbols",
+        "min_owner_review_approval_rate", "min_session_coverage_pct",
+        "max_scheduled_lag_seconds", "max_tick_latency_seconds",
+        "allowed_audit_versions", "allowed_audit_code_versions",
+        "allowed_runtime_router_revisions", "require_zero_dirty_sessions",
+        "require_complete_session_inventory", "require_zero_degraded_ticks",
+        "require_zero_failed_invariants", "require_zero_conservation_failures",
+        "require_zero_link_failures", "require_zero_identity_failures",
+        "require_zero_input_digest_failures",
+        "require_zero_decision_attribution_failures",
+        "require_zero_orphan_routes", "require_zero_duplicate_eligible_identities",
+        "require_zero_actionability_failures",
+        "require_zero_critical_review_findings",
+        "require_independent_owner_review"
+      ],
+      "properties": {
+        "min_clean_sessions": {"type": "integer", "minimum": 10},
+        "min_eligible_decisions": {"type": "integer", "minimum": 20},
+        "min_independently_reviewed_cases": {"type": "integer", "minimum": 20},
+        "min_distinct_reviewed_symbols": {"type": "integer", "minimum": 10},
+        "min_owner_review_approval_rate": {"type": "number", "minimum": 0.9, "maximum": 1},
+        "min_session_coverage_pct": {"const": 100},
+        "max_scheduled_lag_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 30},
+        "max_tick_latency_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 10},
+        "allowed_audit_versions": {
+          "type": "array", "prefixItems": [{"const": 1}], "items": false,
+          "minItems": 1, "maxItems": 1
+        },
+        "allowed_audit_code_versions": {"$ref": "#/$defs/revisions"},
+        "allowed_runtime_router_revisions": {"$ref": "#/$defs/revisions"},
+        "require_zero_dirty_sessions": {"const": true},
+        "require_complete_session_inventory": {"const": true},
+        "require_zero_degraded_ticks": {"const": true},
+        "require_zero_failed_invariants": {"const": true},
+        "require_zero_conservation_failures": {"const": true},
+        "require_zero_link_failures": {"const": true},
+        "require_zero_identity_failures": {"const": true},
+        "require_zero_input_digest_failures": {"const": true},
+        "require_zero_decision_attribution_failures": {"const": true},
+        "require_zero_orphan_routes": {"const": true},
+        "require_zero_duplicate_eligible_identities": {"const": true},
+        "require_zero_actionability_failures": {"const": true},
+        "require_zero_critical_review_findings": {"const": true},
+        "require_independent_owner_review": {"const": true}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "positiveIntegers": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "revisions": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"}
+    }
+  }
+}
