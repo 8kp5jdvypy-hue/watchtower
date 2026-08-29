@@ -5,6 +5,10 @@ reproducible data:
 - Missed alerts come from tradebot.metrics' validator_rejection
   counters — every HIGH-tier alert the data-integrity guard
   (tradebot.guard) suppressed before it could publish.
+- Operational failure counters expose every recorded rejection,
+  suppression, downgrade, and ``*_failed`` family. These are raw counter
+  increments and may overlap; they are not presented as a deduplicated
+  incident or missed-alert total.
 - The alerts-published-vs-NO-TRADE counter comes from
   tradebot.telegram_bot.performance.track_record — the exact same query
   /performance uses, not a second copy that could drift.
@@ -52,6 +56,7 @@ class StatusPageData:
     incidents: list[dict]
     missed_alerts_by_rule: dict[str, int]
     total_missed_alerts: int
+    operational_failures_by_family: dict[str, int]
     total_alerts_published: int
     total_no_trade: int
     no_trade_tracked_count: int
@@ -76,6 +81,46 @@ def _missed_alerts_by_rule(all_metrics: dict) -> dict[str, int]:
     return by_rule
 
 
+_OPERATIONAL_FAILURE_SUFFIXES = (
+    "_error",
+    "_failed",
+    "_failure",
+    "_rejection",
+    "_suppression",
+)
+_OPERATIONAL_FAILURE_NAMES = {
+    # Generic category counter written alongside more specific counters.
+    "suppression",
+    # A downgrade prevents the original HIGH route without suppressing the
+    # detection entirely, so suffix matching alone would miss it.
+    "event_window_downgrade",
+}
+
+
+def _metric_name(key: str) -> str:
+    """Return the counter family without its ``{label=value}`` suffix."""
+    return key.partition("{")[0]
+
+
+def _operational_failures_by_family(all_metrics: dict) -> dict[str, int]:
+    """Select raw operational failure/suppression counters for disclosure.
+
+    Aggregate labelled keys by family. This preserves the public page's bounded
+    size even for symbol-labelled counters while proving that no recorded
+    failure family is invisible. ``validator_rejection`` is already rendered
+    as the separately defined missed-alert table and is excluded here to avoid
+    displaying the exact same counter twice.
+    """
+    selected: dict[str, int] = {}
+    for key, count in all_metrics.items():
+        name = _metric_name(key)
+        if name == "validator_rejection":
+            continue
+        if name in _OPERATIONAL_FAILURE_NAMES or name.endswith(_OPERATIONAL_FAILURE_SUFFIXES):
+            selected[name] = selected.get(name, 0) + count
+    return selected
+
+
 def collect_status_data(
     journal_conn,
     now: datetime | None = None,
@@ -94,7 +139,8 @@ def collect_status_data(
             uptime_pct = 100.0 * (1 - incident_seconds / total_tracked_seconds)
 
     tr = performance.track_record(journal_conn, tier="high")
-    missed_by_rule = _missed_alerts_by_rule(metrics.read_all(path=metrics_path))
+    all_metrics = metrics.read_all(path=metrics_path)
+    missed_by_rule = _missed_alerts_by_rule(all_metrics)
 
     return StatusPageData(
         generated_at=now,
@@ -104,6 +150,7 @@ def collect_status_data(
         incidents=sorted(all_incidents, key=lambda i: i["started_at"], reverse=True),
         missed_alerts_by_rule=missed_by_rule,
         total_missed_alerts=sum(missed_by_rule.values()),
+        operational_failures_by_family=_operational_failures_by_family(all_metrics),
         total_alerts_published=tr.total_alerts if tr else 0,
         total_no_trade=tr.total_no_trade if tr else 0,
         no_trade_tracked_count=tr.no_trade_tracked_count if tr else 0,
@@ -157,6 +204,21 @@ def render_status_page(data: StatusPageData) -> str:
     else:
         missed_table = "<p>None recorded.</p>"
 
+    if data.operational_failures_by_family:
+        operational_rows = "\n".join(
+            f"<tr><td>{html.escape(metric)}</td><td>{count}</td></tr>"
+            for metric, count in sorted(
+                data.operational_failures_by_family.items(),
+                key=lambda kv: (-kv[1], kv[0]),
+            )
+        )
+        operational_table = (
+            "<table><thead><tr><th>Metric</th><th>Counter increments</th></tr>"
+            f"</thead><tbody>{operational_rows}</tbody></table>"
+        )
+    else:
+        operational_table = "<p>None recorded.</p>"
+
     no_trade_line = (
         f"{data.total_no_trade} of {data.no_trade_tracked_count} tracked HIGH alerts were NO TRADE "
         "(no tradable contract) — the system saying \"sit this one out.\""
@@ -196,6 +258,10 @@ def render_status_page(data: StatusPageData) -> str:
 <h2>Missed alerts (data-integrity guard rejections)</h2>
 <p class="label">Every alert here was a real detection that never published because the numbers behind it didn't hold up — see tradebot.guard.</p>
 {missed_table}
+
+<h2>Operational failures, suppressions, and downgrades</h2>
+<p class="label">Raw production counter increments. Counters can overlap when one event records both a specific failure and its suppression category, so they are not added into a fabricated incident total.</p>
+{operational_table}
 
 <h2>Incident log</h2>
 {incident_table}

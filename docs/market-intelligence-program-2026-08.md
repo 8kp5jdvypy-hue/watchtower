@@ -94,8 +94,12 @@ if the symbols had been promoted earlier.
     unavailable states with the last successful update. Malformed successful
     API bodies fail explicitly, only a real 401 means signed out, and a failed
     watchlist signal fetch can no longer render every symbol as quietly clean.
-12. Public/system status exposes only a subset of already-recorded failure
-    families.
+12. **Resolved:** public status retains the separately defined
+    data-integrity missed-alert count and also surfaces every recorded
+    rejection, suppression, downgrade, and `*_failed` operational family.
+    Symbol-labelled counters aggregate by family to keep the public artifact
+    bounded, and the page explicitly says overlapping counter increments are
+    not a deduplicated incident total.
 
 ### P2 — operations and durability
 
@@ -223,6 +227,10 @@ evidence.
   freshness, top-N scope, ranks, universe/fetch/evaluation/candidate counts,
   revision and threshold provenance; and preserves candidate plus near-miss
   lifecycles in the already-backed-up audit directory.
+- Public status failure-family disclosure: implemented behind the existing
+  static status-page generation path. All current runner failure/suppression
+  counter families are selected by stable family semantics rather than a
+  validator-only allowlist, while neutral throughput counters remain absent.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the
