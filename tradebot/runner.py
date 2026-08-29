@@ -2222,9 +2222,9 @@ def run_live(
         # Shared across every symbol THIS iteration: relative_strength_break
         # (the only market_bars consumer, see detectors.py) only needs one
         # proxy snapshot per tick, not one freshly re-fetched per symbol --
-        # its own alignment is positional (proxy_bars[len(bars)-1]) with an
-        # explicit len(proxy_bars) < len(bars) abstention guard, so a single
-        # shared, closed-bar-filtered fetch is exactly as safe to read from
+        # its own alignment is by exact bar timestamp with an explicit
+        # missing-timestamp abstention guard, so a single shared,
+        # closed-bar-filtered fetch is exactly as safe to read from
         # every symbol's evaluation as a per-symbol refetch was, at 1/17th
         # the vendor calls. shared_market_bars_attempted (not just checking
         # "is shared_market_bars truthy") is what stops a failed or

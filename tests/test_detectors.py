@@ -141,6 +141,44 @@ def test_rvol_spike_fires_once_not_on_every_bar_while_elevated():
     assert rvol_spike(still_elevated, anchors) is None
 
 
+def test_rvol_history_and_current_bars_align_by_rth_time_slot_after_a_gap():
+    prior_daily = [
+        Bar(SYMBOL, OPEN0 - timedelta(days=1), 95, 96, 94, 95, 500_000)
+    ]
+    history_with_gap = [[
+        _bar(0, 100.0, volume=10_000),
+        _bar(2, 100.0, volume=10_000),
+    ]]
+    anchors = build_anchors(
+        SYMBOL,
+        SESSION,
+        prior_daily,
+        [_bar(0, 100.0)],
+        history_with_gap,
+    )
+
+    # The second returned historical bar is the 09:40 slot, not position 1
+    # (09:35). Missing data must leave the absent time slot absent.
+    assert anchors.avg_cum_volume_by_bar == {0: 10_000.0, 2: 20_000.0}
+
+    complete_history = [[_bar(i, 100.0, volume=10_000) for i in range(3)]]
+    complete_anchors = build_anchors(
+        SYMBOL,
+        SESSION,
+        prior_daily,
+        [_bar(0, 100.0)],
+        complete_history,
+    )
+    current_with_gap = [
+        _bar(0, 100.0, volume=10_000),
+        _bar(2, 100.0, volume=55_000),
+    ]
+
+    # 65k / the correct 09:40 baseline (30k) is below 3x. Positional
+    # alignment used the 09:35 baseline (20k) and falsely fired at 3.25x.
+    assert rvol_spike(current_with_gap, complete_anchors) is None
+
+
 def test_range_expansion_fires_on_an_outsized_bar():
     anchors = _flat_anchors()
     calm = [_bar(i, 100.0, spread=0.1) for i in range(15)]
@@ -284,6 +322,40 @@ def test_relative_strength_break_returns_none_when_the_proxy_has_not_caught_up_y
     anchors = _flat_anchors(prior_close=95.0)
     bars = [_bar(i, 100.0 + (i % 2) * 0.05) for i in range(16)] + [_bar(16, 130.0)]
     spy_bars = [_spy_bar(i, 400.0) for i in range(10)]  # shorter than bars — not aligned yet
+    assert relative_strength_break(bars, anchors, {"SPY": spy_bars}) is None
+
+
+def test_relative_strength_break_aligns_symbol_and_proxy_by_exact_timestamp():
+    anchors = _flat_anchors(prior_close=95.0)
+    # TEST is missing 09:55. Both instruments are otherwise in lockstep,
+    # including the +30% final bar at 10:55.
+    bars = [
+        _bar(i, 130.0 if i == 17 else 100.0)
+        for i in range(18)
+        if i != 5
+    ]
+    spy_bars = [
+        _spy_bar(i, 520.0 if i == 17 else 400.0)
+        for i in range(18)
+    ]
+
+    # Positional alignment compared TEST's 10:55 jump with SPY's 10:50
+    # flat bar and fabricated relative strength. Timestamp alignment sees
+    # both instruments move together and correctly abstains.
+    assert relative_strength_break(bars, anchors, {"SPY": spy_bars}) is None
+
+
+def test_relative_strength_break_abstains_when_required_proxy_timestamp_is_missing():
+    anchors = _flat_anchors(prior_close=95.0)
+    bars = [_bar(i, 100.0) for i in range(16)] + [_bar(16, 130.0)]
+    spy_bars = [
+        _spy_bar(i, 400.0)
+        for i in range(18)
+        if i != 16
+    ]
+
+    # The proxy list is as long as the symbol list, but the required 10:50
+    # bar is absent. Length cannot prove temporal alignment.
     assert relative_strength_break(bars, anchors, {"SPY": spy_bars}) is None
 
 

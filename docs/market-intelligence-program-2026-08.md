@@ -54,9 +54,11 @@ if the symbols had been promoted earlier.
 
 ### P1 — signal truth and data integrity
 
-5. The time-of-day alignment bug remains open in `rvol_spike` and
-   `relative_strength_break`: a missing bar can shift positional
-   baselines for the rest of a session.
+5. **Resolved:** `rvol_spike` now keys both historical and current
+   cumulative-volume baselines by DST-aware RTH wall-clock slot, and
+   `relative_strength_break` joins symbol and proxy bars by exact timestamp.
+   Missing or duplicate required proxy timestamps fail closed. Regression
+   tests cover both former false-signal paths after a silently omitted bar.
 6. Manual/cron cache acquisition can still finish with `gave up` while
    exiting zero, and final-path CSV writes are not atomic.
 7. Contract-forward outcome fetches still conflate vendor failure with a
