@@ -106,7 +106,11 @@ if the symbols had been promoted earlier.
 13. A real off-box restore drill is still owed.
 14. Deployment should be one exact-revision wrapper, not a command pattern
     an operator must reconstruct.
-15. Metrics writes need atomic replace and corruption preservation.
+15. **Resolved:** metrics writes use a flushed, fsynced same-directory
+    temporary file and atomic replace. Invalid JSON or a non-object root is
+    logged loudly and copied to a collision-safe sibling before counters
+    restart; failure to preserve or read the original aborts the increment,
+    and failed publication leaves the previous file intact.
 16. Universe/screening retention needs a separately reviewed archival job;
     observability must not be deleted in the change that first records it.
 
@@ -231,6 +235,10 @@ evidence.
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a
   validator-only allowlist, while neutral throughput counters remain absent.
+- Metrics durability: implemented with same-directory atomic publication,
+  corrupt-byte preservation, fail-closed unreadable/backup behavior, and
+  crash-path regressions that prove the previous counter file survives a
+  simulated replacement failure.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the

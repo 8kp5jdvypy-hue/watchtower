@@ -170,10 +170,10 @@ called the whole set untriaged:
 - **#22 (Watchlist error discarded)** — **DONE**: both watchlist and
   `fetchToday` failures are surfaced; unknown signal state renders checking/
   unavailable and never the false calm `quiet` label.
-- **#9, #11, #12, #14, #16, #19, #20, #24** — **DONE**; see the corresponding
+- **#9, #11, #12, #14–#16, #19, #20, #24** — **DONE**; see the corresponding
   resolution evidence and regression tests in `full-code-review.md`.
 - **#8** is **DONE**: independently tested and merged in PR #134.
-- **#6, #10, #15, #17–#18, #21, #23, #25–#27 remain open.** #6's mass-delist
+- **#6, #10, #17–#18, #21, #23, #25–#27 remain open.** #6's mass-delist
   half is guarded ([#37](https://github.com/8kp5jdvypy-hue/watchtower/pull/37)),
   which closes its destructive path but not the whole finding.
 - The **Priority 2** `rvol_spike`/`relative_strength_break` timestamp
