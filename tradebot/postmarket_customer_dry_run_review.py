@@ -6,6 +6,7 @@ append-only attestation; it cannot send an alert or change a routing decision.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
@@ -17,6 +18,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
+
+from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_VERSION,
+    parse_campaign_policy,
+)
 
 
 CASE_VERSION = 1
@@ -117,6 +123,103 @@ class RecordedReview:
     verdict: str
     case_evidence_sha256: str
     review_payload_sha256: str
+
+
+def _read_json_file(path: Path, context: str) -> tuple[dict[str, object], bytes]:
+    if path.is_symlink():
+        raise ValueError(f"{context} cannot be a symlink")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"{context} must be a regular file")
+    raw = resolved.read_bytes()
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError(f"{context} root must be an object")
+    return payload, raw
+
+
+def _campaign_scope(
+    campaign: Mapping[str, object], campaign_sha256: str,
+) -> tuple[tuple[str, ...], str, str, str]:
+    required = {
+        "schema_version", "status", "campaign_id", "locked_at_utc",
+        "coverage_start", "coverage_end", "expected_sessions",
+        "delivery_policy_sha256", "owner_authorization_sha256",
+        "owner_authorization_expires_at_utc", "release_id", "router_version",
+        "rank_version", "control_evidence_sha256s", "policy",
+    }
+    if set(campaign) != required or campaign["schema_version"] != CAMPAIGN_VERSION:
+        raise ValueError("campaign contract is not exact")
+    if campaign["status"] != "locked":
+        raise ValueError("campaign must be locked")
+    parse_campaign_policy(campaign["policy"])
+    sessions = campaign["expected_sessions"]
+    if not isinstance(sessions, list) or not sessions or any(
+        not isinstance(item, str) for item in sessions
+    ):
+        raise ValueError("campaign expected_sessions are invalid")
+    _sha256(campaign_sha256, "campaign_sha256")
+    return (
+        tuple(sessions),
+        _sha256(campaign["delivery_policy_sha256"], "delivery_policy_sha256"),
+        _sha256(
+            campaign["owner_authorization_sha256"],
+            "owner_authorization_sha256",
+        ),
+        _revision(
+            campaign["policy"]["allowed_runtime_router_revisions"][0],
+            "runtime_router_revision",
+        ),
+    )
+
+
+def list_eligible_review_cases(
+    conn: sqlite3.Connection,
+    *,
+    campaign: Mapping[str, object],
+    campaign_sha256: str,
+) -> tuple[dict[str, object], ...]:
+    """List only point-in-time eligible routes in the locked campaign scope."""
+    sessions, policy_sha, authorization_sha, revision = _campaign_scope(
+        campaign, campaign_sha256
+    )
+    placeholders = ",".join("?" for _ in sessions)
+    has_reviews = bool(conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' "
+        "AND name='postmarket_customer_dry_run_reviews'"
+    ).fetchone())
+    review_select = "COUNT(r.review_id)" if has_reviews else "0"
+    review_join = (
+        "LEFT JOIN postmarket_customer_dry_run_reviews r "
+        "ON r.route_id=d.route_id AND r.campaign_sha256=?"
+        if has_reviews else ""
+    )
+    parameters: tuple[object, ...] = (
+        (campaign_sha256,) if has_reviews else ()
+    ) + (*sessions, policy_sha, authorization_sha, revision)
+    rows = conn.execute(
+        f"""
+        SELECT d.route_id,d.session,d.symbol,d.direction,d.evaluated_at_utc,
+               d.rank_run_id,d.candidate_id,d.transition_id,
+               {review_select} AS review_count
+        FROM postmarket_delivery_dry_runs d
+        {review_join}
+        WHERE d.session IN ({placeholders})
+          AND d.decision='ELIGIBLE_FOR_DRY_RUN'
+          AND d.presentation='ACTIONABLE'
+          AND d.policy_sha256=? AND d.authorization_sha256=?
+          AND d.runtime_router_revision=?
+        GROUP BY d.route_id
+        ORDER BY d.session,d.evaluated_at_utc,d.route_id
+        """,
+        parameters,
+    ).fetchall()
+    return tuple({
+        "route_id": int(row[0]), "session": row[1], "symbol": row[2],
+        "direction": row[3], "evaluated_at_utc": row[4],
+        "rank_run_id": int(row[5]), "candidate_id": int(row[6]),
+        "transition_id": int(row[7]), "review_count": int(row[8]),
+    } for row in rows)
 
 
 def _digest(payload: Mapping[str, object]) -> str:
@@ -434,3 +537,80 @@ def record_independent_review(
         case_evidence_sha256=str(case["case_evidence_sha256"]),
         review_payload_sha256=payload_sha,
     )
+
+
+def _readonly_connection(path: Path) -> sqlite3.Connection:
+    resolved = path.resolve(strict=True)
+    return sqlite3.connect(f"file:{resolved}?mode=ro", uri=True)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list", help="list eligible campaign cases")
+    list_parser.add_argument("--db", required=True, type=Path)
+    list_parser.add_argument("--campaign", required=True, type=Path)
+
+    export_parser = subparsers.add_parser("export", help="export one blinded case")
+    export_parser.add_argument("--db", required=True, type=Path)
+    export_parser.add_argument("--campaign", required=True, type=Path)
+    export_parser.add_argument("--route-id", required=True, type=int)
+    export_parser.add_argument("--output", required=True, type=Path)
+
+    record_parser = subparsers.add_parser("record", help="append one review")
+    record_parser.add_argument("--db", required=True, type=Path)
+    record_parser.add_argument("--case", required=True, type=Path)
+    record_parser.add_argument("--assessment", required=True, type=Path)
+    args = parser.parse_args(argv)
+
+    if args.command in {"list", "export"}:
+        campaign, campaign_raw = _read_json_file(args.campaign, "campaign")
+        campaign_sha = hashlib.sha256(campaign_raw).hexdigest()
+        conn = _readonly_connection(args.db)
+        try:
+            if args.command == "list":
+                cases = list_eligible_review_cases(
+                    conn, campaign=campaign, campaign_sha256=campaign_sha
+                )
+                print(json.dumps(cases, indent=2, sort_keys=True))
+                return 0
+            eligible = {
+                item["route_id"] for item in list_eligible_review_cases(
+                    conn, campaign=campaign, campaign_sha256=campaign_sha
+                )
+            }
+            if args.route_id not in eligible:
+                raise ValueError("route is not eligible in the locked campaign scope")
+            case = build_review_case(
+                conn,
+                campaign_sha256=campaign_sha,
+                route_id=args.route_id,
+                exported_at=datetime.now(timezone.utc),
+            )
+        finally:
+            conn.close()
+        artifact_sha = write_review_case_atomic(args.output, case)
+        print(json.dumps({
+            "route_id": args.route_id,
+            "case_evidence_sha256": case["case_evidence_sha256"],
+            "artifact_sha256": artifact_sha,
+            "path": str(args.output),
+        }, sort_keys=True, separators=(",", ":")))
+        return 0
+
+    case, _ = _read_json_file(args.case, "review case")
+    assessment, _ = _read_json_file(args.assessment, "review assessment")
+    conn = sqlite3.connect(args.db, timeout=30)
+    try:
+        result = record_independent_review(
+            conn, case=case, assessment=assessment
+        )
+    finally:
+        conn.close()
+    print(json.dumps(asdict(result), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
