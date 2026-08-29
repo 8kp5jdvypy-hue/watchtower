@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_delivery_authorization_v1.schema.json",
+  "title": "Postmarket customer-delivery owner authorization v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_id",
+    "approved_by",
+    "approved_at_utc",
+    "expires_at_utc",
+    "policy_sha256",
+    "evidence_set_sha256",
+    "evidence_gate_sha256",
+    "router_revision",
+    "acknowledgement",
+    "dry_run_readiness_approved"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_id": {"type": "string", "minLength": 1},
+    "approved_by": {"type": "string", "minLength": 1},
+    "approved_at_utc": {"type": "string", "format": "date-time"},
+    "expires_at_utc": {"type": "string", "format": "date-time"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_set_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_gate_sha256": {"$ref": "#/$defs/sha256"},
+    "router_revision": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "acknowledgement": {
+      "const": "I approve this exact evidence-bound policy for postmarket customer-alert readiness review; this does not enable or send alerts."
+    },
+    "dry_run_readiness_approved": {"const": true}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
