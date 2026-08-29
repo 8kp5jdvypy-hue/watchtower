@@ -24,6 +24,9 @@ from tradebot.postmarket_delivery_dry_run import (
     record_dry_run_tick,
     route_dry_run,
 )
+from tradebot.postmarket_delivery_dry_run_audit import (
+    write_completed_dry_run_audits,
+)
 from tradebot.postmarket_delivery_readiness import (
     DECISION_ELIGIBLE,
     DeliveryCandidate,
@@ -48,6 +51,7 @@ POLICY_PATH = REPO_ROOT / "data" / "postmarket_customer_delivery_policy.json"
 AUTHORIZATION_PATH = (
     REPO_ROOT / "data" / "postmarket_customer_delivery_authorization.json"
 )
+AUDIT_DIR = REPO_ROOT / "data" / "postmarket_audits"
 RUN_MODE = "postmarket-customer-readiness-dry-run"
 POLL_SECONDS = 60
 IDLE_SECONDS = 300
@@ -465,9 +469,37 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
+            try:
+                audits = write_completed_dry_run_audits(
+                    SHADOW_PATH,
+                    AUDIT_DIR,
+                    now=now,
+                    audit_code_version=version,
+                )
+            except Exception:
+                logger.exception("postmarket customer dry-run daily audit failed")
+                audit_payload: dict[str, object] = {"audit_status": "failed"}
+            else:
+                audit_payload = {
+                    "audit_status": "written" if audits else "current",
+                    "audits_written": len(audits),
+                }
+                if audits:
+                    latest = audits[-1]
+                    audit_payload["latest_audit"] = {
+                        "session": latest.session,
+                        "operational_clean": latest.operational_clean,
+                        "session_evidence_eligible": latest.session_evidence_eligible,
+                        "issue_codes": [issue.code for issue in latest.issues],
+                    }
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
-                _heartbeat("idle", now, release_id=authorization.release_id),
+                _heartbeat(
+                    "idle",
+                    now,
+                    release_id=authorization.release_id,
+                    **audit_payload,
+                ),
             )
             time.sleep(idle_sleep_seconds(now))
             continue
@@ -475,11 +507,17 @@ def main() -> int:
         assert window is not None
         session = window[0]
         session_close = window[1]
-        scheduled_at = dry_run_scheduled_at(now, session_close=session_close)
         operational_status, operational_reasons = discovery_operational_status(
             DISCOVERY_HEARTBEAT_PATH,
             now=now,
             allowed_revisions=policy.allowed_evidence_revisions,
+        )
+        # Attribute scheduling lag from the instant immediately before the
+        # cycle starts.  Contract/heartbeat work must not be hidden from the
+        # persisted timing evidence or accidentally select the prior slot.
+        tick_now = _utc_now()
+        scheduled_at = dry_run_scheduled_at(
+            tick_now, session_close=session_close
         )
         write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("running", now))
         try:
@@ -488,7 +526,7 @@ def main() -> int:
                 policy,
                 authorization,
                 session=session,
-                now=now,
+                now=tick_now,
                 runtime_router_revision=version,
                 run_id=run_id,
                 operational_status=operational_status,

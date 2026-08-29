@@ -78,6 +78,18 @@ session, rank run, policy, authorization, and runtime revision. Exact reruns
 are idempotent; conflicting evidence for an existing scheduled slot fails
 rather than replacing the first record.
 
+After the complete exchange-calendar session and final-bar processing grace,
+`tradebot.postmarket_delivery_dry_run_audit` independently reconstructs the
+close-anchored schedule from the append-only database. It does not trust the
+service heartbeat. The immutable daily report reconciles every expected slot,
+tick/decision conservation, exact route links, orphan routes, eligible
+identity uniqueness, policy/authorization/runtime drift, rank availability,
+degraded cycles, invariants, scheduled lag, and processing latency. Any gap or
+inconsistency makes both `operational_clean` and
+`session_evidence_eligible` false. Reports conform to
+`truth/postmarket_customer_dry_run_audit_v1.schema.json` and are written
+exclusively under `data/postmarket_audits` without replacement.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed
@@ -158,10 +170,11 @@ different, separately controlled owner action.
 
 ## Still required before customer delivery
 
-This foundation intentionally leaves delivery unimplemented. A later,
-separately reviewed change must provide an isolated supervised router service,
-customer eligibility and quiet-hours behavior, stale/degraded rendering, a
-dedicated kill-switch control, failure injection, rollback evidence, an
-immutable delivery ledger, and explicit owner activation.
-Those controls must be proven against the evidence-qualified revision before
-any customer-alert readiness claim.
+Customer delivery remains intentionally unimplemented. The supervised router
+is evidence-only: it has no users/outbox/provider/alert/order/network path and
+can produce only `ELIGIBLE_FOR_DRY_RUN` or `SUPPRESSED` ledger rows. Its
+default-off switch, failure injection, rollback, isolation controls, cycle
+timing, and daily audits must first accumulate the prospectively required
+clean sessions. A later customer-delivery implementation still requires a
+separate design, review, policy, owner activation, and release gate; no dry-run
+result can enable it.
