@@ -60,4 +60,5 @@ exercises are documented in
 `docs/postmarket-discovery-control-evidence.md`. They certify only those named
 controls at an exact revision. They do not replace the market-wide census,
 independent-provider proof, empirical holdout, complete clean sessions, or the
-future aggregate discovery readiness gate.
+aggregate discovery readiness gate documented in
+`docs/postmarket-discovery-evidence-gate.md`.
