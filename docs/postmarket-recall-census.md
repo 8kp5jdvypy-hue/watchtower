@@ -1,10 +1,12 @@
 # Postmarket full-universe recall census
 
-The live market-wide observer begins with bounded Alpaca top-mover and
-most-active lists. Those lists are useful discovery inputs, not proof that
-Perch watched every active symbol. The recall census independently snapshots
-the active universe after the postmarket window and evaluates every symbol from
-completed five-minute SIP bars.
+The live market-wide observer combines bounded Alpaca top-mover/most-active
+lists with a deterministic full-universe sweep. The bounded lists provide fast
+attention to conspicuous names; the sweep partitions the active universe into
+five disjoint shards and covers one shard per minute, so a complete cycle
+matches the five-minute completed-bar cadence. The recall census independently
+snapshots the active universe after the postmarket window and evaluates every
+symbol from completed five-minute SIP bars.
 
 ## Bounded full-market execution
 
@@ -28,8 +30,8 @@ symbol/direction pairs with the append-only Stage-1 candidate ledger.
 
 False-negative reasons distinguish:
 
-- `NOT_RETURNED_BY_BOUNDED_SCREEN`: the symbol never appeared in any Stage-1
-  observation; and
+- `NOT_OBSERVED_BY_LIVE_DISCOVERY`: the symbol never appeared in any bounded or
+  sweep observation; and
 - `RETURNED_NOT_CONFIRMED`: Stage 1 saw the symbol, but the live evaluator never
   recorded the qualifying direction.
 

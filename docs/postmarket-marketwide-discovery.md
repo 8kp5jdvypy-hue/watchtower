@@ -10,10 +10,10 @@ the outbox, a broker, or an order path. Its only durable output is append-only
 evidence in `data/postmarket_shadow.db`, which is already included in local and
 encrypted off-box backups.
 
-## Two-stage coverage
+## Two-lane discovery, one strict evaluator
 
-Stage 1 uses Alpaca's real-time SIP stock screeners at their maximum documented
-bound of 50 rows per side/list:
+The fast lane uses Alpaca's real-time SIP stock screeners at their maximum
+documented bound of 50 rows per side/list:
 
 - market gainers;
 - market losers;
@@ -22,13 +22,21 @@ bound of 50 rows per side/list:
 
 Alpaca performs the market-wide ranking. Perch records the requested bound,
 endpoint set, provider timestamps, returned rows, unique symbols, active-universe
-count, excluded symbols, and the aggregate active-universe count not returned by
-the bounded provider screen. A top-N response is never represented as a full
+count and excluded symbols. A top-N response is never represented as a full
 per-symbol census.
 
-Stage 2 deduplicates that union, annotates scheduled earnings overlap, bulk-fetches
-one SIP five-minute session snapshot, and invokes the existing strict reaction
-evaluator. A provider screener percentage is never enough to create a candidate.
+The coverage lane sorts the canonical active universe, SHA-256 binds that exact
+snapshot, divides it into five deterministic disjoint shards, and requests one
+shard per exchange-close-anchored minute. A complete five-tick cycle therefore
+covers every active symbol once at the same cadence as completed five-minute
+bars. With roughly 13,100 active symbols, a normal shard is about 2,620 symbols;
+the implementation refuses a shard above the explicit 4,000-symbol safety
+bound. The vendor adapter further divides each shard into bounded 1,500-symbol
+requests and fetches only the final RTH bar plus the elapsed postmarket window.
+
+The service unions both lanes, deduplicates overlap, annotates scheduled
+earnings, and invokes the existing strict reaction evaluator. A provider
+screener percentage or sweep membership is never enough to create a candidate.
 Qualification still requires:
 
 - the actual exchange-calendar RTH closing bar;
@@ -38,9 +46,17 @@ Qualification still requires:
 - fresh, ordered, unique, contiguous, nonzero-volume, valid OHLC bars; and
 - no unstable close/last-print divergence.
 
-Missing bulk-bar responses become explicit `FETCH_ERROR` observations. Every
-discovered symbol must have exactly one evaluation, and tick-level conservation
-invariants are persisted with the source evidence.
+Missing bulk-bar responses become explicit `FETCH_ERROR` observations. A sweep
+request failure cannot fabricate a candidate and does not erase valid results
+from the bounded lane. Every discovered symbol has exactly one evaluation.
+Version-2 tick evidence stores provider counts separately from sweep universe
+digest, schedule, shard index/count/size, overlap, and per-symbol universe
+position, with tick-level conservation invariants.
+
+This closes the structural top-200 recall hole; it does not by itself prove
+complete live coverage. Provider omissions, latency, restarts, and missed cycles
+remain measurable failure modes. The independent same-night full-universe
+recall census remains mandatory.
 
 ## Enablement
 

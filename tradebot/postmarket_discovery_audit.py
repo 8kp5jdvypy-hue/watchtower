@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as ecals
 
 
-AUDIT_VERSION = 3
+AUDIT_VERSION = 4
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "postmarket_shadow.db"
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
@@ -37,7 +37,12 @@ FINAL_BAR_GRACE = timedelta(minutes=5)
 EXPECTED_PROVIDER = "alpaca"
 EXPECTED_FEED = "sip"
 EXPECTED_TIMEFRAME = "5Min"
-EXPECTED_SCOPE = "alpaca_top_movers_and_actives"
+EXPECTED_SCOPES = {
+    1: "alpaca_top_movers_and_actives",
+    2: "alpaca_top_movers_actives_plus_full_universe_sweep",
+}
+FULL_UNIVERSE_SWEEP_SOURCE = "full_universe_sweep"
+EXPECTED_SWEEP_CYCLE_TICKS = 5
 EXPECTED_ENDPOINTS = {
     "market_movers",
     "most_actives_volume",
@@ -534,6 +539,7 @@ def audit_discovery_session(
     observations_by_symbol: dict[str, list[sqlite3.Row]] = defaultdict(list)
     source_observations: Counter[str] = Counter()
     scheduled_symbols: set[str] = set()
+    sweep_positions_by_tick: dict[int, dict[int, str]] = defaultdict(dict)
     max_source_ages: list[float] = []
     updates_by_tick: dict[int, dict[str, datetime]] = {}
     ticks_by_id = {row["tick_id"]: row for row in ticks}
@@ -565,8 +571,16 @@ def audit_discovery_session(
             source_observations.update(sources)
             if "scheduled_earnings" in sources:
                 scheduled_symbols.add(row["symbol"])
-            provider_sources = set(sources) - {"scheduled_earnings"}
-            if not provider_sources or not provider_sources <= SOURCE_ENDPOINT.keys():
+            discovery_version = int(ticks_by_id[tick_id]["discovery_version"])
+            attributable_sources = set(sources) - {"scheduled_earnings"}
+            provider_sources = attributable_sources - {FULL_UNIVERSE_SWEEP_SOURCE}
+            has_sweep = FULL_UNIVERSE_SWEEP_SOURCE in attributable_sources
+            if (
+                not attributable_sources
+                or not provider_sources <= SOURCE_ENDPOINT.keys()
+                or (discovery_version == 1 and has_sweep)
+                or (discovery_version == 2 and not (provider_sources or has_sweep))
+            ):
                 _issue(
                     issues,
                     "OBSERVATION_SOURCE_INVALID",
@@ -576,7 +590,7 @@ def audit_discovery_session(
                 row["screen_evidence_json"], f"tick {tick_id} screen evidence"
             )
             evidence_sources = {item.get("source") for item in evidence if isinstance(item, dict)}
-            if evidence_sources != provider_sources:
+            if evidence_sources != attributable_sources:
                 _issue(
                     issues,
                     "SCREEN_EVIDENCE_SOURCE_MISMATCH",
@@ -585,7 +599,65 @@ def audit_discovery_session(
             updates = updates_by_tick.get(tick_id, {})
             evidence_pairs: list[tuple[str, int]] = []
             for item in evidence:
-                if not isinstance(item, dict) or item.get("source") not in SOURCE_ENDPOINT:
+                if not isinstance(item, dict):
+                    _issue(
+                        issues,
+                        "MALFORMED_SCREEN_EVIDENCE",
+                        f"{row['symbol']} has malformed evidence at tick {tick_id}",
+                    )
+                    continue
+                if item.get("source") == FULL_UNIVERSE_SWEEP_SOURCE:
+                    tick = ticks_by_id[tick_id]
+                    timing = timing_by_tick.get(int(tick_id))
+                    expected_scheduled = (
+                        timing["scheduled_tick_utc"] if timing is not None else None
+                    )
+                    expected = {
+                        "source": FULL_UNIVERSE_SWEEP_SOURCE,
+                        "scheduled_tick_utc": expected_scheduled,
+                        "universe_sha256": tick["sweep_universe_sha256"],
+                        "cycle_ticks": tick["sweep_cycle_ticks"],
+                        "shard_index": tick["sweep_shard_index"],
+                        "shard_count": tick["sweep_shard_count"],
+                        "shard_size": tick["sweep_shard_size"],
+                    }
+                    universe_symbols = tick["universe_symbols"]
+                    shard_size = tick["sweep_shard_size"]
+                    shard_index = tick["sweep_shard_index"]
+                    numeric_sweep_metadata = all(
+                        isinstance(value, int) and not isinstance(value, bool)
+                        for value in (universe_symbols, shard_size, shard_index)
+                    )
+                    valid_position = (
+                        numeric_sweep_metadata
+                        and isinstance(item.get("universe_position"), int)
+                        and not isinstance(item.get("universe_position"), bool)
+                        and shard_size > 0
+                        and 0 <= item["universe_position"] < universe_symbols
+                        and item["universe_position"] // shard_size == shard_index
+                    )
+                    if (
+                        discovery_version != 2
+                        or any(item.get(key) != value for key, value in expected.items())
+                        or not valid_position
+                    ):
+                        _issue(
+                            issues,
+                            "SWEEP_EVIDENCE_INVALID",
+                            f"{row['symbol']} has invalid sweep evidence at tick {tick_id}",
+                        )
+                    else:
+                        position = int(item["universe_position"])
+                        prior_symbol = sweep_positions_by_tick[int(tick_id)].get(position)
+                        if prior_symbol is not None and prior_symbol != row["symbol"]:
+                            _issue(
+                                issues,
+                                "SWEEP_POSITION_DUPLICATED",
+                                f"tick {tick_id} maps position {position} to multiple symbols",
+                            )
+                        sweep_positions_by_tick[int(tick_id)][position] = row["symbol"]
+                    continue
+                if item.get("source") not in SOURCE_ENDPOINT:
                     _issue(
                         issues,
                         "MALFORMED_SCREEN_EVIDENCE",
@@ -679,8 +751,104 @@ def audit_discovery_session(
             )
         if row["screen_unique_symbols"] > row["screen_rows"]:
             _issue(issues, "SCREEN_COUNT_INVALID", f"tick {tick_id} has impossible counts")
-        expected_rows = 4 * row["requested_top_n"]
-        if row["screen_rows"] != expected_rows:
+        discovery_version = int(row["discovery_version"])
+        if discovery_version == 2:
+            sweep_values = (
+                row["provider_screen_rows"],
+                row["provider_screen_unique_symbols"],
+                row["sweep_universe_sha256"],
+                row["sweep_cycle_ticks"],
+                row["sweep_shard_index"],
+                row["sweep_shard_count"],
+                row["sweep_shard_size"],
+                row["sweep_shard_symbols"],
+                row["sweep_overlap_symbols"],
+            )
+            numeric_sweep_values = (
+                row["provider_screen_rows"],
+                row["provider_screen_unique_symbols"],
+                row["sweep_cycle_ticks"],
+                row["sweep_shard_index"],
+                row["sweep_shard_count"],
+                row["sweep_shard_size"],
+                row["sweep_shard_symbols"],
+                row["sweep_overlap_symbols"],
+            )
+            if any(value is None for value in sweep_values) or not all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in numeric_sweep_values
+            ):
+                _issue(issues, "SWEEP_METADATA_MISSING", f"tick {tick_id} lacks sweep metadata")
+                expected_rows = None
+            else:
+                expected_shard_count = min(
+                    int(row["sweep_cycle_ticks"]), int(row["universe_symbols"])
+                )
+                start = int(row["sweep_shard_index"]) * int(row["sweep_shard_size"])
+                expected_shard_symbols = max(
+                    0,
+                    min(
+                        int(row["sweep_shard_size"]),
+                        int(row["universe_symbols"]) - start,
+                    ),
+                )
+                timing = timing_by_tick.get(int(tick_id))
+                expected_index = None
+                if timing is not None and expected_shard_count and expected_start is not None:
+                    scheduled = _aware_datetime(
+                        timing["scheduled_tick_utc"],
+                        f"tick {tick_id} scheduled sweep time",
+                    )
+                    expected_index = int(
+                        (scheduled - expected_start).total_seconds() // 60
+                    ) % expected_shard_count
+                sweep_conserved = (
+                    int(row["sweep_cycle_ticks"]) == EXPECTED_SWEEP_CYCLE_TICKS
+                    and int(row["sweep_shard_count"]) == expected_shard_count
+                    and 0 <= int(row["sweep_shard_index"]) < expected_shard_count
+                    and int(row["sweep_shard_symbols"]) == expected_shard_symbols
+                    and 0 <= int(row["sweep_overlap_symbols"])
+                    <= min(
+                        int(row["provider_screen_unique_symbols"]),
+                        int(row["sweep_shard_symbols"]),
+                    )
+                    and int(row["screen_rows"])
+                    == int(row["provider_screen_rows"])
+                    + int(row["sweep_shard_symbols"])
+                    and int(row["screen_unique_symbols"])
+                    == int(row["provider_screen_unique_symbols"])
+                    + int(row["sweep_shard_symbols"])
+                    - int(row["sweep_overlap_symbols"])
+                    and len(str(row["sweep_universe_sha256"])) == 64
+                    and all(
+                        character in "0123456789abcdef"
+                        for character in str(row["sweep_universe_sha256"])
+                    )
+                    and (expected_index is None or int(row["sweep_shard_index"]) == expected_index)
+                )
+                if not sweep_conserved:
+                    _issue(
+                        issues,
+                        "SWEEP_INVARIANT_FAILED",
+                        f"tick {tick_id} did not conserve its deterministic universe shard",
+                    )
+                expected_positions = set(
+                    range(start, start + expected_shard_symbols)
+                )
+                actual_positions = set(sweep_positions_by_tick[int(tick_id)])
+                if actual_positions != expected_positions:
+                    _issue(
+                        issues,
+                        "SWEEP_POSITION_COVERAGE_MISMATCH",
+                        f"tick {tick_id} stored {len(actual_positions)} of "
+                        f"{len(expected_positions)} expected sweep positions",
+                    )
+                expected_rows = 4 * row["requested_top_n"] + int(
+                    row["sweep_shard_symbols"]
+                )
+        else:
+            expected_rows = 4 * row["requested_top_n"]
+        if expected_rows is not None and row["screen_rows"] != expected_rows:
             _issue(
                 issues,
                 "SCREEN_SCOPE_UNDERFILLED",
@@ -712,6 +880,11 @@ def audit_discovery_session(
         "ENDPOINT_DRIFT": {row["endpoints_json"] for row in ticks},
         "THRESHOLD_DRIFT": {row["thresholds_json"] for row in ticks},
         "UNIVERSE_COUNT_DRIFT": {row["universe_symbols"] for row in ticks},
+        "SWEEP_UNIVERSE_DIGEST_DRIFT": {
+            row["sweep_universe_sha256"]
+            for row in ticks
+            if int(row["discovery_version"]) == 2
+        },
     }
     for code, values in metadata_checks.items():
         if len(values) > 1:
@@ -724,7 +897,10 @@ def audit_discovery_session(
         _issue(issues, "UNEXPECTED_PROVIDER", "one or more ticks used another provider")
     if any(row["bar_timeframe"] != EXPECTED_TIMEFRAME for row in ticks):
         _issue(issues, "UNEXPECTED_TIMEFRAME", "one or more ticks used another timeframe")
-    if any(row["discovery_scope"] != EXPECTED_SCOPE for row in ticks):
+    if any(
+        row["discovery_scope"] != EXPECTED_SCOPES.get(int(row["discovery_version"]))
+        for row in ticks
+    ):
         _issue(issues, "UNEXPECTED_DISCOVERY_SCOPE", "one or more ticks used another scope")
     if any(not 1 <= row["requested_top_n"] <= 50 for row in ticks):
         _issue(issues, "REQUESTED_TOP_N_INVALID", "one or more ticks used an invalid bound")

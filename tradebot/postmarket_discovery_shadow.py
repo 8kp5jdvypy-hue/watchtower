@@ -22,10 +22,13 @@ from tradebot.postmarket import (
     fetch_error_evaluation,
 )
 from tradebot.postmarket_discovery import (
+    FULL_UNIVERSE_SWEEP_CYCLE_TICKS,
+    FULL_UNIVERSE_SWEEP_SOURCE,
     DiscoveryTiming,
     DiscoverySelection,
     connect as connect_discovery,
     plan_tick_schedule,
+    plan_universe_sweep,
     record_discovery_tick,
     select_discovery_symbols,
 )
@@ -90,6 +93,11 @@ class DiscoveryTickResult:
     tick_id: int
     universe_symbols: int
     screen_rows: int
+    provider_screen_unique_symbols: int
+    sweep_shard_index: int | None
+    sweep_shard_count: int | None
+    sweep_shard_symbols: int
+    sweep_overlap_symbols: int
     discovered_symbols: int
     fetched_symbols: int
     evaluated_symbols: int
@@ -150,6 +158,12 @@ def _bars_fetch(symbols: list[str], session: date):
     from tradebot.vendors.alpaca import fetch_intraday_bars_bulk
 
     return fetch_intraday_bars_bulk(symbols, session)
+
+
+def _sweep_bars_fetch(symbols: list[str], start: datetime, end: datetime):
+    from tradebot.vendors.alpaca import fetch_intraday_bars_window_bulk
+
+    return fetch_intraday_bars_window_bulk(symbols, start=start, end=end)
 
 
 def _census_bars_fetch(symbols: list[str], start: datetime, end: datetime):
@@ -265,14 +279,33 @@ def run_discovery_tick(
     data_feed: str,
     screen_fetch: Callable[[int], MarketWideScreen] = _screen_fetch,
     bars_fetch: Callable[[list[str], date], dict] = _bars_fetch,
+    sweep_bars_fetch: Callable[[list[str], datetime, datetime], dict] = _sweep_bars_fetch,
+    sweep_cycle_ticks: int | None = None,
     top_n: int = SCREEN_TOP_N,
     clock: Callable[[], float] | None = None,
 ) -> tuple[DiscoveryTickResult, DiscoverySelection, list[ReactionEvaluation]]:
-    """Screen the market, bulk-fetch the bounded union, and conserve every row."""
+    """Union the bounded screen and one universe shard, then conserve every row."""
     window = postmarket_window(now)
     if window is None or not (window[1] <= now <= window[2]):
         raise ValueError("run_discovery_tick requires an active postmarket window")
     session, session_close, _ = window
+    schedule = plan_tick_schedule(
+        shadow_conn,
+        session=session,
+        session_close=session_close,
+        actual_start=now,
+        interval_seconds=POLL_SECONDS,
+    )
+    universe_sweep = (
+        plan_universe_sweep(
+            active_universe,
+            scheduled_tick_utc=schedule.scheduled_tick_utc,
+            session_close=session_close,
+            cycle_ticks=sweep_cycle_ticks,
+        )
+        if sweep_cycle_ticks is not None
+        else None
+    )
     timer = clock or time.perf_counter
     started = timer()
     screen = screen_fetch(top_n)
@@ -280,17 +313,56 @@ def run_discovery_tick(
     _validate_screen(screen, now=now, data_feed=data_feed, top_n=top_n)
     if active_universe and not screen.entries:
         raise ValueError("market-wide screen returned no rows for a non-empty universe")
-    selection = select_discovery_symbols(screen, active_universe, scheduled_earnings)
+    selection = select_discovery_symbols(
+        screen,
+        active_universe,
+        scheduled_earnings,
+        universe_sweep,
+    )
     selection_done = timer()
     symbols = [row.symbol for row in selection.symbols]
-    bars_by_symbol = bars_fetch(symbols, session)
+    bounded_symbols = [
+        row.symbol
+        for row in selection.symbols
+        if any(source in SOURCE_ENDPOINT for source in row.sources)
+    ]
+    bounded_symbol_set = set(bounded_symbols)
+    sweep_only_symbols = [
+        row.symbol
+        for row in selection.symbols
+        if FULL_UNIVERSE_SWEEP_SOURCE in row.sources
+        and row.symbol not in bounded_symbol_set
+    ]
+    bars_by_symbol = bars_fetch(bounded_symbols, session)
+    sweep_failures: dict[str, Exception] = {}
+    if sweep_only_symbols:
+        try:
+            sweep_bars = sweep_bars_fetch(
+                sweep_only_symbols,
+                session_close - timedelta(minutes=5),
+                now,
+            )
+        except Exception as exc:
+            logger.exception("full-universe sweep bar fetch failed")
+            sweep_failures = {symbol: exc for symbol in sweep_only_symbols}
+        else:
+            duplicate = set(bars_by_symbol) & set(sweep_bars)
+            if duplicate:
+                raise ValueError(
+                    f"bounded and sweep bar responses overlap unexpectedly: {sorted(duplicate)[:5]}"
+                )
+            bars_by_symbol.update(sweep_bars)
     fetch_done = timer()
     evaluations: list[ReactionEvaluation] = []
     for symbol in symbols:
         bars = bars_by_symbol.get(symbol)
         if bars is None:
+            failure = sweep_failures.get(
+                symbol,
+                RuntimeError("missing from bulk bar response"),
+            )
             evaluations.append(
-                fetch_error_evaluation(symbol, session, RuntimeError("missing from bulk bar response"))
+                fetch_error_evaluation(symbol, session, failure)
             )
             continue
         try:
@@ -319,13 +391,6 @@ def run_discovery_tick(
         for row in evaluations
         if row.persistence_span_seconds is not None
     ]
-    schedule = plan_tick_schedule(
-        shadow_conn,
-        session=session,
-        session_close=session_close,
-        actual_start=now,
-        interval_seconds=POLL_SECONDS,
-    )
     timing = DiscoveryTiming(
         schedule=schedule,
         screen_latency_ms=screen_latency_ms,
@@ -358,6 +423,11 @@ def run_discovery_tick(
         tick_id=tick_id,
         universe_symbols=selection.universe_symbols,
         screen_rows=selection.screen_rows,
+        provider_screen_unique_symbols=selection.provider_screen_unique_symbols,
+        sweep_shard_index=(universe_sweep.shard_index if universe_sweep else None),
+        sweep_shard_count=(universe_sweep.shard_count if universe_sweep else None),
+        sweep_shard_symbols=(len(universe_sweep.symbols) if universe_sweep else 0),
+        sweep_overlap_symbols=selection.sweep_overlap_symbols,
         discovered_symbols=len(selection.symbols),
         fetched_symbols=sum(symbol in bars_by_symbol for symbol in symbols),
         evaluated_symbols=len(evaluations),
@@ -997,6 +1067,7 @@ def main() -> int:
                 run_id=run_id,
                 version=version,
                 data_feed=data_feed,
+                sweep_cycle_ticks=FULL_UNIVERSE_SWEEP_CYCLE_TICKS,
             )
         except Exception as exc:
             shadow_conn.rollback()
@@ -1008,12 +1079,18 @@ def main() -> int:
         else:
             logger.info(
                 "postmarket_discovery_tick tick=%s universe=%s screen_rows=%s "
+                "provider_unique=%s sweep_shard=%s/%s sweep_symbols=%s overlap=%s "
                 "discovered=%s fetched=%s evaluated=%s candidates=%s new=%s "
                 "errors=%s lag_ms=%s missed=%s screen_ms=%s selection_ms=%s "
                 "fetch_ms=%s evaluation_ms=%s persistence_max_s=%s total_ms=%s",
                 result.tick_id,
                 result.universe_symbols,
                 result.screen_rows,
+                result.provider_screen_unique_symbols,
+                result.sweep_shard_index,
+                result.sweep_shard_count,
+                result.sweep_shard_symbols,
+                result.sweep_overlap_symbols,
                 result.discovered_symbols,
                 result.fetched_symbols,
                 result.evaluated_symbols,

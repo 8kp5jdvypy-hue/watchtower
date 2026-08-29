@@ -6,7 +6,9 @@ volume/notional, persistence, freshness, and RTH-close baseline.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -25,8 +27,11 @@ from tradebot.postmarket import (
 )
 
 
-DISCOVERY_VERSION = 1
-DISCOVERY_SCOPE = "alpaca_top_movers_and_actives"
+DISCOVERY_VERSION = 2
+DISCOVERY_SCOPE = "alpaca_top_movers_actives_plus_full_universe_sweep"
+FULL_UNIVERSE_SWEEP_SOURCE = "full_universe_sweep"
+FULL_UNIVERSE_SWEEP_CYCLE_TICKS = 5
+MAX_FULL_UNIVERSE_SWEEP_SHARD_SIZE = 4_000
 
 DISCOVERY_SCHEMA = """
 CREATE TABLE IF NOT EXISTS postmarket_discovery_ticks (
@@ -48,6 +53,15 @@ CREATE TABLE IF NOT EXISTS postmarket_discovery_ticks (
     universe_symbols INTEGER NOT NULL,
     screen_rows INTEGER NOT NULL,
     screen_unique_symbols INTEGER NOT NULL,
+    provider_screen_rows INTEGER,
+    provider_screen_unique_symbols INTEGER,
+    sweep_universe_sha256 TEXT,
+    sweep_cycle_ticks INTEGER,
+    sweep_shard_index INTEGER,
+    sweep_shard_count INTEGER,
+    sweep_shard_size INTEGER,
+    sweep_shard_symbols INTEGER,
+    sweep_overlap_symbols INTEGER,
     excluded_symbols INTEGER NOT NULL,
     discovered_symbols INTEGER NOT NULL,
     not_returned_symbols INTEGER NOT NULL,
@@ -196,11 +210,28 @@ class DiscoveredSymbol:
 
 
 @dataclass(frozen=True)
+class UniverseSweep:
+    symbols: tuple[str, ...]
+    universe_symbols: int
+    universe_sha256: str
+    scheduled_tick_utc: datetime
+    cycle_ticks: int
+    shard_index: int
+    shard_count: int
+    shard_size: int
+    shard_start: int
+
+
+@dataclass(frozen=True)
 class DiscoverySelection:
     symbols: tuple[DiscoveredSymbol, ...]
     universe_symbols: int
     screen_rows: int
     screen_unique_symbols: int
+    provider_screen_rows: int
+    provider_screen_unique_symbols: int
+    sweep: UniverseSweep | None
+    sweep_overlap_symbols: int
     excluded_symbols: int
     not_returned_symbols: int
 
@@ -229,22 +260,50 @@ def select_discovery_symbols(
     screen: MarketWideScreen,
     active_symbols: set[str],
     scheduled_earnings: set[str] | None = None,
+    universe_sweep: UniverseSweep | None = None,
 ) -> DiscoverySelection:
-    """Filter provider results to Perch's active universe and deduplicate sources."""
+    """Union bounded provider rows with one attributable universe sweep shard."""
     earnings = scheduled_earnings or set()
+    canonical_active = {symbol.strip().upper() for symbol in active_symbols}
+    if canonical_active != active_symbols or any(not symbol for symbol in active_symbols):
+        raise ValueError("active universe symbols must be non-empty canonical strings")
+    if universe_sweep is not None:
+        expected_digest = hashlib.sha256(
+            "\n".join(sorted(active_symbols)).encode("utf-8")
+        ).hexdigest()
+        if (
+            universe_sweep.universe_symbols != len(active_symbols)
+            or universe_sweep.universe_sha256 != expected_digest
+            or len(set(universe_sweep.symbols)) != len(universe_sweep.symbols)
+            or not set(universe_sweep.symbols) <= active_symbols
+        ):
+            raise ValueError("full-universe sweep does not match the active universe")
     grouped: dict[str, list[MarketScreenEntry]] = {}
     for entry in screen.entries:
         symbol = entry.symbol.strip().upper()
         if symbol:
             grouped.setdefault(symbol, []).append(entry)
+    sweep_symbols = set(universe_sweep.symbols) if universe_sweep is not None else set()
+    sweep_positions = (
+        {
+            symbol: universe_sweep.shard_start + offset
+            for offset, symbol in enumerate(universe_sweep.symbols)
+        }
+        if universe_sweep is not None
+        else {}
+    )
+    provider_symbols = set(grouped)
+    input_symbols = provider_symbols | sweep_symbols
     selected = []
-    for symbol in sorted(grouped.keys() & active_symbols):
-        entries = grouped[symbol]
+    for symbol in sorted(input_symbols & active_symbols):
+        entries = grouped.get(symbol, [])
         sources = {entry.source for entry in entries}
+        if symbol in sweep_symbols:
+            sources.add(FULL_UNIVERSE_SWEEP_SOURCE)
         if symbol in earnings:
             sources.add("scheduled_earnings")
         ranks = tuple(sorted((entry.source, entry.rank) for entry in entries))
-        evidence = tuple(
+        evidence = [
             {
                 "source": entry.source,
                 "rank": entry.rank,
@@ -255,26 +314,93 @@ def select_discovery_symbols(
                 "trade_count": entry.trade_count,
             }
             for entry in sorted(entries, key=lambda row: (row.source, row.rank))
-        )
+        ]
+        if universe_sweep is not None and symbol in sweep_symbols:
+            evidence.append(
+                {
+                    "source": FULL_UNIVERSE_SWEEP_SOURCE,
+                    "scheduled_tick_utc": universe_sweep.scheduled_tick_utc.isoformat(),
+                    "universe_sha256": universe_sweep.universe_sha256,
+                    "universe_position": sweep_positions[symbol],
+                    "cycle_ticks": universe_sweep.cycle_ticks,
+                    "shard_index": universe_sweep.shard_index,
+                    "shard_count": universe_sweep.shard_count,
+                    "shard_size": universe_sweep.shard_size,
+                }
+            )
         moves = [entry.move_pct for entry in entries if entry.move_pct is not None]
         selected.append(
             DiscoveredSymbol(
                 symbol=symbol,
                 sources=tuple(sorted(sources)),
                 ranks=ranks,
-                screen_evidence=evidence,
+                screen_evidence=tuple(evidence),
                 screen_move_pct=max(moves, key=abs) if moves else None,
             )
         )
-    returned = set(grouped)
     discovered = {row.symbol for row in selected}
     return DiscoverySelection(
         symbols=tuple(selected),
         universe_symbols=len(active_symbols),
-        screen_rows=len(screen.entries),
-        screen_unique_symbols=len(returned),
-        excluded_symbols=len(returned - active_symbols),
+        screen_rows=len(screen.entries) + len(sweep_symbols),
+        screen_unique_symbols=len(input_symbols),
+        provider_screen_rows=len(screen.entries),
+        provider_screen_unique_symbols=len(provider_symbols),
+        sweep=universe_sweep,
+        sweep_overlap_symbols=len(provider_symbols & sweep_symbols),
+        excluded_symbols=len(input_symbols - active_symbols),
         not_returned_symbols=len(active_symbols - discovered),
+    )
+
+
+def plan_universe_sweep(
+    active_symbols: set[str],
+    *,
+    scheduled_tick_utc: datetime,
+    session_close: datetime,
+    cycle_ticks: int = FULL_UNIVERSE_SWEEP_CYCLE_TICKS,
+    max_shard_size: int = MAX_FULL_UNIVERSE_SWEEP_SHARD_SIZE,
+) -> UniverseSweep:
+    """Plan a deterministic shard that covers the full universe every five ticks."""
+    if cycle_ticks <= 0 or max_shard_size <= 0:
+        raise ValueError("sweep cycle and maximum shard size must be positive")
+    for label, value in (
+        ("scheduled_tick_utc", scheduled_tick_utc),
+        ("session_close", session_close),
+    ):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{label} must be timezone-aware")
+    scheduled = scheduled_tick_utc.astimezone(timezone.utc)
+    close = session_close.astimezone(timezone.utc)
+    elapsed = (scheduled - close).total_seconds()
+    if elapsed < 0 or elapsed % 60:
+        raise ValueError("sweep tick must lie on the minute grid after session close")
+    ordered = tuple(sorted(active_symbols))
+    if any(not symbol or symbol != symbol.strip().upper() for symbol in ordered):
+        raise ValueError("active universe symbols must be non-empty canonical strings")
+    digest = hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest()
+    if not ordered:
+        return UniverseSweep((), 0, digest, scheduled, cycle_ticks, 0, 0, 0, 0)
+    shard_count = min(cycle_ticks, len(ordered))
+    shard_size = math.ceil(len(ordered) / shard_count)
+    if shard_size > max_shard_size:
+        raise ValueError(
+            f"full-universe sweep shard {shard_size} exceeds safety bound {max_shard_size}"
+        )
+    slot = int(elapsed // 60)
+    shard_index = slot % shard_count
+    start = shard_index * shard_size
+    symbols = ordered[start : min(len(ordered), start + shard_size)]
+    return UniverseSweep(
+        symbols,
+        len(ordered),
+        digest,
+        scheduled,
+        cycle_ticks,
+        shard_index,
+        shard_count,
+        shard_size,
+        start,
     )
 
 
@@ -282,6 +408,26 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn = connect_postmarket(db_path)
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(DISCOVERY_SCHEMA)
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_discovery_ticks)")
+    }
+    additions = {
+        "provider_screen_rows": "INTEGER",
+        "provider_screen_unique_symbols": "INTEGER",
+        "sweep_universe_sha256": "TEXT",
+        "sweep_cycle_ticks": "INTEGER",
+        "sweep_shard_index": "INTEGER",
+        "sweep_shard_count": "INTEGER",
+        "sweep_shard_size": "INTEGER",
+        "sweep_shard_symbols": "INTEGER",
+        "sweep_overlap_symbols": "INTEGER",
+    }
+    for column, column_type in additions.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE postmarket_discovery_ticks ADD COLUMN {column} {column_type}"
+            )
+    conn.commit()
     return conn
 
 
@@ -442,11 +588,18 @@ def record_discovery_tick(
                 f"candidate evaluation is incomplete for {evaluation.symbol}"
             )
     source_updates = {source: updated.isoformat() for source, updated in screen.source_updates}
+    sweep = selection.sweep
+    sweep_symbols = len(sweep.symbols) if sweep is not None else 0
     invariant_ok = (
         selection.universe_symbols
         == len(selection.symbols) + selection.not_returned_symbols
         and selection.screen_unique_symbols
         == len(selection.symbols) + selection.excluded_symbols
+        and selection.screen_rows == selection.provider_screen_rows + sweep_symbols
+        and selection.screen_unique_symbols
+        == selection.provider_screen_unique_symbols
+        + sweep_symbols
+        - selection.sweep_overlap_symbols
         and len(evaluations) == len(selection.symbols)
     )
     candidate_observations = sum(row.outcome == OUTCOME_CANDIDATE for row in evaluations)
@@ -483,11 +636,15 @@ def record_discovery_tick(
                 (session,tick_utc,completed_utc,run_id,run_mode,discovery_version,
                  code_version,data_feed,market_data_provider,bar_timeframe,
                  discovery_scope,endpoints_json,source_updates_json,requested_top_n,
-                 universe_symbols,screen_rows,screen_unique_symbols,excluded_symbols,
-                 discovered_symbols,not_returned_symbols,fetched_symbols,
+                 universe_symbols,screen_rows,screen_unique_symbols,
+                 provider_screen_rows,provider_screen_unique_symbols,
+                 sweep_universe_sha256,sweep_cycle_ticks,sweep_shard_index,
+                 sweep_shard_count,sweep_shard_size,sweep_shard_symbols,
+                 sweep_overlap_symbols,excluded_symbols,discovered_symbols,
+                 not_returned_symbols,fetched_symbols,
                  evaluated_symbols,candidate_observations,new_candidates,invariant_ok,
                  thresholds_json,latency_ms,error_count)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 session.isoformat(), tick_utc.isoformat(), completed_utc.isoformat(),
@@ -495,8 +652,17 @@ def record_discovery_tick(
                 screen.provider, BAR_TIMEFRAME, DISCOVERY_SCOPE,
                 _json(screen.endpoints), _json(source_updates), screen.requested_top_n,
                 selection.universe_symbols, selection.screen_rows,
-                selection.screen_unique_symbols, selection.excluded_symbols,
-                len(selection.symbols), selection.not_returned_symbols,
+                selection.screen_unique_symbols, selection.provider_screen_rows,
+                selection.provider_screen_unique_symbols,
+                sweep.universe_sha256 if sweep is not None else None,
+                sweep.cycle_ticks if sweep is not None else None,
+                sweep.shard_index if sweep is not None else None,
+                sweep.shard_count if sweep is not None else None,
+                sweep.shard_size if sweep is not None else None,
+                sweep_symbols if sweep is not None else None,
+                selection.sweep_overlap_symbols if sweep is not None else None,
+                selection.excluded_symbols, len(selection.symbols),
+                selection.not_returned_symbols,
                 fetched_symbols, len(evaluations), candidate_observations,
                 new_candidates, int(invariant_ok), _json(thresholds()),
                 latency_ms, error_count,

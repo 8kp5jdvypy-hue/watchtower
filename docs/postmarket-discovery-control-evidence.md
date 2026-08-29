@@ -30,6 +30,12 @@ screen must fail before the bar fetch, both failures must occur before any new
 tick or observation is committed, and the temporary database must still pass
 `PRAGMA quick_check`.
 
+A separate deterministic exercise then injects an outage in the full-universe
+sweep bar request while keeping a qualifying bounded-lane symbol available. It
+requires an explicit sweep `FETCH_ERROR`, exact tick conservation, zero
+candidate leakage from the failed shard, and preservation of the valid bounded
+candidate.
+
 ## Independent kill switch
 
 The exercise verifies every documented true and false spelling, rejects an

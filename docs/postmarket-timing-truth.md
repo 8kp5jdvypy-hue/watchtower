@@ -23,7 +23,7 @@ Each tick records non-negative processing durations for:
 
 - provider screen;
 - local selection and provenance validation;
-- bounded bulk bar fetch;
+- bounded-screen plus full-universe-shard bar fetch;
 - completed-bar evaluation; and
 - total screen-to-evaluation processing.
 
@@ -37,11 +37,12 @@ and any new candidates.
 
 ## Audit behavior
 
-Discovery audit version 3 requires a one-to-one timing/tick mapping and checks
+Discovery audit version 4 requires a one-to-one timing/tick mapping and checks
 schedule arithmetic, missed-cycle counts, stage sums, total latency,
-persistence summaries, and timestamp agreement. Missing timing, excessive lag,
-missed cycles, or inconsistent measurements block a clean session. When a tick
-gap exists, the report names the slowest stage on the preceding tick when that
+persistence summaries, timestamp agreement, and deterministic five-tick sweep
+shard assignment. Missing timing, excessive lag, missed cycles, malformed shard
+metadata, or inconsistent measurements block a clean session. When a tick gap
+exists, the report names the slowest stage on the preceding tick when that
 evidence is available.
 
 These measurements are operational evidence only. They do not change candidate

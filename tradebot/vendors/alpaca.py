@@ -365,9 +365,9 @@ def fetch_intraday_bars_window_bulk(
 ) -> dict[str, list[Bar]]:
     """Five-minute bars for an explicit bounded UTC window and symbol set.
 
-    The recall census uses this to request only the final RTH bar plus the
-    postmarket window, rather than materializing a full calendar day for the
-    complete active universe. Missing symbols remain absent.
+    The live universe sweep and recall census use this to request only the final
+    RTH bar plus the postmarket window, rather than materializing a full calendar
+    day for a large explicit symbol set. Missing symbols remain absent.
     """
     if not symbols:
         return {}
