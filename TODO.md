@@ -76,7 +76,9 @@ and operational gates pass.
   - [x] Direct off-screen tracking and append-only completed-bar observations.
   - [x] Versioned qualifying, confirmed, strengthening, fading, dequalified,
     requalified, and closed transitions with explicit actionability.
-  - [ ] Deterministic decomposable quality rank and unavailable-data penalties.
+  - [x] Deterministic decomposable evidence rank and unavailable-data penalties.
+  - [ ] Empirically tune or replace heuristic weights only on walk-forward data;
+    never present version 1 as probability, confidence, or expected return.
 - [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.
 
 ## Nice to have / later

@@ -109,6 +109,13 @@ stops returning it. It stores distinct completed-bar observations plus
 `REQUALIFIED`, and `CLOSED` transitions. See
 `docs/postmarket-candidate-lifecycle.md`.
 
+Rank implementation: `tradebot/postmarket_rank.py` writes immutable rank runs
+and per-candidate decompositions bound to exact context, transition, and
+completed-bar observation IDs. Version 1 has named 100-point evidence
+components, explicit penalties and hard exclusions, deterministic tie-breaking,
+freshness-sensitive idempotency, and a stored non-probability semantic label.
+See `docs/postmarket-quality-rank.md`.
+
 ### 6. Empirical qualification
 
 - Blinded labeling, walk-forward evaluation, cohort metrics, and miss review.

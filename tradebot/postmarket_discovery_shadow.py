@@ -42,6 +42,7 @@ from tradebot.postmarket_lifecycle import (
     lifecycle_window,
     run_lifecycle_pass,
 )
+from tradebot.postmarket_rank import latest_rank_summary, run_rank_snapshot
 from tradebot.postmarket_recall_census import (
     latest_census_report_summary,
     next_due_census_session,
@@ -731,6 +732,57 @@ def lifecycle_heartbeat_fields(
         }
 
 
+def rank_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    *,
+    version: str | None,
+    run_id: str,
+) -> dict:
+    """Persist a rank only when source evidence or freshness state changes."""
+    try:
+        row = shadow_conn.execute(
+            "SELECT MAX(session) FROM postmarket_discovery_candidates"
+        ).fetchone()
+        session = row[0] if row and row[0] else None
+        if session is None:
+            return {"rank_status": "current", "latest_rank": None}
+        result = run_rank_snapshot(
+            shadow_conn,
+            session=session,
+            as_of=now,
+            code_version=version,
+            run_id=run_id,
+        )
+        if result.created:
+            logger.info(
+                "postmarket_rank_snapshot run=%s session=%s inputs=%s rankable=%s "
+                "status=%s top=%s",
+                result.rank_run_id,
+                result.session,
+                result.input_candidates,
+                result.rankable_candidates,
+                result.status,
+                list(result.top_candidates),
+            )
+        return {
+            "rank_status": result.status,
+            "rank_snapshot_created": result.created,
+            "rank_run_id": result.rank_run_id,
+            "rank_input_candidates": result.input_candidates,
+            "rankable_candidates": result.rankable_candidates,
+            "rank_top": list(result.top_candidates),
+            "latest_rank": latest_rank_summary(shadow_conn),
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket rank snapshot failed")
+        return {
+            "rank_status": "error",
+            "rank_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -782,6 +834,12 @@ def main() -> int:
                 universe_conn,
                 version=version,
             )
+            rank_fields = rank_heartbeat_fields(
+                now,
+                shadow_conn,
+                version=version,
+                run_id=run_id,
+            )
             quality_fields = quality_backfill_heartbeat_fields(
                 now,
                 shadow_conn,
@@ -804,6 +862,7 @@ def main() -> int:
                     **discovery_audit_heartbeat_fields(now),
                     **lifecycle_fields,
                     **context_fields,
+                    **rank_fields,
                     **quality_fields,
                     **census_fields,
                 ),
@@ -873,6 +932,12 @@ def main() -> int:
                 universe_conn,
                 version=version,
             )
+            rank_fields = rank_heartbeat_fields(
+                completed_now,
+                shadow_conn,
+                version=version,
+                run_id=run_id,
+            )
             quality_fields = quality_backfill_heartbeat_fields(
                 completed_now,
                 shadow_conn,
@@ -884,7 +949,7 @@ def main() -> int:
                 HEARTBEAT_PATH,
                 _heartbeat(
                     "ok", completed_now, **result.__dict__, **lifecycle_fields,
-                    **context_fields, **quality_fields
+                    **context_fields, **rank_fields, **quality_fields
                 ),
             )
         sleep_now = _utc_now()
