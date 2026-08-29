@@ -200,17 +200,15 @@ final states, price consistency, attempt uniqueness, and no update/delete.
 The endpoint returns `outcomes` with status/reason/resolution time plus an
 aggregate `outcome_status`; historical real-price marks remain compatible.*
 
-**15. `tradebot/metrics.py:46-57` (`increment`) — a corrupted counters file is silently reset to `{}`, discarding all historical counts, then overwritten non-atomically**
-`except (json.JSONDecodeError, OSError): data = {}` treats any corruption
-as "start fresh," and the subsequent `path.write_text(...)` is a direct
-write with no temp+rename — so a crash mid-write can itself produce the
-corruption that gets silently "recovered" (erased) on the next call. This
-file is one of the few places this codebase looks at "how often is X
-happening," including several of the failure counters cited elsewhere in
-this review (`dedup_check_failed`, `validator_rejection`, etc.) — a
-silent reset erases exactly the evidence needed to notice a failure spike.
-*Fix: write via temp file + `os.replace()`; on decode failure, log loudly
-and back up the corrupt file instead of silently discarding it.*
+**15. RESOLVED — metrics publication is atomic and corrupt evidence is preserved**
+Counter updates now serialize into a flushed and fsynced same-directory
+temporary file before `os.replace()`. A malformed JSON file or non-object root
+is copied to a collision-safe sibling and logged at ERROR before a new counter
+object is published. If the source cannot be read or the corrupt backup cannot
+be created, the increment raises instead of overwriting evidence. A failed
+atomic replace removes its temporary file and leaves the prior metrics file
+byte-for-byte intact. Read-only callers log corruption but never mutate it.
+Regression tests exercise every one of those failure paths.
 
 **16. RESOLVED — the public status page surfaces every recorded operational failure family**
 The original page exposed only `validator_rejection`. It now retains that

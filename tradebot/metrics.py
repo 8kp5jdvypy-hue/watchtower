@@ -9,6 +9,11 @@ ever justifies it, this is the seam to swap.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import shutil
+import stat
+import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +27,8 @@ DEFAULT_METRICS_PATH = REPO_ROOT / "data" / "metrics.json"
 # unanswerable, and the contamination is invisible after the fact because
 # a counter is just a number with no record of who added to it.
 REPLAY_METRICS_PATH = REPO_ROOT / "data" / "metrics_replay.json"
+
+logger = logging.getLogger("watchtower.metrics")
 
 _lock = threading.Lock()
 
@@ -92,6 +99,62 @@ def _label_key(name: str, labels: dict) -> str:
     return f"{name}{{{tags}}}"
 
 
+class MetricsFileCorrupt(ValueError):
+    """The counter file decoded, but not to the required JSON object."""
+
+
+def _read_metrics_object(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise MetricsFileCorrupt(
+            f"expected a JSON object, got {type(data).__name__}"
+        )
+    return data
+
+
+def _preserve_corrupt_file(path: Path) -> Path:
+    """Copy corrupt bytes beside the source without a collision window."""
+    fd, backup_name = tempfile.mkstemp(
+        prefix=f"{path.name}.corrupt-",
+        dir=path.parent,
+    )
+    os.close(fd)
+    backup_path = Path(backup_name)
+    try:
+        shutil.copy2(path, backup_path)
+    except Exception:
+        backup_path.unlink(missing_ok=True)
+        raise
+    return backup_path
+
+
+def _atomic_write_metrics(path: Path, data: dict) -> None:
+    """Publish a complete JSON object with same-directory atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(data, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.chmod(mode)
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
 def increment(name: str, path: Path | None = None, amount: int = 1, **labels) -> None:
     """Increments a counter by `amount` (default 1, unchanged from every
     call site written before this parameter existed) and persists it.
@@ -121,12 +184,24 @@ def increment(name: str, path: Path | None = None, amount: int = 1, **labels) ->
         data = {}
         if path.exists():
             try:
-                data = json.loads(path.read_text())
-            except (json.JSONDecodeError, OSError):
+                data = _read_metrics_object(path)
+            except (json.JSONDecodeError, MetricsFileCorrupt) as exc:
+                backup_path = _preserve_corrupt_file(path)
+                logger.error(
+                    "metrics file is corrupt; preserved original before reset: path=%s backup=%s error=%s",
+                    path,
+                    backup_path,
+                    exc,
+                )
                 data = {}
+            except OSError:
+                logger.exception(
+                    "metrics file could not be read; refusing to overwrite it: path=%s",
+                    path,
+                )
+                raise
         data[key] = data.get(key, 0) + amount
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2, sort_keys=True))
+        _atomic_write_metrics(path, data)
 
 
 def read_all(path: Path | None = None) -> dict:
@@ -137,6 +212,10 @@ def read_all(path: Path | None = None) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
+        return _read_metrics_object(path)
+    except (json.JSONDecodeError, MetricsFileCorrupt) as exc:
+        logger.error("metrics file is corrupt and unreadable: path=%s error=%s", path, exc)
+        return {}
+    except OSError:
+        logger.exception("metrics file could not be read: path=%s", path)
         return {}
