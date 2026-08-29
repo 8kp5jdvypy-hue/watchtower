@@ -110,6 +110,13 @@ holdout evidence. Missing credentials, bars, float shares, and sector-ETF
 mappings remain explicit rather than inferred. See
 `docs/postmarket-point-in-time-external-context.md`.
 
+Licensed reference evidence: `tradebot/postmarket_reference_manifest.py`
+strictly ingests operator-reviewed provider manifests for true sector
+classification, sector-benchmark mapping, and optional float shares. The
+append-only digest-bound contract enforces publication/observation causality
+and never scrapes or infers the data. It remains outside rank pending holdout
+evidence. See `docs/postmarket-licensed-reference-manifest.md`.
+
 ### 5. Lifecycle and rank
 
 - Append-only state transitions derived from completed bars only.

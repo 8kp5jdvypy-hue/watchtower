@@ -19,6 +19,11 @@ from typing import Callable, Mapping, Sequence
 from tradebot.detectors import Bar
 from tradebot.marketdata import NewsItem, OptionChain, Quote, XNYS
 from tradebot.postmarket_context import CandidateFact
+from tradebot.postmarket_reference_manifest import (
+    CandidateReference,
+    candidate_reference,
+    ensure_reference_schema,
+)
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
 from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot
@@ -36,6 +41,7 @@ FACT_KINDS = {
     "FUNDAMENTALS",
     "FILING_INDUSTRY_CLASSIFICATION",
     "FILING_FUNDAMENTALS",
+    "LICENSED_POINT_IN_TIME_REFERENCE",
     "HALT_STATE",
     "INDEPENDENT_PRICE_COMPARISON",
 }
@@ -823,6 +829,54 @@ def filing_snapshot_facts(
     return classification, fundamentals
 
 
+def licensed_reference_fact(
+    candidate: CandidateFact,
+    *,
+    reference: CandidateReference,
+    observed_at: datetime,
+    code_version: str | None,
+    run_id: str,
+) -> ExternalFact:
+    """Bind a pre-detection licensed manifest row to one candidate."""
+    observed = _utc(observed_at, "observed_at")
+    detected = _utc(candidate.detected_at, "candidate.detected_at")
+    published = _utc(datetime.fromisoformat(reference.published_at_utc), "published_at_utc")
+    source_observed = _utc(
+        datetime.fromisoformat(reference.source_observed_at_utc),
+        "source_observed_at_utc",
+    )
+    if max(published, source_observed) > detected:
+        raise ValueError("licensed reference was not observed before candidate detection")
+    if date.fromisoformat(reference.effective_date) > candidate.session:
+        raise ValueError("licensed reference effective date followed candidate session")
+    return ExternalFact(
+        candidate.candidate_id, candidate.session.isoformat(), candidate.symbol,
+        "LICENSED_POINT_IN_TIME_REFERENCE", "AVAILABLE", published.isoformat(),
+        observed.isoformat(), reference.provider, "licensed_reference_manifest",
+        reference.dataset,
+        {
+            "reference_manifest_id": reference.reference_manifest_id,
+            "manifest_sha256": reference.manifest_sha256,
+            "license_reference": reference.license_reference,
+            "effective_date": reference.effective_date,
+            "published_at_utc": published.isoformat(),
+            "source_observed_at_utc": source_observed.isoformat(),
+            "classification_system": reference.classification_system,
+            "sector_code": reference.sector_code,
+            "sector_name": reference.sector_name,
+            "benchmark_symbol": reference.benchmark_symbol,
+            "float_shares": reference.float_shares,
+            "float_as_of_date": reference.float_as_of_date,
+            "float_status": (
+                "AVAILABLE" if reference.float_shares is not None
+                else "UNAVAILABLE_NOT_INCLUDED_IN_LICENSED_MANIFEST"
+            ),
+            "semantic": "operator_attested_licensed_point_in_time_reference_not_inferred",
+        },
+        code_version, run_id,
+    )
+
+
 def halt_state_fact(
     candidate: CandidateFact,
     *,
@@ -927,6 +981,7 @@ def latest_external_context_summary(conn: sqlite3.Connection) -> dict | None:
 
 def _pending_candidates(conn: sqlite3.Connection, limit: int) -> list[CandidateFact]:
     ensure_external_context_schema(conn)
+    ensure_reference_schema(conn)
     rows = conn.execute(
         """
         SELECT c.candidate_id,c.session,c.symbol,c.direction,c.first_detected_at,
@@ -951,9 +1006,26 @@ def _pending_candidates(conn: sqlite3.Connection, limit: int) -> list[CandidateF
               AND e.external_context_version=? AND e.fact_kind=required.kind
               AND (e.status!='FETCH_ERROR' OR e.attempt>=?)
           )
+        ) OR EXISTS (
+          SELECT 1 FROM postmarket_reference_rows rr
+          JOIN postmarket_reference_manifests rm
+            ON rm.reference_manifest_id=rr.reference_manifest_id
+          WHERE rr.symbol=c.symbol AND rm.effective_date<=c.session
+            AND rm.published_at_utc<=c.first_detected_at
+            AND rm.observed_at_utc<=c.first_detected_at
+            AND NOT EXISTS (
+              SELECT 1 FROM postmarket_external_fact_events e
+              WHERE e.candidate_id=c.candidate_id
+                AND e.external_context_version=?
+                AND e.fact_kind='LICENSED_POINT_IN_TIME_REFERENCE'
+                AND (e.status!='FETCH_ERROR' OR e.attempt>=?)
+            )
         )
         ORDER BY c.first_detected_at,c.candidate_id LIMIT ?
-        """, (EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS, limit),
+        """, (
+            EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS,
+            EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS, limit,
+        ),
     ).fetchall()
     return [CandidateFact(
         int(row[0]), date.fromisoformat(row[1]), row[2], row[3],
@@ -995,6 +1067,30 @@ def run_external_context_backfill(
                 (candidate.candidate_id, EXTERNAL_CONTEXT_VERSION),
             ).fetchall()
         }
+        if "LICENSED_POINT_IN_TIME_REFERENCE" not in completed:
+            reference = candidate_reference(
+                conn, symbol=candidate.symbol, session=candidate.session,
+                detected_at=candidate.detected_at,
+            )
+            if reference is not None:
+                try:
+                    fact = licensed_reference_fact(
+                        candidate, reference=reference, observed_at=current,
+                        code_version=code_version, run_id=run_id,
+                    )
+                except Exception as exc:
+                    errors += 1
+                    fact = ExternalFact(
+                        candidate.candidate_id, candidate.session.isoformat(),
+                        candidate.symbol, "LICENSED_POINT_IN_TIME_REFERENCE",
+                        "FETCH_ERROR", None, current.isoformat(),
+                        reference.provider, "licensed_reference_manifest",
+                        reference.dataset, {}, code_version, run_id,
+                        type(exc).__name__,
+                    )
+                record_external_fact(conn, fact)
+                written += 1
+                available += int(fact.status.startswith("AVAILABLE"))
         if "OPTIONS_EXPECTED_MOVE" not in completed:
             fact = pre_event_expectation_fact(
                 conn, candidate, observed_at=current,

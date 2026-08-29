@@ -1,8 +1,9 @@
 """External context is point-in-time, attributable, and fail-visible."""
 from __future__ import annotations
 
-import sqlite3
 import ast
+import json
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -27,6 +28,7 @@ from tradebot.postmarket_external_context_shadow import (
     external_context_enabled,
     pre_close_capture_window,
 )
+from tradebot.postmarket_reference_manifest import ingest_reference_manifest
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
 from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot, ReportedFact
@@ -238,6 +240,52 @@ def test_sec_fact_builder_rejects_post_cutoff_acceptance():
             _candidate(), snapshot=invalid, observed_at=DETECTED,
             code_version="x", run_id="run",
         )
+
+
+def test_licensed_reference_is_bound_only_after_pre_detection_ingestion(tmp_path):
+    conn = sqlite3.connect(":memory:")
+    candidate_id = _seed(conn)
+    manifest = {
+        "schema_version": 1,
+        "status": "locked",
+        "provider": "licensed-vendor",
+        "dataset": "daily-sector-and-float-v1",
+        "license_reference": "contract-2026-001",
+        "effective_date": SESSION.isoformat(),
+        "published_at_utc": (CLOSE - timedelta(hours=2)).isoformat(),
+        "created_at_utc": (CLOSE - timedelta(hours=1, minutes=59)).isoformat(),
+        "classification_system": "GICS",
+        "rows": [{
+            "symbol": "ABC", "sector_code": "45",
+            "sector_name": "Information Technology", "benchmark_symbol": "XLK",
+            "float_shares": 1_000_000, "float_as_of_date": SESSION.isoformat(),
+        }],
+    }
+    path = tmp_path / "reference.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    ingest_reference_manifest(
+        conn, path, observed_at=CLOSE - timedelta(hours=1),
+        code_version="manifest-code", run_id="manifest-run",
+    )
+    result = run_external_context_backfill(
+        conn, now=DETECTED, code_version="ctx-code", run_id="ctx-run",
+        option_fetch=lambda symbol, session, spot: _chain(),
+        news_fetch=lambda symbol, start, end: (),
+    )
+    row = conn.execute(
+        """SELECT status,effective_at_utc,payload_json
+           FROM postmarket_external_fact_events
+           WHERE candidate_id=? AND fact_kind='LICENSED_POINT_IN_TIME_REFERENCE'""",
+        (candidate_id,),
+    ).fetchone()
+    payload = json.loads(row[2])
+    assert result.facts_written == 10
+    assert row[0] == "AVAILABLE"
+    assert row[1] == manifest["published_at_utc"]
+    assert payload["classification_system"] == "GICS"
+    assert payload["benchmark_symbol"] == "XLK"
+    assert payload["float_status"] == "AVAILABLE"
+    assert "not_inferred" in payload["semantic"]
 
 
 def test_halt_fact_uses_official_records_not_missing_bar_inference():
