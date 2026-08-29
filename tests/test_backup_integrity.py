@@ -183,6 +183,22 @@ def test_complete_backup_set_restores_every_database_and_artifact(tmp_path):
     assert json.loads((restore_dir / "restore_report.json").read_text())["stamp"]
 
 
+def test_customer_dry_run_contracts_are_in_encrypted_artifact_set(tmp_path):
+    data, env_file = _fixture_data(tmp_path)
+    contracts = {
+        "postmarket_customer_delivery_policy.json": '{"policy":1}\n',
+        "postmarket_customer_delivery_authorization.json": '{"authorization":1}\n',
+        "postmarket_customer_dry_run_campaign.json": '{"campaign":1}\n',
+    }
+    for name, content in contracts.items():
+        (data / name).write_text(content, encoding="utf-8")
+    _, backup_dir = _run_backup(tmp_path, data=data, env_file=env_file)
+    restore_dir = tmp_path / "restore"
+    restore_backup(_manifest(backup_dir), restore_dir)
+    for name, content in contracts.items():
+        assert (restore_dir / "data" / name).read_text(encoding="utf-8") == content
+
+
 @pytest.mark.parametrize("missing", REQUIRED_DATABASES)
 def test_missing_irreplaceable_database_fails_backup_loudly(tmp_path, missing):
     data, env_file = _fixture_data(tmp_path)

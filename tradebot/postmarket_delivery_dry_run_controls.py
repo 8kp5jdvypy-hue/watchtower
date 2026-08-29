@@ -58,6 +58,7 @@ MODULE_PATHS = (
     REPO_ROOT / "tradebot" / "postmarket_customer_dry_run_campaign.py",
     REPO_ROOT / "tradebot" / "postmarket_customer_dry_run_review.py",
     REPO_ROOT / "tradebot" / "postmarket_customer_dry_run_gate.py",
+    REPO_ROOT / "scripts" / "postmarket_customer_dry_run_preflight.py",
 )
 FORBIDDEN_IMPORTS = (
     "tradebot.alerts",

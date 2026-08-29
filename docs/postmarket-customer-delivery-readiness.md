@@ -150,6 +150,36 @@ zero-failure rules. Its strongest possible verdict is
 `customer_delivery_enabled=false`. Passing is not permission to send alerts
 and cannot create or operate a customer-delivery path.
 
+## Campaign preflight
+
+Immediately before the first covered session—and while the observer switch is
+still off—run the read-only preflight from the exact clean `origin/main`
+revision. It verifies the locked campaign, policy, owner authorization, four
+control digests, Compose isolation/default, database integrity and upstream
+schema, free space, and a recent verified backup whose encrypted artifact set
+contains the exact three campaign contracts and all four controls.
+
+```bash
+python scripts/postmarket_customer_dry_run_preflight.py \
+  --repo-root /opt/perch \
+  --expected-revision "$(git rev-parse HEAD)" \
+  --env-file /opt/perch/.env \
+  --compose-file /opt/perch/docker-compose.yml \
+  --campaign /opt/perch/data/postmarket_customer_dry_run_campaign.json \
+  --delivery-policy /opt/perch/data/postmarket_customer_delivery_policy.json \
+  --owner-authorization /opt/perch/data/postmarket_customer_delivery_authorization.json \
+  --control CONTROL_1.json --control CONTROL_2.json \
+  --control CONTROL_3.json --control CONTROL_4.json \
+  --database /opt/perch/data/postmarket_shadow.db \
+  --backup-manifest /opt/perch/backups/manifest_UTCSTAMP.sha256 \
+  --output /opt/perch/data/postmarket_evidence/customer-dry-run-preflight.json
+```
+
+A pass means only `safe_to_begin_customer_dry_run_campaign=true`; the artifact
+always records `customer_delivery_enabled=false`. Enabling the isolated
+evidence observer remains a later, explicit owner operation. The preflight
+never edits `.env`, runs Compose, starts services, or changes a routing row.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed
