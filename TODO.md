@@ -91,6 +91,9 @@ and operational gates pass.
     never present version 1 as probability, confidence, or expected return.
 - [x] Append-only rank-blind labels, locked walk-forward splits/rules, explicit
   holdout unblinding, and baseline-versus-rank empirical metrics.
+  - [x] Lock the numeric eligibility definition, atomically ingest strict
+    digest-bound blinded review manifests, and require inventory-digest
+    confirmation before irreversible holdout unblinding.
 - [ ] Accumulate independently reviewed holdout labels, complete provider
   comparison, satisfy the aggregate evidence gate, and obtain owner review.
 - [x] Add append-only point-in-time option-implied-move/news evidence in an

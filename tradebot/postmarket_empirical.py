@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timezone
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS postmarket_rank_experiments (
     label_method TEXT NOT NULL,
     development_sessions_json TEXT NOT NULL,
     holdout_sessions_json TEXT NOT NULL,
+    eligibility_rule_json TEXT NOT NULL,
     selection_rule_json TEXT NOT NULL,
     policy_json TEXT NOT NULL,
     manifest_sha256 TEXT NOT NULL UNIQUE,
@@ -135,6 +137,13 @@ class ExperimentPolicy:
 
 
 @dataclass(frozen=True)
+class EligibilityRule:
+    move_pct: float
+    min_cumulative_notional: float
+    persistence_bars: int
+
+
+@dataclass(frozen=True)
 class SelectionRule:
     minimum_evidence_score: float
     maximum_ordinal_rank: int | None
@@ -172,6 +181,7 @@ class EmpiricalReport:
     split: str
     rank_version: int
     sessions: tuple[str, ...]
+    eligibility_rule: EligibilityRule
     selection_rule: SelectionRule
     policy: ExperimentPolicy
     baseline: ClassificationMetrics
@@ -187,6 +197,19 @@ class EmpiricalReport:
 
 def ensure_empirical_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(EMPIRICAL_SCHEMA)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_rank_experiments)")
+    }
+    if "eligibility_rule_json" not in columns:
+        count = conn.execute("SELECT COUNT(*) FROM postmarket_rank_experiments").fetchone()[0]
+        if count:
+            raise RuntimeError(
+                "legacy rank experiments lack a locked eligibility rule; "
+                "preserve the database and create a new empirical store"
+            )
+        conn.execute(
+            "ALTER TABLE postmarket_rank_experiments ADD COLUMN eligibility_rule_json TEXT"
+        )
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -222,6 +245,7 @@ def create_locked_experiment(
     label_method: str,
     development_sessions: Iterable[date],
     holdout_sessions: Iterable[date],
+    eligibility_rule: EligibilityRule,
     selection_rule: SelectionRule,
     policy: ExperimentPolicy,
 ) -> str:
@@ -239,6 +263,26 @@ def create_locked_experiment(
         raise ValueError("development and holdout sessions must be disjoint")
     if max(dev) >= min(holdout):
         raise ValueError("all development sessions must precede every holdout session")
+    if (
+        not isinstance(eligibility_rule.move_pct, (int, float))
+        or isinstance(eligibility_rule.move_pct, bool)
+        or not math.isfinite(eligibility_rule.move_pct)
+        or not 0 < eligibility_rule.move_pct <= 100
+    ):
+        raise ValueError("eligibility move_pct must be in (0,100]")
+    if (
+        not isinstance(eligibility_rule.min_cumulative_notional, (int, float))
+        or isinstance(eligibility_rule.min_cumulative_notional, bool)
+        or not math.isfinite(eligibility_rule.min_cumulative_notional)
+        or eligibility_rule.min_cumulative_notional <= 0
+    ):
+        raise ValueError("eligibility min_cumulative_notional must be positive")
+    if (
+        not isinstance(eligibility_rule.persistence_bars, int)
+        or isinstance(eligibility_rule.persistence_bars, bool)
+        or eligibility_rule.persistence_bars < 2
+    ):
+        raise ValueError("eligibility persistence_bars must be at least 2")
     if not 0 <= selection_rule.minimum_evidence_score <= 100:
         raise ValueError("minimum_evidence_score must be between 0 and 100")
     if selection_rule.maximum_ordinal_rank is not None and selection_rule.maximum_ordinal_rank <= 0:
@@ -267,6 +311,7 @@ def create_locked_experiment(
         "label_method": label_method,
         "development_sessions": dev,
         "holdout_sessions": holdout,
+        "eligibility_rule": asdict(eligibility_rule),
         "selection_rule": asdict(selection_rule),
         "policy": asdict(policy),
     }
@@ -285,13 +330,15 @@ def create_locked_experiment(
             INSERT INTO postmarket_rank_experiments
                 (experiment_id,empirical_version,status,created_at_utc,created_by,
                  rank_version,label_method,development_sessions_json,
-                 holdout_sessions_json,selection_rule_json,policy_json,manifest_sha256)
-            VALUES (?,?, 'locked',?,?,?,?,?,?,?,?,?)
+                 holdout_sessions_json,eligibility_rule_json,selection_rule_json,
+                 policy_json,manifest_sha256)
+            VALUES (?,?, 'locked',?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 payload["experiment_id"], EMPIRICAL_VERSION, payload["created_at_utc"],
                 payload["created_by"], rank_version, label_method, _canonical(dev),
-                _canonical(holdout), _canonical(asdict(selection_rule)),
+                _canonical(holdout), _canonical(asdict(eligibility_rule)),
+                _canonical(asdict(selection_rule)),
                 _canonical(asdict(policy)), manifest_digest,
             ),
         )
@@ -313,6 +360,15 @@ def _experiment(conn: sqlite3.Connection, experiment_id: str) -> sqlite3.Row:
     return row
 
 
+def locked_eligibility_rule(
+    conn: sqlite3.Connection, experiment_id: str,
+) -> EligibilityRule:
+    """Return the immutable independent-label definition for an experiment."""
+    ensure_empirical_schema(conn)
+    experiment = _experiment(conn, experiment_id)
+    return EligibilityRule(**json.loads(experiment["eligibility_rule_json"]))
+
+
 def record_independent_label(
     conn: sqlite3.Connection,
     *,
@@ -330,9 +386,12 @@ def record_independent_label(
     artifact_feeds: Iterable[str],
     artifact_acquired_at: datetime,
     recorded_at: datetime,
+    _ensure_schema: bool = True,
+    _manage_transaction: bool = True,
 ) -> int:
     """Append a label supplied without reading candidate or rank tables."""
-    ensure_empirical_schema(conn)
+    if _ensure_schema:
+        ensure_empirical_schema(conn)
     experiment = _experiment(conn, experiment_id)
     allowed = set(json.loads(experiment["development_sessions_json"])) | set(
         json.loads(experiment["holdout_sessions_json"])
@@ -389,8 +448,8 @@ def record_independent_label(
            WHERE experiment_id=? AND session=? AND symbol=?""",
         (experiment_id, session.isoformat(), canonical_symbol),
     ).fetchone()[0]
-    with conn:
-        cursor = conn.execute(
+    def insert() -> sqlite3.Cursor:
+        return conn.execute(
             """
             INSERT INTO postmarket_independent_labels
                 (experiment_id,session,symbol,revision,classification,direction,
@@ -407,6 +466,11 @@ def record_independent_label(
                 acquired.isoformat(), recorded.isoformat(),
             ),
         )
+    if _manage_transaction:
+        with conn:
+            cursor = insert()
+    else:
+        cursor = insert()
     return int(cursor.lastrowid)
 
 
@@ -436,19 +500,12 @@ def _latest_labels(conn: sqlite3.Connection, experiment_id: str, sessions: tuple
         conn.row_factory = previous
 
 
-def unblind_holdout(
-    conn: sqlite3.Connection,
-    *,
-    experiment_id: str,
-    unblinded_at: datetime,
-    unblinded_by: str,
-    reason: str,
-) -> str:
-    """Irreversibly record that holdout rank results may now be evaluated."""
+def holdout_label_inventory(
+    conn: sqlite3.Connection, experiment_id: str,
+) -> tuple[str, int, datetime]:
+    """Preview the exact label inventory a one-way unblind would freeze."""
     ensure_empirical_schema(conn)
     experiment = _experiment(conn, experiment_id)
-    if not unblinded_by.strip() or not reason.strip():
-        raise ValueError("unblinded_by and reason must be non-empty")
     sessions = tuple(json.loads(experiment["holdout_sessions_json"]))
     labels = _latest_labels(conn, experiment_id, sessions)
     if not labels:
@@ -461,9 +518,28 @@ def unblind_holdout(
         )}
         for row in labels
     ]
-    digest = _digest(inventory)
-    unblind_time = _utc(unblinded_at, "unblinded_at")
     latest_label_time = max(datetime.fromisoformat(row["recorded_at_utc"]) for row in labels)
+    return _digest(inventory), len(labels), latest_label_time
+
+
+def unblind_holdout(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    unblinded_at: datetime,
+    unblinded_by: str,
+    reason: str,
+    expected_inventory_sha256: str,
+) -> str:
+    """Irreversibly record that holdout rank results may now be evaluated."""
+    ensure_empirical_schema(conn)
+    _experiment(conn, experiment_id)
+    if not unblinded_by.strip() or not reason.strip():
+        raise ValueError("unblinded_by and reason must be non-empty")
+    digest, label_count, latest_label_time = holdout_label_inventory(conn, experiment_id)
+    if expected_inventory_sha256.lower() != digest:
+        raise ValueError("holdout inventory digest did not match explicit confirmation")
+    unblind_time = _utc(unblinded_at, "unblinded_at")
     if unblind_time < latest_label_time:
         raise ValueError("holdout cannot be unblinded before all labels were recorded")
     existing = conn.execute(
@@ -481,7 +557,7 @@ def unblind_holdout(
                 label_inventory_sha256,holdout_labels) VALUES (?,?,?,?,?,?)""",
             (
                 experiment_id, unblind_time.isoformat(),
-                unblinded_by.strip(), reason.strip(), digest, len(labels),
+                unblinded_by.strip(), reason.strip(), digest, label_count,
             ),
         )
     return digest
@@ -599,6 +675,7 @@ def evaluate_rank_experiment(
         raise ValueError("holdout is sealed; record an explicit unblind event first")
     sessions = tuple(json.loads(experiment[f"{split}_sessions_json"]))
     labels = _latest_labels(conn, experiment_id, sessions)
+    eligibility_rule = EligibilityRule(**json.loads(experiment["eligibility_rule_json"]))
     rule = SelectionRule(**json.loads(experiment["selection_rule_json"]))
     policy = ExperimentPolicy(**json.loads(experiment["policy_json"]))
     baseline_selected, rank_selected, stats = _selected_symbols(
@@ -641,7 +718,7 @@ def evaluate_rank_experiment(
         blockers.append("RECALL_FLOOR_NOT_MET")
     report = EmpiricalReport(
         EMPIRICAL_VERSION, experiment_id, split, int(experiment["rank_version"]), sessions,
-        rule, policy, baseline, ranked, tuple(per_session),
+        eligibility_rule, rule, policy, baseline, ranked, tuple(per_session),
         (ranked.precision - baseline.precision if ranked.precision is not None and baseline.precision is not None else None),
         (ranked.recall - baseline.recall if ranked.recall is not None and baseline.recall is not None else None),
         not blockers, tuple(blockers), split == "holdout", input_digest,
