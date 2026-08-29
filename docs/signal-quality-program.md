@@ -181,9 +181,12 @@ session range, empirical identity, policy floors, providers, datasets, and
 eligible revisions. `tradebot/postmarket_discovery_evidence_gate.py` then
 requires exact clean-session inventories, reconciled full-universe censuses,
 separate independent-provider proofs, the matching empirical holdout, and all
-four operational controls. A pass is only eligible for owner review and cannot
-enable delivery. See `docs/postmarket-discovery-evidence-gate.md`. Prospective
-live evidence and owner review remain unfinished gates.
+four operational controls. The explicit-only
+`tradebot/postmarket_discovery_evidence_set.py` sealer refuses post-hoc artifact
+selection and publishes only a gate-passing immutable package. A pass is only
+eligible for owner review and cannot enable delivery. See
+`docs/postmarket-discovery-evidence-gate.md`. Prospective live evidence and
+owner review remain unfinished gates.
 
 ## Anti-goals
 

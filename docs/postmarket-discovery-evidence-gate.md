@@ -48,7 +48,43 @@ prove the same census identity and universe using a genuinely different
 provider. This prevents a same-provider comparison or a falsely self-declared
 eligible primary report from satisfying independence.
 
-## Evaluate
+## Seal the explicit package
+
+Use `tradebot.postmarket_discovery_evidence_set` to publish the final manifest.
+Every artifact is named explicitly as `SESSION=PATH` or `KIND=PATH`; the writer
+does not glob, select a latest version, or choose a favorable report. All paths
+must remain beneath the output manifest's directory.
+
+```bash
+python -m tradebot.postmarket_discovery_evidence_set \
+  data/postmarket_evidence/campaign-1/evidence-set.json \
+  --evidence-set-version campaign-1-final \
+  --campaign data/postmarket_evidence/campaign-1/campaign.json \
+  --discovery-audit \
+    2026-09-01=data/postmarket_evidence/campaign-1/audits/discovery-2026-09-01.json \
+  --recall-census \
+    2026-09-01=data/postmarket_evidence/campaign-1/census/recall-2026-09-01.json \
+  --provider-proof \
+    2026-09-01=data/postmarket_evidence/campaign-1/provider/provider-2026-09-01.json \
+  --empirical-artifact data/postmarket_evidence/campaign-1/empirical/holdout.json \
+  --control \
+    discovery_failure_injection=data/postmarket_evidence/campaign-1/controls/failure.json \
+  --control \
+    discovery_kill_switch=data/postmarket_evidence/campaign-1/controls/kill-switch.json \
+  --control \
+    discovery_delivery_isolation=data/postmarket_evidence/campaign-1/controls/isolation.json \
+  --control \
+    rollback_runbook=data/postmarket_evidence/campaign-1/controls/rollback.json
+```
+
+Repeat each session argument for every locked XNYS session. The sealer requires
+the exact campaign inventory and all four unique controls, computes digests,
+runs the complete aggregate gate from a temporary manifest, and publishes a
+read-only final file only if the verdict is `ELIGIBLE_FOR_OWNER_REVIEW`. It
+refuses overwrite, symlink, traversal, outside-tree, missing-session, and
+not-ready packages. A failure leaves no final or temporary manifest behind.
+
+## Re-evaluate
 
 Run:
 
@@ -63,7 +99,8 @@ Exit codes are deliberately distinct:
 - `2`: the manifest or a pinned artifact is malformed, inconsistent, missing,
   causally impossible, or digest-invalid.
 
-The JSON output includes every observed value, required value, pass/fail check,
+The standalone evaluator remains useful for independently rechecking the sealed
+bytes. Its JSON output includes every observed value, required value, pass/fail check,
 aggregate metric, revision/provider inventory, and artifact digest. Preserve
 the campaign, evidence set, gate output, and referenced artifacts in the
 encrypted off-box backup before owner review.
