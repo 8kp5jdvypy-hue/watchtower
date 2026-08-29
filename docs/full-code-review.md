@@ -221,13 +221,12 @@ increments are not a deduplicated incident total; neutral throughput counters
 remain excluded. Regression tests pin all current failure families,
 aggregation, the validator non-duplication boundary, and rendered disclosure.
 
-**17. `tradebot/journal.py:149-157` (`_add_column_if_missing`) — unconditionally treats any `sqlite3.OperationalError` from `ALTER TABLE` as "column already exists"**
-If the real cause is a full disk, a corrupted DB, or a permissions issue,
-it's silently misdiagnosed as benign and swallowed — runs on every
-`connect()` call, so a corrupted `journal.db` could present as a clean
-startup.
-*Fix: match on the specific "duplicate column name" error message/code
-rather than the whole exception class.*
+**17. RESOLVED — schema migration suppresses only the exact target-column duplicate**
+`_add_column_if_missing()` now matches SQLite's exact, case-insensitive
+`duplicate column name: <requested column>` response. Lock, full-disk, I/O,
+malformed-schema, readonly, and even duplicate-for-a-different-column errors
+propagate and abort startup. Tests cover a real idempotent duplicate, a real
+successful addition/commit, and every non-benign error family above.
 
 **18. `tradebot/runner.py:242-259` (`TelegramHaltChecker.check()`) — a network blip while polling for `/halt` is indistinguishable from "not halted," silently dropping an admin's halt command**
 Documented as intentional fail-open, but it means an operator who sends
