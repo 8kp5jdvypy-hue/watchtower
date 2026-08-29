@@ -159,6 +159,29 @@ class OwnerAuthorization:
     acknowledgement: str
     dry_run_readiness_approved: bool
 
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "release_id": self.release_id,
+            "approved_by": self.approved_by,
+            "approved_at_utc": _aware_utc(
+                self.approved_at, "authorization.approved_at"
+            ).isoformat(),
+            "expires_at_utc": _aware_utc(
+                self.expires_at, "authorization.expires_at"
+            ).isoformat(),
+            "policy_sha256": self.policy_sha256,
+            "evidence_set_sha256": self.evidence_set_sha256,
+            "evidence_gate_sha256": self.evidence_gate_sha256,
+            "router_revision": self.router_revision,
+            "acknowledgement": self.acknowledgement,
+            "dry_run_readiness_approved": self.dry_run_readiness_approved,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return _sha256_json(self.canonical_payload())
+
 
 @dataclass(frozen=True)
 class DeliveryCandidate:
