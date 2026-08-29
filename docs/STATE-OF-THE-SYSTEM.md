@@ -278,11 +278,11 @@ assessment against current `main`, not a re-run of the review.
 | 4 | No test for `backfill_marks()` with missing/empty cache dir | **Fixed** — `a92ec76`'s 18 new tests include the exact incident-shape case. |
 | 5 | Telegram alert can be sent before its detection row commits to `journal.db` (cross-database ordering bug) | **CLOSED** (PR #36, 2026-08-15). `_commit_then_send()` commits journal.db before any send that could reference a detection, making "send without committing first" inexpressible in `process_new_bar` rather than a convention to remember. The exposure was narrower than this table originally implied — the trade path was already safe, since `record_contract_selection()` commits and flushes the pending INSERT with it — but the **NO TRADE** path was genuinely exposed, and NO TRADE is a common outcome. 6 tests; 4 fail against the pre-fix ordering. |
 
-**All five CRITICALs are now resolved**, with one caveat worth keeping
-visible: **#3 is partial.** The production path is covered, but
-`scripts/fetch_cache.py` still exits 0 when a symbol ends its run with
-`"gave up"`, so manual and cron invocations still fail silently. See
-`BACKLOG.md` for the remnant.
+**All five CRITICALs are now resolved.** The former #3 remnant is also
+closed: `scripts/fetch_cache.py` exits nonzero when a symbol ends with
+`"gave up"` or a real-session empty fetch, while fully cached and holiday
+no-ops remain successful. Cache writes use same-directory temporary files
+and atomic replacement; regression tests cover partial-write cleanup.
 
 Also worth stating plainly, since this document's own earlier revision
 is the source of the confusion: **#1, #2 and #4 were already fixed by
@@ -303,8 +303,14 @@ formally triaged the list.
   still has none. **Still the riskiest untested path in the project** —
   it is what stops one bad symbol taking down the scan for every
   watched ticker.
-- **#8, #9, #10, #11, #12** — **still open**, each confirmed present in
-  current `main`.
+- **#11** (partial cache file treated as complete) — **DONE**: atomic
+  same-filesystem replacement and crash-path tests prevent a truncated final
+  file from becoming the idempotency marker.
+- **#12** (contract-forward vendor failure hidden as absence) — **DONE**:
+  chain and day-range provider failures reach the per-contract logger;
+  successful absent-contract/no-trade results remain non-fabricated absences.
+- **#8, #9, #10** — **still open**, each confirmed present in current
+  `main`.
 
 ### MEDIUM (11) / LOW (3)
 

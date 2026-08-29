@@ -1380,12 +1380,11 @@ def _contract_occ_symbol(chain, right: str, strike: float) -> str | None:
 def _forward_mid(md, symbol: str, right: str, strike: float, expiry: str, is_vertical: bool, short_strike: float | None) -> float | None:
     """The long leg's mid, minus the short leg's mid for a vertical — the
     same formula runner.py used to compute entry_mid, so a forward mid is
-    comparable to it. None (not fetched) if either leg's contract can't
-    be found in the current chain, rather than reporting a partial mid."""
-    try:
-        chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
-    except Exception:
-        return None
+    comparable to it. None means the chain fetch succeeded but either leg's
+    contract was absent; provider/auth/network failures propagate to the
+    per-selection backfill handler so they are logged rather than silently
+    masquerading as a genuinely missing contract."""
+    chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
     long_mid = _contract_mid(chain, right, strike)
     if long_mid is None:
         return None
@@ -1409,8 +1408,18 @@ def backfill_pending_contract_mids(conn, md, now: datetime) -> None:
                 mid = _forward_mid(md, symbol, right, strike, expiry, bool(is_vertical), short_strike)
                 if mid is not None:
                     record_contract_forward_mid(conn, detection_id, offset_min, mid)
-            except Exception:
-                logger.error("contract forward-mid backfill failed: detection_id=%s offset_min=%s", detection_id, offset_min, exc_info=True)
+            except Exception as exc:
+                metrics.increment(
+                    "contract_outcome_backfill_failed",
+                    stage="forward_mid",
+                    exception=type(exc).__name__,
+                )
+                logger.error(
+                    "contract forward-mid backfill failed: detection_id=%s offset_min=%s exception=%s",
+                    detection_id,
+                    offset_min,
+                    type(exc).__name__,
+                )
 
 
 def backfill_pending_contract_close_mids(conn, md, session_date: date) -> None:
@@ -1425,8 +1434,17 @@ def backfill_pending_contract_close_mids(conn, md, session_date: date) -> None:
             mid = _forward_mid(md, symbol, right, strike, expiry, bool(is_vertical), short_strike)
             if mid is not None:
                 record_contract_forward_mid(conn, detection_id, CLOSE_MARK_OFFSET_MIN, mid)
-        except Exception:
-            logger.error("contract close-mid backfill failed: detection_id=%s", detection_id, exc_info=True)
+        except Exception as exc:
+            metrics.increment(
+                "contract_outcome_backfill_failed",
+                stage="close_mid",
+                exception=type(exc).__name__,
+            )
+            logger.error(
+                "contract close-mid backfill failed: detection_id=%s exception=%s",
+                detection_id,
+                type(exc).__name__,
+            )
 
 
 def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
@@ -1450,8 +1468,17 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
             day_range = fetch_option_day_range(occ_symbol, session_date)
             if day_range is not None:
                 record_contract_day_range(conn, detection_id, day_range[0], day_range[1])
-        except Exception:
-            logger.error("contract day-range backfill failed: detection_id=%s", detection_id, exc_info=True)
+        except Exception as exc:
+            metrics.increment(
+                "contract_outcome_backfill_failed",
+                stage="day_range",
+                exception=type(exc).__name__,
+            )
+            logger.error(
+                "contract day-range backfill failed: detection_id=%s exception=%s",
+                detection_id,
+                type(exc).__name__,
+            )
 
 
 # --------------------------------------------------------------------------

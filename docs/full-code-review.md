@@ -161,7 +161,7 @@ are identical. It's the only test exercising the admin-halt path.
 `telegram_user_id` and the `admin_ids` value, so a future swap of chat_id
 for user_id in the admin check would actually fail this test.*
 
-**11. `scripts/fetch_cache.py:38-44` (`_write_bars_csv`) + `ensure_daily`/`ensure_sessions`'s `path.exists()` idempotency check — a truncated write is locked in as "done" forever**
+**11. RESOLVED — `scripts/fetch_cache.py` atomic cache publication**
 CSV files are written directly to their final path (no temp file + atomic
 rename). If the process is killed mid-write, the partial file remains;
 every subsequent run sees `path.exists()` and reports "skipped (exists)" —
@@ -169,25 +169,19 @@ it is never re-fetched or re-validated. `_read_bars` (`marketdata.py:99`)
 has no row-count/checksum/trailing-newline check, so it parses whatever
 bytes are on disk and silently returns a bar list with a truncated final
 row's numeric field parsed as if valid, not empty and not raising.
-*Fix: write to `path.with_suffix(".tmp")` then `os.replace()` into place;
-optionally validate the last row is complete (correct column count) before
-treating an existing file as satisfied.*
+The fetcher now writes through a same-directory temporary file and publishes
+with `os.replace()` only after the shared CSV writer completes. It also exits
+nonzero on exhausted/real-session-empty acquisition. Regression tests prove a
+failed partial write leaves neither a final file nor a temporary artifact.
 
-**12. `tradebot/runner.py:672-680` (`_forward_mid`) — swallows every exception from the options-chain fetch, one layer below the handler meant to catch it**
-```python
-try:
-    chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
-except Exception:
-    return None
-```
-This is indistinguishable from "contract genuinely not in today's chain."
-The caller, `backfill_pending_contract_mids`, has its own
-`except Exception: logger.error(...)` that can never fire because the
-exception was already absorbed here. A sustained vendor outage during the
-live 15/30/60m contract-mid backfill window leaves every forward-mid NULL
-forever, with zero log lines and zero metric.
-*Fix: only catch the specific "not found" condition here; let genuine
-fetch/auth/network errors propagate to the caller's logging handler.*
+**12. RESOLVED — contract-forward vendor failure attribution**
+
+`_forward_mid` now lets chain fetch/auth/network exceptions reach
+`backfill_pending_contract_mids`' per-selection logger; only a successful
+chain missing a required leg returns `None`. `fetch_option_day_range` follows
+the same contract: API/transport failures propagate to the day-range backfill
+logger, while a successful response with no trade bars returns `None`.
+Regression tests prove both attribution and sibling-contract isolation.
 
 **13. `tests/test_runner.py` — `run_replay`/`run_live`'s per-symbol exception-isolation loop (the highest-blast-radius path in the project) has zero automated test coverage**
 Both functions wrap each symbol's evaluation in
@@ -349,8 +343,8 @@ cross-referenced rather than repeated in full.
 | 2 | `tradebot/journal.py:327-333`, `tradebot/marketdata.py:99-101` | Missing file → silent `[]` | See finding #2 |
 | 3 | `scripts/fetch_cache.py:56-89` | Fetch failure → print only | See finding #3 |
 | 4 | `tradebot/universe.py:70-135`, `vendors/alpaca.py:318-354` | Empty fetch → mass "found nothing = succeeded" | See finding #6 |
-| 5 | `tradebot/runner.py:672-680` (`_forward_mid`) | Bare `except Exception: return None` masks outage from caller's own handler | See finding #12 |
-| 6 | `tradebot/runner.py:724-746` + `vendors/alpaca.py:357-401` (`fetch_option_day_range`) | `None` on `APIError`, caller no-ops with no log | `day_low`/`day_high` stay NULL forever, indistinguishable from "no trades" |
+| 5 | `tradebot/runner.py` (`_forward_mid`) | **Resolved:** provider failures propagate to the per-selection logger | See finding #12 |
+| 6 | `tradebot/runner.py` + `vendors/alpaca.py` (`fetch_option_day_range`) | **Resolved:** API failure propagates/logs; successful no-bars remains `None` | Provider outage no longer masquerades as "no trades" |
 | 7 | `tradebot/status_page.py:69-76` | Monitoring layer itself has a blind spot | See finding #16 |
 | 8 | `tradebot/runner.py:843-853`, `:1144-1154` | Secondary `except Exception: pass` around the alert-of-a-failure | If the alert itself fails (outbox locked/corrupt), that's fully swallowed with zero logging |
 | 9 | `tradebot/journal.py:149-157` (`_add_column_if_missing`) | Overbroad exception match | See finding #17 |
