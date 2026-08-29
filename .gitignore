@@ -10,3 +10,6 @@ data/
 out/
 __pycache__/
 .venv/
+.DS_Store
+.codex/
+.playwright-mcp/

@@ -319,6 +319,15 @@ that point at all is proof the system came back (see
 python3 -m pytest -q
 ```
 
+For the complete repository gate (Python tests, dashboard unit tests, both
+lint passes, both production builds, and whitespace validation), run:
+
+```bash
+scripts/verify.sh
+# If `python3` is older than 3.11:
+PYTHON_BIN=/path/to/python3 scripts/verify.sh
+```
+
 - **Golden-file tests** (`tests/test_templates.py` and others) snapshot
   every rendered message exactly, so a formatting change shows up as a
   diff instead of surprising someone in Telegram.
