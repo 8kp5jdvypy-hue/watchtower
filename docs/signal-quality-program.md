@@ -196,6 +196,16 @@ licensed reference contract without printing secrets or changing production.
 It distinguishes safe shadow deployment from full evidence-campaign readiness.
 See `docs/postmarket-signal-quality-preflight.md`.
 
+Customer-delivery readiness foundation:
+`tradebot/postmarket_delivery_readiness.py` provides a pure, default-off,
+evidence-bound policy decision for a future dry-run router. It requires exact
+owner authorization, lifecycle/rank freshness and quality, clean operations,
+allowed provenance, and a disengaged independent kill switch. It imports no
+provider, outbox, alert, or trading path and cannot send anything. The
+remaining router, ledger, rendering, delivery controls, rollback proof, and
+owner activation are explicitly unfinished. See
+`docs/postmarket-customer-delivery-readiness.md`.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.
