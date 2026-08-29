@@ -21,6 +21,11 @@ DIGEST_LINE_PATTERN = re.compile(r"^([0-9a-f]{64}) [ *]([A-Za-z0-9_.-]+)$")
 DATABASES = {"journal", "users", "universe", "evaluations", "postmarket_shadow"}
 REQUIRED_DATABASES = {"journal", "users", "evaluations", "postmarket_shadow"}
 ARTIFACT_ROOTS = {"postmarket_audits", "postmarket_evidence"}
+ARTIFACT_FILES = {
+    "postmarket_customer_delivery_policy.json",
+    "postmarket_customer_delivery_authorization.json",
+    "postmarket_customer_dry_run_campaign.json",
+}
 
 
 @dataclass(frozen=True)
@@ -132,7 +137,10 @@ def _safe_artifact_members(archive: tarfile.TarFile) -> tuple[tarfile.TarInfo, .
         member_path = PurePosixPath(member.name)
         if member_path.is_absolute() or ".." in member_path.parts:
             raise ValueError(f"unsafe artifact archive path {member.name!r}")
-        if not member_path.parts or member_path.parts[0] not in ARTIFACT_ROOTS:
+        if not member_path.parts or (
+            member_path.parts[0] not in ARTIFACT_ROOTS
+            and member_path.as_posix() not in ARTIFACT_FILES
+        ):
             raise ValueError(f"unexpected artifact archive root {member.name!r}")
         if member_path in seen:
             raise ValueError(f"duplicate artifact archive path {member.name!r}")

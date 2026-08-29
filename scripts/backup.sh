@@ -80,6 +80,12 @@ ARTIFACT_INPUTS=()
 for directory in postmarket_audits postmarket_evidence; do
   [[ -d "$DATA_DIR/$directory" ]] && ARTIFACT_INPUTS+=("$directory")
 done
+for contract in \
+  postmarket_customer_delivery_policy.json \
+  postmarket_customer_delivery_authorization.json \
+  postmarket_customer_dry_run_campaign.json; do
+  [[ -f "$DATA_DIR/$contract" ]] && ARTIFACT_INPUTS+=("$contract")
+done
 if (( ${#ARTIFACT_INPUTS[@]} > 0 )); then
   artifact_name="postmarket_artifacts_${STAMP}.tar.gz"
   COPYFILE_DISABLE=1 tar -C "$DATA_DIR" -czf \
@@ -89,7 +95,7 @@ if (( ${#ARTIFACT_INPUTS[@]} > 0 )); then
   GENERATED+=("$artifact_name")
   echo "backed up postmarket artifacts -> $artifact_name"
 else
-  echo "no postmarket audit/evidence directories exist yet — artifact archive skipped"
+  echo "no postmarket audit/evidence/contracts exist yet — artifact archive skipped"
 fi
 
 manifest_name="manifest_${STAMP}.sha256"
