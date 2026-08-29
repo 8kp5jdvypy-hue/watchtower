@@ -50,6 +50,30 @@ ledger is append-only and stores the policy and authorization digests, exact
 candidate/transition/rank IDs, controls, runtime revision, reason codes, and
 presentation. It still has no customer-delivery dependency.
 
+## Default-off supervised dry run
+
+`tradebot.postmarket_delivery_dry_run_shadow.py` is an independently
+supervised Compose service with its own heartbeat and health probe. Its
+`POSTMARKET_CUSTOMER_DRY_RUN_ENABLED` switch defaults to `0`. Disabled mode
+does not load an authorization or query evidence. Enabled mode starts only
+with strict regular-file policy and authorization contracts, and it operates
+only during the XNYS postmarket window.
+
+Each cycle reads the latest exact rank snapshot for the current session and
+joins its persisted lifecycle transition and completed-bar observation IDs. A
+separate read of the discovery heartbeat allows `clean` operation only for a
+fresh, enabled, error-free `ok` cycle with current lifecycle/context evidence,
+a complete rank, and an allowed evidence revision. Anything else is recorded
+as a degraded suppression. The service never imports a market-data provider,
+Telegram, the outbox, a broker, or order code.
+
+The two expected contract paths are
+`data/postmarket_customer_delivery_policy.json` and
+`data/postmarket_customer_delivery_authorization.json`; either can be changed
+only explicitly through its corresponding environment path. Creating these
+files or enabling the switch is an owner operation and is not performed by a
+passing evidence gate or a routine deployment.
+
 Presentation is explicit: `ACTIONABLE`, `STALE`, `DEGRADED`, or `CLOSED`.
 Suppressed decisions retain every reason code. The evidence score remains a
 heuristic ordering score; it is never presented as confidence, probability,

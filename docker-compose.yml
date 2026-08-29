@@ -1,4 +1,4 @@
-# Production stack for a single VPS. Seven services on the scanner/bot
+# Production stack for a single VPS. Eight services on the scanner/bot
 # side, one image (see Dockerfile) — mirrors what scripts/start.sh runs
 # on bare metal, but supervised by Docker instead of pidfiles:
 # `restart: unless-stopped` is this deployment's watchdog, so
@@ -145,6 +145,34 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-m", "tradebot.postmarket_external_context_health", "--heartbeat", "data/postmarket_external_context_heartbeat.json", "--max-age", "600"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  postmarket-customer-dry-run:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    command: python -m tradebot.postmarket_delivery_dry_run_shadow
+    env_file: .env
+    environment:
+      # Readiness ledger only: no outbox/delivery dependency. The independent
+      # switch defaults off and enabled mode also requires exact owner files.
+      POSTMARKET_CUSTOMER_DRY_RUN_ENABLED: ${POSTMARKET_CUSTOMER_DRY_RUN_ENABLED:-0}
+      POSTMARKET_CUSTOMER_DRY_RUN_POLICY_PATH: ${POSTMARKET_CUSTOMER_DRY_RUN_POLICY_PATH:-data/postmarket_customer_delivery_policy.json}
+      POSTMARKET_CUSTOMER_DRY_RUN_AUTHORIZATION_PATH: ${POSTMARKET_CUSTOMER_DRY_RUN_AUTHORIZATION_PATH:-data/postmarket_customer_delivery_authorization.json}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-m", "tradebot.postmarket_delivery_dry_run_health", "--heartbeat", "data/postmarket_delivery_dry_run_heartbeat.json", "--max-age", "600"]
       interval: 1m
       timeout: 10s
       retries: 3
