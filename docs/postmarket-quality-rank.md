@@ -54,6 +54,12 @@ transition, completed bar, or fresh-to-stale boundary creates a new immutable
 snapshot. Ties resolve deterministically by evidence score, coverage, symbol,
 then candidate ID.
 
-The observer heartbeat exposes the newest run, inputs, rankable count, top five,
-status, and non-probability semantics. This remains shadow-only and cannot send
-alerts or place trades.
+The observer heartbeat separates current rankability from historical session
+capability. It exposes the newest run, inputs, rankable and unrankable counts,
+top five, named current exclusion counts, session run/rankable-run counts, peak
+rankable count, first/latest rankable timestamps, and the latest historically
+rankable snapshot. A post-close stale or `CLOSED` snapshot therefore cannot hide
+whether ranking worked during the active window, while its historical top is
+explicitly labeled rather than presented as current. The heartbeat retains the
+non-probability semantic label. This remains shadow-only and cannot send alerts
+or place trades.

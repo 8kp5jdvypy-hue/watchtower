@@ -942,6 +942,7 @@ def rank_heartbeat_fields(
                 result.status,
                 list(result.top_candidates),
             )
+        latest = latest_rank_summary(shadow_conn)
         return {
             "rank_status": result.status,
             "rank_snapshot_created": result.created,
@@ -949,7 +950,19 @@ def rank_heartbeat_fields(
             "rank_input_candidates": result.input_candidates,
             "rankable_candidates": result.rankable_candidates,
             "rank_top": list(result.top_candidates),
-            "latest_rank": latest_rank_summary(shadow_conn),
+            "rank_session_peak_rankable_candidates": (
+                latest["session_peak_rankable_candidates"] if latest else 0
+            ),
+            "rank_session_rankable_runs": (
+                latest["session_rankable_runs"] if latest else 0
+            ),
+            "rank_latest_exclusion_counts": (
+                latest["latest_exclusion_counts"] if latest else {}
+            ),
+            "rank_latest_rankable_snapshot": (
+                latest["latest_rankable_snapshot"] if latest else None
+            ),
+            "latest_rank": latest,
         }
     except Exception as exc:
         shadow_conn.rollback()

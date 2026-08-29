@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Sequence
@@ -546,7 +547,45 @@ def run_rank_snapshot(
     )
 
 
+def _rank_top(conn: sqlite3.Connection, rank_run_id: int) -> list[dict]:
+    return [
+        {"rank": rank, "symbol": symbol, "evidence_score": score}
+        for rank, symbol, score in conn.execute(
+            """
+            SELECT ordinal_rank,symbol,evidence_score
+            FROM postmarket_candidate_ranks
+            WHERE rank_run_id=? AND ordinal_rank IS NOT NULL
+            ORDER BY ordinal_rank LIMIT 5
+            """,
+            (rank_run_id,),
+        ).fetchall()
+    ]
+
+
+def _rank_exclusion_counts(conn: sqlite3.Connection, rank_run_id: int) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for (raw_reasons,) in conn.execute(
+        """
+        SELECT exclusion_reasons_json FROM postmarket_candidate_ranks
+        WHERE rank_run_id=? AND rankable=0
+        """,
+        (rank_run_id,),
+    ).fetchall():
+        try:
+            reasons = json.loads(raw_reasons)
+        except (json.JSONDecodeError, TypeError):
+            reasons = None
+        if not isinstance(reasons, list) or any(
+            not isinstance(reason, str) or not reason for reason in reasons
+        ):
+            counts["MALFORMED_EXCLUSION_EVIDENCE"] += 1
+            continue
+        counts.update(reasons)
+    return dict(sorted(counts.items()))
+
+
 def latest_rank_summary(conn: sqlite3.Connection) -> dict | None:
+    """Expose current rankability separately from historical session capability."""
     ensure_rank_schema(conn)
     row = conn.execute(
         """
@@ -557,25 +596,53 @@ def latest_rank_summary(conn: sqlite3.Connection) -> dict | None:
     ).fetchone()
     if row is None:
         return None
-    top = [
-        {"rank": rank, "symbol": symbol, "evidence_score": score}
-        for rank, symbol, score in conn.execute(
-            """
-            SELECT ordinal_rank,symbol,evidence_score
-            FROM postmarket_candidate_ranks
-            WHERE rank_run_id=? AND ordinal_rank IS NOT NULL
-            ORDER BY ordinal_rank LIMIT 5
-            """,
-            (row[0],),
-        ).fetchall()
-    ]
+    rank_run_id = int(row[0])
+    session = row[1]
+    session_stats = conn.execute(
+        """
+        SELECT COUNT(*),
+               SUM(rankable_candidates>0),
+               MAX(rankable_candidates),
+               MIN(CASE WHEN rankable_candidates>0 THEN as_of_utc END),
+               MAX(CASE WHEN rankable_candidates>0 THEN as_of_utc END)
+        FROM postmarket_rank_runs WHERE session=?
+        """,
+        (session,),
+    ).fetchone()
+    latest_rankable = conn.execute(
+        """
+        SELECT rank_run_id,as_of_utc,rankable_candidates
+        FROM postmarket_rank_runs
+        WHERE session=? AND rankable_candidates>0
+        ORDER BY rank_run_id DESC LIMIT 1
+        """,
+        (session,),
+    ).fetchone()
+    latest_rankable_snapshot = (
+        {
+            "rank_run_id": int(latest_rankable[0]),
+            "as_of_utc": latest_rankable[1],
+            "rankable_candidates": int(latest_rankable[2]),
+            "top": _rank_top(conn, int(latest_rankable[0])),
+        }
+        if latest_rankable is not None
+        else None
+    )
     return {
-        "rank_run_id": int(row[0]),
-        "session": row[1],
+        "rank_run_id": rank_run_id,
+        "session": session,
         "as_of_utc": row[2],
         "input_candidates": int(row[3]),
         "rankable_candidates": int(row[4]),
+        "unrankable_candidates": int(row[3]) - int(row[4]),
         "status": row[5],
-        "top": top,
+        "top": _rank_top(conn, rank_run_id),
+        "latest_exclusion_counts": _rank_exclusion_counts(conn, rank_run_id),
+        "session_runs": int(session_stats[0]),
+        "session_rankable_runs": int(session_stats[1] or 0),
+        "session_peak_rankable_candidates": int(session_stats[2] or 0),
+        "first_rankable_as_of_utc": session_stats[3],
+        "latest_rankable_as_of_utc": session_stats[4],
+        "latest_rankable_snapshot": latest_rankable_snapshot,
         "semantics": "heuristic_evidence_ordering_not_probability",
     }
