@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -122,6 +122,35 @@ CREATE TABLE IF NOT EXISTS postmarket_discovery_candidates (
 CREATE INDEX IF NOT EXISTS idx_postmarket_discovery_candidates_session
     ON postmarket_discovery_candidates(session, first_detected_at);
 
+CREATE TABLE IF NOT EXISTS postmarket_discovery_timing (
+    tick_id INTEGER PRIMARY KEY,
+    session TEXT NOT NULL,
+    scheduled_tick_utc TEXT NOT NULL,
+    actual_start_utc TEXT NOT NULL,
+    completed_utc TEXT NOT NULL,
+    scheduled_lag_ms INTEGER NOT NULL,
+    missed_cycles INTEGER NOT NULL,
+    screen_latency_ms INTEGER NOT NULL,
+    selection_latency_ms INTEGER NOT NULL,
+    bar_fetch_latency_ms INTEGER NOT NULL,
+    evaluation_latency_ms INTEGER NOT NULL,
+    persistence_observations INTEGER NOT NULL,
+    persistence_span_avg_seconds REAL,
+    persistence_span_max_seconds REAL,
+    total_latency_ms INTEGER NOT NULL,
+    UNIQUE (session, scheduled_tick_utc),
+    CHECK (scheduled_lag_ms >= 0),
+    CHECK (missed_cycles >= 0),
+    CHECK (screen_latency_ms >= 0),
+    CHECK (selection_latency_ms >= 0),
+    CHECK (bar_fetch_latency_ms >= 0),
+    CHECK (evaluation_latency_ms >= 0),
+    CHECK (persistence_observations >= 0),
+    CHECK (total_latency_ms >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_discovery_timing_session
+    ON postmarket_discovery_timing(session, scheduled_tick_utc);
+
 CREATE TRIGGER IF NOT EXISTS postmarket_discovery_ticks_no_update
 BEFORE UPDATE ON postmarket_discovery_ticks BEGIN
     SELECT RAISE(ABORT, 'postmarket_discovery_ticks is append-only');
@@ -146,6 +175,14 @@ CREATE TRIGGER IF NOT EXISTS postmarket_discovery_candidates_no_delete
 BEFORE DELETE ON postmarket_discovery_candidates BEGIN
     SELECT RAISE(ABORT, 'postmarket_discovery_candidates is append-only');
 END;
+CREATE TRIGGER IF NOT EXISTS postmarket_discovery_timing_no_update
+BEFORE UPDATE ON postmarket_discovery_timing BEGIN
+    SELECT RAISE(ABORT, 'postmarket_discovery_timing is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_discovery_timing_no_delete
+BEFORE DELETE ON postmarket_discovery_timing BEGIN
+    SELECT RAISE(ABORT, 'postmarket_discovery_timing is append-only');
+END;
 """
 
 
@@ -166,6 +203,26 @@ class DiscoverySelection:
     screen_unique_symbols: int
     excluded_symbols: int
     not_returned_symbols: int
+
+
+@dataclass(frozen=True)
+class TickSchedule:
+    scheduled_tick_utc: datetime
+    scheduled_lag_ms: int
+    missed_cycles: int
+
+
+@dataclass(frozen=True)
+class DiscoveryTiming:
+    schedule: TickSchedule
+    screen_latency_ms: int
+    selection_latency_ms: int
+    bar_fetch_latency_ms: int
+    evaluation_latency_ms: int
+    persistence_observations: int
+    persistence_span_avg_seconds: float | None
+    persistence_span_max_seconds: float | None
+    total_latency_ms: int
 
 
 def select_discovery_symbols(
@@ -228,6 +285,61 @@ def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
     return conn
 
 
+def plan_tick_schedule(
+    conn: sqlite3.Connection,
+    *,
+    session: date,
+    session_close: datetime,
+    actual_start: datetime,
+    interval_seconds: int,
+) -> TickSchedule:
+    """Anchor a tick to the exchange close and count skipped schedule slots."""
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    if session_close.tzinfo is None or session_close.utcoffset() is None:
+        raise ValueError("session_close must be timezone-aware")
+    if actual_start.tzinfo is None or actual_start.utcoffset() is None:
+        raise ValueError("actual_start must be timezone-aware")
+    close_utc = session_close.astimezone(timezone.utc)
+    actual_utc = actual_start.astimezone(timezone.utc)
+    elapsed = (actual_utc - close_utc).total_seconds()
+    if elapsed < 0:
+        raise ValueError("actual_start must not precede the session close")
+    slot = int(elapsed // interval_seconds)
+    scheduled = close_utc + timedelta(seconds=slot * interval_seconds)
+    lag_ms = round((actual_utc - scheduled).total_seconds() * 1000)
+
+    prior_values: list[datetime] = []
+    timing_row = conn.execute(
+        """
+        SELECT MAX(scheduled_tick_utc)
+        FROM postmarket_discovery_timing WHERE session=?
+        """,
+        (session.isoformat(),),
+    ).fetchone()
+    if timing_row and timing_row[0]:
+        prior_values.append(datetime.fromisoformat(timing_row[0]).astimezone(timezone.utc))
+    tick_row = conn.execute(
+        "SELECT MAX(tick_utc) FROM postmarket_discovery_ticks WHERE session=?",
+        (session.isoformat(),),
+    ).fetchone()
+    if tick_row and tick_row[0]:
+        prior_actual = datetime.fromisoformat(tick_row[0]).astimezone(timezone.utc)
+        prior_slot = int((prior_actual - close_utc).total_seconds() // interval_seconds)
+        prior_values.append(close_utc + timedelta(seconds=prior_slot * interval_seconds))
+
+    if prior_values:
+        previous = max(prior_values)
+        skipped = int((scheduled - previous).total_seconds() // interval_seconds) - 1
+    else:
+        skipped = slot
+    return TickSchedule(
+        scheduled_tick_utc=scheduled,
+        scheduled_lag_ms=lag_ms,
+        missed_cycles=max(0, skipped),
+    )
+
+
 def _json(value) -> str:
     return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
@@ -247,6 +359,7 @@ def record_discovery_tick(
     code_version: str | None,
     data_feed: str,
     latency_ms: int | None,
+    timing: DiscoveryTiming,
 ) -> tuple[int, int]:
     """Atomically persist one discovery tick or no part of it."""
     if tick_utc.tzinfo is None or tick_utc.utcoffset() is None:
@@ -255,6 +368,45 @@ def record_discovery_tick(
         raise ValueError("completed_utc must be timezone-aware")
     if completed_utc < tick_utc:
         raise ValueError("completed_utc must not precede tick_utc")
+    scheduled = timing.schedule.scheduled_tick_utc
+    if scheduled.tzinfo is None or scheduled.utcoffset() is None:
+        raise ValueError("scheduled_tick_utc must be timezone-aware")
+    expected_lag = round((tick_utc - scheduled).total_seconds() * 1000)
+    if expected_lag < 0 or timing.schedule.scheduled_lag_ms != expected_lag:
+        raise ValueError("scheduled lag does not match tick timestamps")
+    numeric_timings = (
+        timing.schedule.missed_cycles,
+        timing.screen_latency_ms,
+        timing.selection_latency_ms,
+        timing.bar_fetch_latency_ms,
+        timing.evaluation_latency_ms,
+        timing.persistence_observations,
+        timing.total_latency_ms,
+    )
+    if any(value < 0 for value in numeric_timings):
+        raise ValueError("timing measurements must be non-negative")
+    stage_total = (
+        timing.screen_latency_ms
+        + timing.selection_latency_ms
+        + timing.bar_fetch_latency_ms
+        + timing.evaluation_latency_ms
+    )
+    if stage_total > timing.total_latency_ms + 4:
+        raise ValueError("stage latency exceeds total latency")
+    if latency_ms is not None and latency_ms != timing.total_latency_ms:
+        raise ValueError("tick latency and timing total disagree")
+    persistence_values = (
+        timing.persistence_span_avg_seconds,
+        timing.persistence_span_max_seconds,
+    )
+    if timing.persistence_observations == 0:
+        if any(value is not None for value in persistence_values):
+            raise ValueError("empty persistence timing must not contain spans")
+    elif (
+        any(value is None or value < 0 for value in persistence_values)
+        or timing.persistence_span_avg_seconds > timing.persistence_span_max_seconds
+    ):
+        raise ValueError("persistence timing summary is invalid")
     if not data_feed.strip():
         raise ValueError("data_feed must not be empty")
     if screen.provider != MARKET_DATA_PROVIDER:
@@ -351,6 +503,34 @@ def record_discovery_tick(
             ),
         )
         tick_id = int(cursor.lastrowid)
+        conn.execute(
+            """
+            INSERT INTO postmarket_discovery_timing
+                (tick_id,session,scheduled_tick_utc,actual_start_utc,completed_utc,
+                 scheduled_lag_ms,missed_cycles,screen_latency_ms,
+                 selection_latency_ms,bar_fetch_latency_ms,evaluation_latency_ms,
+                 persistence_observations,persistence_span_avg_seconds,
+                 persistence_span_max_seconds,total_latency_ms)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                tick_id,
+                session.isoformat(),
+                scheduled.isoformat(),
+                tick_utc.isoformat(),
+                completed_utc.isoformat(),
+                timing.schedule.scheduled_lag_ms,
+                timing.schedule.missed_cycles,
+                timing.screen_latency_ms,
+                timing.selection_latency_ms,
+                timing.bar_fetch_latency_ms,
+                timing.evaluation_latency_ms,
+                timing.persistence_observations,
+                timing.persistence_span_avg_seconds,
+                timing.persistence_span_max_seconds,
+                timing.total_latency_ms,
+            ),
+        )
         conn.executemany(
             """
             INSERT INTO postmarket_discovery_observations

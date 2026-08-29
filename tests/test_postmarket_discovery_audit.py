@@ -49,6 +49,7 @@ def _seed_session(
     missing_fetch=False,
     malformed_rank=False,
     candidate_directions=None,
+    include_timing=True,
 ):
     times = times or _times()
     directions = candidate_directions or ["up"] * len(times)
@@ -111,6 +112,43 @@ def _seed_session(
             ),
         )
         tick_id = cursor.lastrowid
+        if include_timing:
+            if index == 0:
+                missed_cycles = int((tick_utc - START).total_seconds() // 60)
+            else:
+                missed_cycles = max(
+                    0,
+                    int((tick_utc - times[index - 1]).total_seconds() // 60) - 1,
+                )
+            conn.execute(
+                """
+                INSERT INTO postmarket_discovery_timing
+                    (tick_id,session,scheduled_tick_utc,actual_start_utc,
+                     completed_utc,scheduled_lag_ms,missed_cycles,
+                     screen_latency_ms,selection_latency_ms,bar_fetch_latency_ms,
+                     evaluation_latency_ms,persistence_observations,
+                     persistence_span_avg_seconds,persistence_span_max_seconds,
+                     total_latency_ms)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    tick_id,
+                    SESSION.isoformat(),
+                    tick_utc.isoformat(),
+                    tick_utc.isoformat(),
+                    (tick_utc + timedelta(milliseconds=100)).isoformat(),
+                    0,
+                    missed_cycles,
+                    20,
+                    5,
+                    50,
+                    25,
+                    1,
+                    300.0,
+                    300.0,
+                    100,
+                ),
+            )
         common = (
             SESSION.isoformat(),
             tick_utc.isoformat(),
@@ -268,6 +306,16 @@ def test_complete_discovery_session_is_operationally_eligible(tmp_path):
     assert report.operational.ticks == 241
     assert report.operational.window_coverage_pct == 100.0
     assert report.operational.max_tick_gap_seconds == 60
+    assert report.operational.timing_rows == 241
+    assert report.operational.missed_cycles == 0
+    assert report.operational.max_scheduled_lag_ms == 0
+    assert report.operational.max_stage_latency_ms == {
+        "screen": 20,
+        "selection": 5,
+        "bar_fetch": 50,
+        "evaluation": 25,
+    }
+    assert report.operational.max_persistence_span_seconds == 300
     assert report.operational.max_source_age_seconds == 0
     assert report.operational.unique_candidates == 1
     assert report.operational.scheduled_overlap_symbols == 1
@@ -319,6 +367,31 @@ def test_partial_session_is_explicitly_ineligible(tmp_path):
     assert report.session_evidence_eligible is False
     assert report.operational.window_coverage_pct < 3
     assert {"COVERAGE_STARTED_LATE", "COVERAGE_ENDED_EARLY"} <= codes
+    assert "MISSED_CYCLES" in codes
+
+
+def test_missing_stage_timing_is_a_blocker(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn, include_timing=False)
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational_clean is False
+    assert report.operational.timing_rows == 0
+    assert {"TIMING_EVIDENCE_MISSING", "TIMING_TICK_SET_MISMATCH"} <= codes
+
+
+def test_tick_gap_names_preceding_slowest_stage(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn, times=[START, START + timedelta(minutes=3)])
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    issue = next(issue for issue in report.issues if issue.code == "TICK_GAP")
+
+    assert "180s" in issue.detail
+    assert "slowest stage was bar_fetch (50ms)" in issue.detail
+    assert report.operational.missed_cycles == 2
 
 
 def test_stale_provider_timestamps_and_fetch_errors_are_blockers(tmp_path):
@@ -387,7 +460,7 @@ def test_completed_audit_write_is_immutable_idempotent_and_after_window(tmp_path
 
     assert len(first) == 1
     assert second == ()
-    path = output / "postmarket_discovery_audit_2026-08-27_v2.json"
+    path = output / "postmarket_discovery_audit_2026-08-27_v3.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert json.loads(legacy_path.read_text(encoding="utf-8")) == {"legacy": True}
     assert payload["audit_code_version"] == "audit123"

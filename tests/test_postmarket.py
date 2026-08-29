@@ -87,6 +87,7 @@ def test_persistent_liquid_reactions_become_candidates(rth_close, closes):
     assert result.outcome == OUTCOME_CANDIDATE
     assert abs(result.move_pct) >= 8
     assert result.persistence_bars == 2
+    assert result.persistence_span_seconds == 300
     assert result.cumulative_notional >= 100_000
 
 
@@ -99,6 +100,7 @@ def test_one_completed_spike_waits_for_persistence():
     result = _evaluate([110.0])
     assert result.outcome == OUTCOME_AWAITING_PERSISTENCE
     assert result.persistence_bars == 1
+    assert result.persistence_span_seconds == 0
 
 
 def test_forming_second_bar_is_never_used():
@@ -127,6 +129,7 @@ def test_gapped_postmarket_series_is_rejected():
     ]
     result = _evaluate([], bars=bars, now=SESSION_CLOSE + timedelta(minutes=15))
     assert result.outcome == OUTCOME_BAR_GAP
+    assert result.persistence_span_seconds == 600
 
 
 def test_earlier_sparse_trading_does_not_poison_two_fresh_consecutive_bars():
