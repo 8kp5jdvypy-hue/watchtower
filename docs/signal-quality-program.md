@@ -23,8 +23,9 @@ The program is complete only when all of the following are true:
    first knowable candidate bar without look-ahead.
 3. Every discovery cycle records scheduled lag and screen, bar-fetch,
    evaluation, persistence, and total latency so a tick gap names its slow stage.
-4. A separate after-the-fact full-universe census measures Stage-1 false
-   negatives instead of assuming bounded vendor rankings equal full coverage.
+4. A deterministic live full-universe sweep supplements bounded vendor rankings,
+   while a separate after-the-fact census still measures discovery false
+   negatives rather than assuming either live lane achieved complete coverage.
 5. Versioned features cover volatility-adjusted movement, market/sector-relative
    strength, liquidity and spread, catalyst provenance, data confidence,
    persistence shape, and reversal risk.
@@ -69,8 +70,9 @@ are in `docs/postmarket-outcome-quality.md`.
 
 Implementation: `postmarket_discovery_timing` is committed atomically with
 each discovery tick, the service runs on an exchange-close-anchored grid, and
-discovery audit version 3 reconciles schedule, stage, persistence, and total
-timing. See `docs/postmarket-timing-truth.md`.
+discovery audit version 4 reconciles schedule, stage, persistence, total timing,
+and deterministic full-universe sweep shards. See
+`docs/postmarket-timing-truth.md`.
 
 ### 3. Coverage truth
 
@@ -78,9 +80,11 @@ timing. See `docs/postmarket-timing-truth.md`.
 - Stage-1 recall, false-negative symbols, detection delay, and reason codes.
 - Provider disagreement and unavailable-universe accounting.
 
-Implementation: `tradebot/postmarket_recall_census.py` snapshots and replays
-the active universe in bounded chunks, writes append-only per-symbol evidence,
-and publishes immutable miss reports. See `docs/postmarket-recall-census.md`.
+Implementation: the live observer covers one of five deterministic universe
+shards per minute in addition to the bounded screen; then
+`tradebot/postmarket_recall_census.py` independently snapshots and replays the
+active universe in bounded chunks, writes append-only per-symbol evidence, and
+publishes immutable miss reports. See `docs/postmarket-recall-census.md`.
 Candidate-level Massive comparison is implemented in the isolated external-
 context worker. A separate next-day Massive SIP flat-file proof replays the
 full frozen census universe, records independent recall/provider agreement and

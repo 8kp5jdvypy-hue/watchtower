@@ -7,9 +7,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+from tradebot.detectors import Bar
+from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
 from tradebot.postmarket import thresholds
 from tradebot.postmarket_discovery import connect
 from tradebot.postmarket_discovery_audit import (
+    AUDIT_VERSION,
     _audit_ready_at,
     _session_window,
     audit_discovery_session,
@@ -418,6 +421,74 @@ def test_malformed_rank_is_reported_without_crashing_audit(tmp_path):
     assert {"SCREEN_EVIDENCE_RANK_INVALID", "RANK_EVIDENCE_MISMATCH"} <= codes
 
 
+def test_v2_audit_accepts_one_exact_deterministic_full_universe_sweep_cycle(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    active = {"A", "B", "C", "D", "E"}
+
+    def bars(symbol):
+        return [Bar(symbol, START - timedelta(minutes=5), 100, 100, 100, 100, 1_000)]
+
+    for minute in range(5):
+        now = START + timedelta(minutes=minute)
+        screen = MarketWideScreen(
+            entries=(
+                MarketScreenEntry(
+                    symbol="A",
+                    source="market_gainer",
+                    rank=1,
+                    source_updated_at=now,
+                    move_pct=1.0,
+                    price=100.0,
+                ),
+            ),
+            requested_top_n=50,
+            provider="alpaca",
+            feed="sip",
+            endpoints=ENDPOINTS,
+            source_updates=tuple((endpoint, now) for endpoint in ENDPOINTS),
+        )
+        discovery_shadow.run_discovery_tick(
+            conn,
+            active_universe=active,
+            scheduled_earnings=set(),
+            now=now,
+            run_id=f"sweep-{minute}",
+            version="sweep123",
+            data_feed="sip",
+            screen_fetch=lambda top, screen=screen: screen,
+            bars_fetch=lambda symbols, session: {
+                symbol: bars(symbol) for symbol in symbols
+            },
+            sweep_bars_fetch=lambda symbols, start, end: {
+                symbol: bars(symbol) for symbol in symbols
+            },
+            sweep_cycle_ticks=5,
+        )
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert not {code for code in codes if code.startswith("SWEEP_")}
+    assert report.operational.source_observations["full_universe_sweep"] == 5
+    assert "COVERAGE_ENDED_EARLY" in codes
+
+    conn.execute("DROP TRIGGER postmarket_discovery_observations_no_delete")
+    conn.execute(
+        """
+        DELETE FROM postmarket_discovery_observations
+        WHERE seq=(
+            SELECT seq FROM postmarket_discovery_observations
+            WHERE sources_json='["full_universe_sweep"]'
+            ORDER BY seq LIMIT 1
+        )
+        """
+    )
+    damaged = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    assert "SWEEP_POSITION_COVERAGE_MISMATCH" in {
+        issue.code for issue in damaged.issues
+    }
+
+
 def test_session_window_uses_actual_early_close_and_est_postmarket_end():
     window = _session_window(date(2026, 11, 27))
 
@@ -460,7 +531,7 @@ def test_completed_audit_write_is_immutable_idempotent_and_after_window(tmp_path
 
     assert len(first) == 1
     assert second == ()
-    path = output / "postmarket_discovery_audit_2026-08-27_v3.json"
+    path = output / f"postmarket_discovery_audit_2026-08-27_v{AUDIT_VERSION}.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert json.loads(legacy_path.read_text(encoding="utf-8")) == {"legacy": True}
     assert payload["audit_code_version"] == "audit123"

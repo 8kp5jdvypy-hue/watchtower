@@ -1,7 +1,8 @@
 """Append-only completed-bar lifecycle for postmarket candidates.
 
-Once Stage 1 creates a candidate, this module keeps observing it even when it
-falls out of the bounded provider screen.  It records state transitions only;
+Once discovery creates a candidate, this module keeps observing it even when it
+falls out of both the bounded screen and current universe shard. It records
+state transitions only;
 it cannot route, alert, or trade.
 """
 from __future__ import annotations

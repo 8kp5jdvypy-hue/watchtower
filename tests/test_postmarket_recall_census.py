@@ -15,6 +15,7 @@ from tradebot.postmarket_discovery import connect
 from tradebot.postmarket_recall_census import (
     RecallCensusReport,
     RecallCensusResult,
+    _stage1_evidence,
     build_census_report,
     ensure_census_schema,
     evaluate_census_symbol,
@@ -185,8 +186,92 @@ def test_symbol_replay_keeps_transient_qualification_after_final_reversal():
         "up": (CLOSE + timedelta(minutes=10)).isoformat()
     }
     assert result.false_negative_directions == ("up",)
-    assert result.miss_reasons == {"up": "NOT_RETURNED_BY_BOUNDED_SCREEN"}
+    assert result.miss_reasons == {"up": "NOT_OBSERVED_BY_LIVE_DISCOVERY"}
     assert result.final_outcome != "CANDIDATE"
+
+
+def test_recall_stage1_reads_full_universe_sweep_observations_and_candidates(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_stage1(conn)
+    tick_id = conn.execute(
+        "SELECT tick_id FROM postmarket_discovery_ticks WHERE session=?",
+        (SESSION.isoformat(),),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO postmarket_discovery_observations
+            (tick_id,symbol,sources_json,ranks_json,screen_evidence_json,
+             screen_move_pct,outcome,reason,event_date,bar_open_ts_utc,
+             rth_close,open,high,low,close,volume,cumulative_volume,
+             cumulative_notional,move_pct,direction,persistence_bars,
+             data_age_seconds,data_feed,market_data_provider,bar_timeframe)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            tick_id,
+            "SWEEP",
+            '["full_universe_sweep"]',
+            "[]",
+            "[]",
+            None,
+            "CANDIDATE",
+            "qualified",
+            SESSION.isoformat(),
+            (CLOSE + timedelta(minutes=5)).isoformat(),
+            100,
+            111,
+            111,
+            111,
+            111,
+            10_000,
+            20_000,
+            2_200_000,
+            11,
+            "up",
+            2,
+            0,
+            "sip",
+            "alpaca",
+            "5Min",
+        ),
+    )
+    detected_at = CLOSE + timedelta(minutes=10, seconds=1)
+    conn.execute(
+        """
+        INSERT INTO postmarket_discovery_candidates
+            (session,symbol,event_date,direction,discovery_version,
+             first_detected_at,bar_open_ts_utc,rth_close,close,move_pct,
+             cumulative_volume,cumulative_notional,sources_json,data_feed,
+             market_data_provider,bar_timeframe,code_version,run_id)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            SESSION.isoformat(),
+            "SWEEP",
+            SESSION.isoformat(),
+            "up",
+            2,
+            detected_at.isoformat(),
+            (CLOSE + timedelta(minutes=5)).isoformat(),
+            100,
+            111,
+            11,
+            20_000,
+            2_200_000,
+            '["full_universe_sweep"]',
+            "sip",
+            "alpaca",
+            "5Min",
+            "sweep-code",
+            "sweep-run",
+        ),
+    )
+    conn.commit()
+
+    seen, candidates = _stage1_evidence(conn, SESSION)
+
+    assert "SWEEP" in seen
+    assert candidates["SWEEP"] == {"up": detected_at}
 
 
 def test_census_measures_recall_misses_delays_and_unavailable_universe(tmp_path):

@@ -12,7 +12,13 @@ import pytest
 
 from tradebot.detectors import Bar
 from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
-from tradebot.postmarket_discovery import connect, plan_tick_schedule, select_discovery_symbols
+from tradebot.postmarket_discovery import (
+    FULL_UNIVERSE_SWEEP_SOURCE,
+    connect,
+    plan_tick_schedule,
+    plan_universe_sweep,
+    select_discovery_symbols,
+)
 from tradebot.postmarket_discovery_shadow import (
     active_poll_sleep_seconds,
     discovery_enabled,
@@ -89,6 +95,208 @@ def test_selection_deduplicates_sources_filters_universe_and_marks_earnings():
     mover = next(row for row in selection.symbols if row.symbol == "MOVER")
     assert mover.sources == ("market_gainer", "most_active_volume", "scheduled_earnings")
     assert mover.screen_move_pct == 10.0
+
+
+def test_full_universe_sweep_covers_every_symbol_once_per_five_tick_cycle():
+    universe = {f"S{i:05d}" for i in range(13_102)}
+    shards = [
+        plan_universe_sweep(
+            universe,
+            scheduled_tick_utc=CLOSE + timedelta(minutes=minute),
+            session_close=CLOSE,
+        )
+        for minute in range(5)
+    ]
+
+    assert [shard.shard_index for shard in shards] == list(range(5))
+    assert {shard.shard_count for shard in shards} == {5}
+    assert {shard.shard_size for shard in shards} == {2621}
+    assert max(len(shard.symbols) for shard in shards) == 2621
+    assert sum(len(shard.symbols) for shard in shards) == len(universe)
+    assert set().union(*(set(shard.symbols) for shard in shards)) == universe
+    assert sum(
+        len(set(left.symbols) & set(right.symbols))
+        for left in shards
+        for right in shards
+        if left.shard_index < right.shard_index
+    ) == 0
+    assert len({shard.universe_sha256 for shard in shards}) == 1
+
+
+def test_selection_unions_sweep_provenance_and_conserves_overlap():
+    active = {"BROKEN", "MOVER", "QUIET", "SWEEP", "UNSEEN"}
+    sweep = plan_universe_sweep(
+        active,
+        scheduled_tick_utc=CLOSE + timedelta(minutes=3),
+        session_close=CLOSE,
+    )
+    assert sweep.symbols == ("SWEEP",)
+
+    selection = select_discovery_symbols(_screen(), active, set(), sweep)
+
+    assert selection.provider_screen_rows == 5
+    assert selection.provider_screen_unique_symbols == 4
+    assert selection.screen_rows == 6
+    assert selection.screen_unique_symbols == 5
+    assert selection.sweep_overlap_symbols == 0
+    assert selection.excluded_symbols == 1
+    assert selection.not_returned_symbols == 1
+    row = next(item for item in selection.symbols if item.symbol == "SWEEP")
+    assert row.sources == (FULL_UNIVERSE_SWEEP_SOURCE,)
+    assert row.ranks == ()
+    assert row.screen_move_pct is None
+    assert row.screen_evidence == (
+        {
+            "source": FULL_UNIVERSE_SWEEP_SOURCE,
+            "scheduled_tick_utc": sweep.scheduled_tick_utc.isoformat(),
+            "universe_sha256": sweep.universe_sha256,
+            "universe_position": 3,
+            "cycle_ticks": 5,
+            "shard_index": 3,
+            "shard_count": 5,
+            "shard_size": 1,
+        },
+    )
+
+
+def test_tick_fetches_sweep_only_window_and_persists_candidate(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    active = {"BROKEN", "MOVER", "QUIET", "SWEEP", "UNSEEN"}
+    tick_now = CLOSE + timedelta(minutes=13)
+    screen_updated = tick_now - timedelta(minutes=1)
+    base_screen = _screen()
+    screen = replace(
+        base_screen,
+        entries=tuple(
+            replace(entry, source_updated_at=screen_updated)
+            for entry in base_screen.entries
+        ),
+        source_updates=tuple(
+            (source, screen_updated) for source, _ in base_screen.source_updates
+        ),
+    )
+    bounded_requested = []
+    sweep_requested = []
+
+    def bounded_fetch(symbols, session):
+        bounded_requested.extend(symbols)
+        return {
+            symbol: _bars(symbol, [101, 102])
+            for symbol in symbols
+        }
+
+    def sweep_fetch(symbols, start, end):
+        sweep_requested.extend(symbols)
+        assert start == CLOSE - timedelta(minutes=5)
+        assert end == tick_now
+        return {"SWEEP": _bars("SWEEP", [109, 110])}
+
+    result, selection, _ = run_discovery_tick(
+        conn,
+        active_universe=active,
+        scheduled_earnings=set(),
+        now=tick_now,
+        run_id="sweep-run",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: screen,
+        bars_fetch=bounded_fetch,
+        sweep_bars_fetch=sweep_fetch,
+        sweep_cycle_ticks=5,
+    )
+
+    assert set(bounded_requested) == {"BROKEN", "MOVER", "QUIET"}
+    assert sweep_requested == ["SWEEP"]
+    assert result.sweep_shard_index == 3
+    assert result.sweep_shard_count == 5
+    assert result.sweep_shard_symbols == 1
+    assert result.discovered_symbols == result.evaluated_symbols == 4
+    assert result.candidate_observations == result.new_candidates == 1
+    assert result.error_count == 0
+    assert selection.not_returned_symbols == 1
+    assert conn.execute(
+        "SELECT sources_json FROM postmarket_discovery_candidates WHERE symbol='SWEEP'"
+    ).fetchone()[0] == '["full_universe_sweep"]'
+    tick = conn.execute(
+        """
+        SELECT discovery_version,discovery_scope,provider_screen_rows,
+               provider_screen_unique_symbols,sweep_cycle_ticks,
+               sweep_shard_index,sweep_shard_count,sweep_shard_size,
+               sweep_shard_symbols,sweep_overlap_symbols,invariant_ok
+        FROM postmarket_discovery_ticks WHERE tick_id=?
+        """,
+        (result.tick_id,),
+    ).fetchone()
+    assert tick == (
+        2,
+        "alpaca_top_movers_actives_plus_full_universe_sweep",
+        5,
+        4,
+        5,
+        3,
+        5,
+        1,
+        1,
+        0,
+        1,
+    )
+
+
+def test_sweep_fetch_outage_is_explicit_and_does_not_hide_bounded_candidate(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    active = {"BROKEN", "MOVER", "QUIET", "SWEEP", "UNSEEN"}
+    tick_now = CLOSE + timedelta(minutes=13)
+    screen_updated = tick_now - timedelta(minutes=1)
+    base_screen = _screen()
+    screen = replace(
+        base_screen,
+        entries=tuple(
+            replace(entry, source_updated_at=screen_updated)
+            for entry in base_screen.entries
+        ),
+        source_updates=tuple(
+            (source, screen_updated) for source, _ in base_screen.source_updates
+        ),
+    )
+
+    def fail_sweep(symbols, start, end):
+        assert symbols == ["SWEEP"]
+        raise RuntimeError("injected sweep provider outage")
+
+    result, _, evaluations = run_discovery_tick(
+        conn,
+        active_universe=active,
+        scheduled_earnings=set(),
+        now=tick_now,
+        run_id="sweep-outage",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: screen,
+        bars_fetch=lambda symbols, session: {
+            symbol: _bars(symbol, [109, 110] if symbol == "MOVER" else [101, 102])
+            for symbol in symbols
+        },
+        sweep_bars_fetch=fail_sweep,
+        sweep_cycle_ticks=5,
+    )
+
+    outcomes = {row.symbol: row.outcome for row in evaluations}
+    assert outcomes["MOVER"] == "CANDIDATE"
+    assert outcomes["SWEEP"] == "FETCH_ERROR"
+    assert result.fetched_symbols == 3
+    assert result.evaluated_symbols == 4
+    assert result.candidate_observations == result.new_candidates == 1
+    assert result.error_count == 1
+    assert conn.execute(
+        "SELECT symbol FROM postmarket_discovery_candidates ORDER BY symbol"
+    ).fetchall() == [("MOVER",)]
+    sweep_error = conn.execute(
+        "SELECT outcome,reason FROM postmarket_discovery_observations "
+        "WHERE tick_id=? AND symbol='SWEEP'",
+        (result.tick_id,),
+    ).fetchone()
+    assert sweep_error[0] == "FETCH_ERROR"
+    assert "injected sweep provider outage" in sweep_error[1]
 
 
 def test_tick_bulk_fetches_bounded_union_and_conserves_missing_symbol(tmp_path):
@@ -369,6 +577,40 @@ def test_discovery_schema_coexists_with_scheduled_shadow_schema(tmp_path):
         "postmarket_discovery_candidates",
         "postmarket_discovery_timing",
     } <= tables
+
+
+def test_connect_adds_sweep_columns_to_existing_discovery_tick_ledger(tmp_path):
+    db_path = tmp_path / "legacy-shadow.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE postmarket_discovery_ticks (
+            tick_id INTEGER PRIMARY KEY,
+            session TEXT NOT NULL,
+            tick_utc TEXT NOT NULL
+        )
+        """
+    )
+    legacy.close()
+
+    migrated = connect(db_path)
+    columns = {
+        row[1] for row in migrated.execute(
+            "PRAGMA table_info(postmarket_discovery_ticks)"
+        )
+    }
+
+    assert {
+        "provider_screen_rows",
+        "provider_screen_unique_symbols",
+        "sweep_universe_sha256",
+        "sweep_cycle_ticks",
+        "sweep_shard_index",
+        "sweep_shard_count",
+        "sweep_shard_size",
+        "sweep_shard_symbols",
+        "sweep_overlap_symbols",
+    } <= columns
 
 
 def test_non_sip_screen_is_rejected_before_persistence(tmp_path):

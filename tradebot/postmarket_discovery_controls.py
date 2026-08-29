@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from tradebot.detectors import Bar
 from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
 from tradebot.postmarket_discovery import connect as connect_discovery
 from tradebot.postmarket_discovery_health import evaluate_discovery_health
@@ -150,6 +151,22 @@ def _counts(conn) -> tuple[int, int, int]:
     )
 
 
+def _qualifying_bars(symbol: str) -> list[Bar]:
+    return [
+        Bar(symbol, SESSION_CLOSE - timedelta(minutes=5), 100, 100, 100, 100, 1_000),
+        Bar(symbol, SESSION_CLOSE, 109, 109, 109, 109, 10_000),
+        Bar(
+            symbol,
+            SESSION_CLOSE + timedelta(minutes=5),
+            110,
+            110,
+            110,
+            110,
+            10_000,
+        ),
+    ]
+
+
 def run_discovery_failure_injection(
     revision: str,
     *,
@@ -240,6 +257,41 @@ def run_discovery_failure_injection(
         finally:
             conn.close()
 
+        sweep_conn = connect_discovery(Path(raw_dir) / "sweep-discovery.db")
+        sweep_now = NOW + timedelta(minutes=1)
+        try:
+            def failed_sweep_fetch(symbols, start, end):
+                raise RuntimeError("injected full-universe sweep outage")
+
+            sweep_result, _, sweep_evaluations = run_discovery_tick(
+                sweep_conn,
+                active_universe={"BROKEN", "SWEEP"},
+                scheduled_earnings=set(),
+                now=sweep_now,
+                run_id="discovery-sweep-failure-injection",
+                version=revision,
+                data_feed="sip",
+                screen_fetch=lambda top: _screen(
+                    updated=sweep_now - timedelta(minutes=1)
+                ),
+                bars_fetch=lambda symbols, session: {
+                    "BROKEN": _qualifying_bars("BROKEN")
+                },
+                sweep_bars_fetch=failed_sweep_fetch,
+                sweep_cycle_ticks=2,
+            )
+            sweep_outcomes = {
+                row.symbol: row.outcome for row in sweep_evaluations
+            }
+            sweep_candidates = sweep_conn.execute(
+                "SELECT symbol FROM postmarket_discovery_candidates ORDER BY symbol"
+            ).fetchall()
+            sweep_integrity = [
+                row[0] for row in sweep_conn.execute("PRAGMA quick_check")
+            ]
+        finally:
+            sweep_conn.close()
+
     checks = (
         DiscoveryControlCheck(
             "missing_bulk_bar_is_conserved_as_fetch_error",
@@ -282,14 +334,31 @@ def run_discovery_failure_injection(
             f"counts_after={after_provider!r}",
         ),
         DiscoveryControlCheck(
+            "full_universe_sweep_outage_is_explicit_and_conserved",
+            sweep_result.discovered_symbols == sweep_result.evaluated_symbols == 2
+            and sweep_result.fetched_symbols == 1
+            and sweep_result.error_count == 1
+            and sweep_outcomes == {"BROKEN": "CANDIDATE", "SWEEP": "FETCH_ERROR"},
+            f"result={asdict(sweep_result)!r}; outcomes={sweep_outcomes!r}",
+        ),
+        DiscoveryControlCheck(
+            "full_universe_sweep_outage_cannot_fabricate_or_suppress_candidate",
+            sweep_result.candidate_observations == 1
+            and sweep_result.new_candidates == 1
+            and sweep_candidates == [("BROKEN",)],
+            "candidate_counts="
+            f"{(sweep_result.candidate_observations, sweep_result.new_candidates)!r}; "
+            f"candidates={sweep_candidates!r}",
+        ),
+        DiscoveryControlCheck(
             "persisted_failure_retains_sip_alpaca_provenance",
             observation is not None and observation[3:] == ("sip", "alpaca"),
             f"observation={observation!r}",
         ),
         DiscoveryControlCheck(
             "exercise_database_is_consistent",
-            integrity == ["ok"],
-            f"PRAGMA quick_check={integrity!r}",
+            integrity == ["ok"] and sweep_integrity == ["ok"],
+            f"PRAGMA quick_check bounded={integrity!r}; sweep={sweep_integrity!r}",
         ),
     )
     return _artifact(

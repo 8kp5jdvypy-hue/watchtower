@@ -8,11 +8,13 @@ two observers have different universe and provenance contracts.
 Reports are written to:
 
 ```text
-data/postmarket_audits/postmarket_discovery_audit_<session>_v3.json
+data/postmarket_audits/postmarket_discovery_audit_<session>_v4.json
 ```
 
-Version 3 preserves earlier immutable reports and adds required schedule and
-per-stage timing reconciliation; historical evidence is never rewritten.
+Version 4 preserves earlier immutable reports and adds strict full-universe
+sweep provenance and shard-conservation reconciliation. Version 3 added
+schedule and per-stage timing reconciliation. Historical evidence is never
+rewritten.
 
 That directory is already included in the encrypted off-box backup and
 isolated restore drill. Existing files are never overwritten. The audit opens
@@ -37,6 +39,7 @@ The operational audit also rejects:
 - incomplete or drifting endpoint, top-N, feed, provider, timeframe, scope,
   revision, universe, threshold, or discovery-version provenance;
 - underfilled top-N source scope;
+- missing, malformed, off-grid, or non-conserving sweep universe/shard evidence;
 - malformed ranks or screen evidence that disagrees with the tick snapshot;
 - broken active-universe, screen, fetch, evaluation, candidate, or error-count
   conservation;

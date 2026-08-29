@@ -1,9 +1,10 @@
 """Independent after-the-fact full-universe recall census.
 
-The live discovery screen is a bounded provider top-N view. This module takes
-an active-universe snapshot after the postmarket window, evaluates every symbol
-from completed bars, and compares qualifying symbol/direction pairs with the
-append-only Stage-1 discovery evidence. It cannot send alerts or alter candidates.
+Live discovery combines a bounded provider top-N lane with an attributable
+full-universe sweep. This module takes an active-universe snapshot after the
+postmarket window, evaluates every symbol from completed bars, and compares
+qualifying symbol/direction pairs with the shared append-only discovery
+evidence. It cannot send alerts or alter candidates.
 """
 from __future__ import annotations
 
@@ -348,7 +349,7 @@ def evaluate_census_symbol(
         direction: (
             "RETURNED_NOT_CONFIRMED"
             if stage1_seen
-            else "NOT_RETURNED_BY_BOUNDED_SCREEN"
+            else "NOT_OBSERVED_BY_LIVE_DISCOVERY"
         )
         for direction in false_negatives
     }

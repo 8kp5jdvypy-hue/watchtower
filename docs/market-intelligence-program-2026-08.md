@@ -187,13 +187,15 @@ evidence.
   off-box, and support a traversal-safe isolated restore with SQLite checks.
 - Slice 6, whole-market unscheduled discovery: implemented as a separate,
   default-off shadow service pending review and live provider-contract
-  calibration. Alpaca's bounded real-time SIP mover and activity screens form
-  Stage 1; Perch bulk-fetches completed five-minute bars only for their
-  deduplicated union and reuses the strict reaction evaluator for Stage 2.
-  Provider bounds/timestamps/metrics, active-universe conservation, missing
-  bars, evaluations, and candidates are append-only in the already-backed-up
-  shadow database. This slice has no delivery dependency and does not alter or
-  reset the scheduled-earnings evidence program.
+  calibration. Alpaca's bounded real-time SIP mover/activity screens provide a
+  fast lane. A second deterministic lane SHA-256 binds and partitions the active
+  universe into five disjoint shards, evaluating one shard each minute so a
+  complete cycle covers every symbol at the five-minute bar cadence. Both lanes
+  reuse the same strict evaluator. Provider bounds/timestamps/metrics, sweep
+  identity/position, active-universe conservation, missing bars, evaluations,
+  and candidates are append-only in the already-backed-up shadow database. This
+  slice has no delivery dependency and does not alter or reset the scheduled-
+  earnings evidence program.
 - Slice 7, discovery evidence audit: implemented as a read-only immutable
   session report pending review. It distinguishes partial calibration from a
   complete close-through-8:05 PM ET evidence window; reconciles provider
