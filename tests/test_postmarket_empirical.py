@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,7 @@ from tradebot.postmarket_empirical import (
     create_locked_experiment,
     ensure_empirical_schema,
     evaluate_rank_experiment,
+    export_empirical_report,
     holdout_label_inventory,
     record_independent_label,
     unblind_holdout,
@@ -177,7 +180,7 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
 
 def test_label_writer_is_rank_blind_append_only_and_freezes_holdout():
     conn = _conn()
-    _lock(conn)
+    experiment_manifest_sha256 = _lock(conn)
     assert "postmarket_candidate_ranks" not in inspect.getsource(record_independent_label)
     first = _label(conn, HOLDOUT, "AAA", "eligible", "up")
     assert first > 0
@@ -213,7 +216,7 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
     report = evaluate_rank_experiment(
         conn, experiment_id="rank-v1-exp-1", split="development",
         evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
-        code_version="empirical-code",
+        code_version="abc1234",
     )
 
     assert report.holdout_unblinded is False
@@ -225,10 +228,78 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
     assert report.passed_locked_policy is True
     assert report.blocking_reasons == ()
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_empirical_runs").fetchone()[0] == 1
+
+
+def test_exact_empirical_run_exports_as_immutable_digest_bound_artifact(tmp_path):
+    conn = _conn()
+    experiment_manifest_sha256 = _lock(conn)
+    _seed_session(conn, DEV)
+    _seed_labels(conn, DEV)
+    report = evaluate_rank_experiment(
+        conn,
+        experiment_id="rank-v1-exp-1",
+        split="development",
+        evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+        code_version="abc1234",
+    )
+
+    first = export_empirical_report(
+        conn,
+        experiment_id="rank-v1-exp-1",
+        split="development",
+        input_digest_sha256=report.input_digest_sha256,
+        output_dir=tmp_path,
+    )
+    second = export_empirical_report(
+        conn,
+        experiment_id="rank-v1-exp-1",
+        split="development",
+        input_digest_sha256=report.input_digest_sha256,
+        output_dir=tmp_path,
+    )
+    artifact_path = Path(first.path)
+    payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+    assert first.created is True
+    assert second.created is False
+    assert second.sha256 == first.sha256
+    assert payload["code_version"] == "abc1234"
+    assert payload["input_digest_sha256"] == report.input_digest_sha256
+    assert payload["experiment_manifest_sha256"] == experiment_manifest_sha256
+    assert payload["report"]["passed_locked_policy"] is True
+    assert artifact_path.stat().st_mode & 0o777 == 0o444
+    assert list(tmp_path.glob("*.tmp")) == []
+
+    artifact_path.chmod(0o644)
+    artifact_path.write_text("changed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match exact run"):
+        export_empirical_report(
+            conn,
+            experiment_id="rank-v1-exp-1",
+            split="development",
+            input_digest_sha256=report.input_digest_sha256,
+            output_dir=tmp_path,
+        )
+
+
+def test_empirical_evaluation_rejects_unknown_revision_before_append(tmp_path):
+    conn = _conn()
+    _lock(conn)
+    _seed_session(conn, DEV)
+    _seed_labels(conn, DEV)
+    with pytest.raises(ValueError, match="Git SHA"):
+        evaluate_rank_experiment(
+            conn,
+            experiment_id="rank-v1-exp-1",
+            split="development",
+            evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+            code_version="unknown",
+        )
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_empirical_runs").fetchone()[0] == 0
     evaluate_rank_experiment(
         conn, experiment_id="rank-v1-exp-1", split="development",
         evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),
-        code_version="empirical-code",
+        code_version="abc1234",
     )
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_empirical_runs").fetchone()[0] == 1
 
@@ -243,7 +314,8 @@ def test_holdout_cannot_be_read_before_explicit_unblind_and_failures_are_named()
     with pytest.raises(ValueError, match="sealed"):
         evaluate_rank_experiment(
             conn, experiment_id="rank-v1-exp-1", split="holdout",
-            evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc), code_version="x",
+            evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+            code_version="abc1234",
         )
     unblind_holdout(
         conn, experiment_id="rank-v1-exp-1",
@@ -255,7 +327,8 @@ def test_holdout_cannot_be_read_before_explicit_unblind_and_failures_are_named()
     )
     report = evaluate_rank_experiment(
         conn, experiment_id="rank-v1-exp-1", split="holdout",
-        evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc), code_version="x",
+        evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),
+        code_version="abc1234",
     )
     assert report.holdout_unblinded is True
     assert report.passed_locked_policy is False

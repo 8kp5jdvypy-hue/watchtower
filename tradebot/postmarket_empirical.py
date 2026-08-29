@@ -10,9 +10,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 import sqlite3
+import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -26,6 +30,9 @@ ET = ZoneInfo("America/New_York")
 CLASSIFICATIONS = {"eligible", "ineligible", "ambiguous"}
 LABEL_METHODS = {"blind_bar_review", "multi_provider_reconciliation"}
 SPLITS = {"development", "holdout"}
+EMPIRICAL_ARTIFACT_VERSION = 1
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+REVISION_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
 
 
 EMPIRICAL_SCHEMA = """
@@ -195,6 +202,18 @@ class EmpiricalReport:
     input_digest_sha256: str
 
 
+@dataclass(frozen=True)
+class WrittenEmpiricalArtifact:
+    path: str
+    sha256: str
+    created: bool
+    experiment_id: str
+    split: str
+    input_digest_sha256: str
+    report_sha256: str
+    experiment_manifest_sha256: str
+
+
 def ensure_empirical_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(EMPIRICAL_SCHEMA)
     columns = {
@@ -216,6 +235,12 @@ def _utc(value: datetime, name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _revision(value: str | None, name: str) -> str:
+    if not isinstance(value, str) or not REVISION_PATTERN.fullmatch(value):
+        raise ValueError(f"{name} must be an attributable 7-40 character Git SHA")
+    return value
 
 
 def _canonical(value: Any) -> str:
@@ -665,6 +690,7 @@ def evaluate_rank_experiment(
     code_version: str | None,
 ) -> EmpiricalReport:
     ensure_empirical_schema(conn)
+    revision = _revision(code_version, "code_version")
     if split not in SPLITS:
         raise ValueError(f"split must be one of {sorted(SPLITS)}")
     experiment = _experiment(conn, experiment_id)
@@ -734,7 +760,135 @@ def evaluate_rank_experiment(
             """,
             (
                 experiment_id, split, _utc(evaluated_at, "evaluated_at").isoformat(),
-                code_version, input_digest, raw, hashlib.sha256(raw.encode()).hexdigest(),
+                revision, input_digest, raw, hashlib.sha256(raw.encode()).hexdigest(),
             ),
         )
     return report
+
+
+def export_empirical_report(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    split: str,
+    input_digest_sha256: str,
+    output_dir: Path | str,
+) -> WrittenEmpiricalArtifact:
+    """Publish one exact persisted run as an immutable, digest-bound artifact."""
+    ensure_empirical_schema(conn)
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {sorted(SPLITS)}")
+    digest = input_digest_sha256.strip().lower()
+    if not SHA256_PATTERN.fullmatch(digest):
+        raise ValueError("input_digest_sha256 must be a lowercase SHA-256 digest")
+    row = conn.execute(
+        """
+        SELECT r.empirical_run_id,r.experiment_id,r.split,r.evaluated_at_utc,
+               r.code_version,r.input_digest_sha256,r.report_json,r.report_sha256,
+               e.manifest_sha256
+        FROM postmarket_rank_empirical_runs r
+        JOIN postmarket_rank_experiments e ON e.experiment_id=r.experiment_id
+        WHERE r.experiment_id=? AND r.split=? AND r.input_digest_sha256=?
+        """,
+        (experiment_id, split, digest),
+    ).fetchone()
+    if row is None:
+        raise ValueError("empirical run does not exist for the exact input digest")
+    code_version = _revision(row[4], "empirical run code_version")
+    report_raw = row[6]
+    if not isinstance(report_raw, str):
+        raise ValueError("empirical run report_json must be text")
+    report_digest = hashlib.sha256(report_raw.encode()).hexdigest()
+    if report_digest != row[7]:
+        raise ValueError("empirical run report digest does not match stored JSON")
+    try:
+        report = json.loads(report_raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("empirical run report is not valid JSON") from exc
+    if not isinstance(report, dict):
+        raise ValueError("empirical run report root must be an object")
+    if _canonical(report) != report_raw:
+        raise ValueError("empirical run report is not canonical JSON")
+    if (
+        report.get("experiment_id") != experiment_id
+        or report.get("split") != split
+        or report.get("input_digest_sha256") != digest
+    ):
+        raise ValueError("empirical run report identity does not match stored metadata")
+    if split == "holdout" and report.get("holdout_unblinded") is not True:
+        raise ValueError("holdout empirical report is not explicitly unblinded")
+    experiment_manifest_sha256 = row[8]
+    if (
+        not isinstance(experiment_manifest_sha256, str)
+        or not SHA256_PATTERN.fullmatch(experiment_manifest_sha256)
+    ):
+        raise ValueError("experiment manifest digest is invalid")
+    if not isinstance(row[3], str):
+        raise ValueError("empirical run evaluated_at_utc must be text")
+    try:
+        parsed_evaluated_at = datetime.fromisoformat(row[3])
+    except ValueError as exc:
+        raise ValueError("empirical run evaluated_at_utc is invalid") from exc
+    evaluated_at = _utc(
+        parsed_evaluated_at, "empirical run evaluated_at_utc"
+    ).isoformat()
+    payload = {
+        "schema_version": EMPIRICAL_ARTIFACT_VERSION,
+        "artifact_type": "postmarket_rank_empirical",
+        "empirical_run_id": int(row[0]),
+        "experiment_id": experiment_id,
+        "split": split,
+        "evaluated_at_utc": evaluated_at,
+        "code_version": code_version,
+        "input_digest_sha256": digest,
+        "report_sha256": report_digest,
+        "experiment_manifest_sha256": experiment_manifest_sha256,
+        "report": report,
+    }
+    raw = (_canonical(payload) + "\n").encode()
+    artifact_sha256 = hashlib.sha256(raw).hexdigest()
+    directory = Path(output_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    experiment_key = hashlib.sha256(experiment_id.encode()).hexdigest()[:12]
+    destination = directory / (
+        f"postmarket_rank_empirical_{experiment_key}_{split}_{digest[:16]}_v"
+        f"{EMPIRICAL_ARTIFACT_VERSION}.json"
+    )
+    if destination.exists():
+        if destination.is_symlink() or destination.read_bytes() != raw:
+            raise ValueError("existing empirical artifact does not match exact run")
+        return WrittenEmpiricalArtifact(
+            str(destination), artifact_sha256, False, experiment_id, split,
+            digest, report_digest, experiment_manifest_sha256,
+        )
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=directory
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o444)
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError:
+            if destination.is_symlink() or destination.read_bytes() != raw:
+                raise ValueError("concurrent empirical artifact does not match exact run")
+            created = False
+        else:
+            created = True
+        temporary.unlink()
+        directory_descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return WrittenEmpiricalArtifact(
+        str(destination), artifact_sha256, created, experiment_id, split,
+        digest, report_digest, experiment_manifest_sha256,
+    )

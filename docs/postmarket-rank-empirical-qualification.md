@@ -102,3 +102,16 @@ docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
 
 Unblinding freezes holdout labels permanently. A stale or mistyped inventory
 digest fails without changing state.
+
+Evaluation also exports the exact persisted run to
+`data/postmarket_audits/postmarket_rank_empirical_<experiment>_holdout_<digest>_v1.json`
+(the experiment component is a stable hash, not unsanitized operator text).
+The envelope conforms to
+`truth/postmarket_rank_empirical_artifact_v1.schema.json`, binds the evaluated
+time and Git revision to the stored input/report digests and the experiment's
+locked manifest digest, is published by
+atomic no-replace link, and is included in the encrypted off-box artifact
+backup. An unknown revision, mismatched stored digest, identity conflict, or
+holdout report without an explicit unblind event prevents export. This artifact
+is the empirical input to the market-wide aggregate readiness gate; console
+output alone is not qualification evidence.
