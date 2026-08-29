@@ -188,6 +188,14 @@ eligible for owner review and cannot enable delivery. See
 `docs/postmarket-discovery-evidence-gate.md`. Prospective live evidence and
 owner review remain unfinished gates.
 
+Deployment preflight: `scripts/postmarket_signal_quality_preflight.py` verifies
+the exact clean `origin/main` revision, live SQLite integrity, recent
+digest-valid backup and evidence custody, disk headroom, shadow switches,
+independent-provider credential presence, exact-revision controls, and the
+licensed reference contract without printing secrets or changing production.
+It distinguishes safe shadow deployment from full evidence-campaign readiness.
+See `docs/postmarket-signal-quality-preflight.md`.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.
