@@ -88,9 +88,12 @@ if the symbols had been promoted earlier.
     pending/waiting states; after its grace period, a missing ledger event is
     explicitly delayed/degraded. Signal detail renders those states instead
     of treating every absent mark as indefinitely pending.
-11. Quote staleness can remain invisible after the first successful UI
-    fetch; several frontend fetch errors still render as quiet/loading or
-    signed-out states.
+11. **Resolved:** quote responses carry provider-error, stale-cache, missing,
+    cache-age, and checked-at evidence. The UI preserves last-known prices
+    during a transient failure but labels reconnecting/delayed/partial/
+    unavailable states with the last successful update. Malformed successful
+    API bodies fail explicitly, only a real 401 means signed out, and a failed
+    watchlist signal fetch can no longer render every symbol as quietly clean.
 12. Public/system status exposes only a subset of already-recorded failure
     families.
 

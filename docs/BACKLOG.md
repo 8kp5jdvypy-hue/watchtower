@@ -164,20 +164,21 @@ called the whole set untriaged:
 
 - **#7 (`historical_performance` sign convention)** — **DONE** (PR #23),
   with regression tests asserting the sibling functions agree.
-- **#13 (`run_live`/`run_replay` coverage)** — **PARTIALLY DONE**:
-  `run_live` now has tests (non-trading-day idle, restart-after-close),
-  but the per-symbol exception-isolation loop — the actual
-  highest-blast-radius path — still has none.
-- **#22 (Watchlist error discarded)** — **PARTIALLY DONE**: the
-  watchlist fetch's own error is surfaced; the `fetchToday` error this
-  finding named is still dropped.
-- **Everything else (#6, #8, #9, #10, #11, #12, #14–#21, #23–#27) —
-  STILL OPEN**, each confirmed present in current main. #6's mass-delist
-  half is now guarded ([#37](https://github.com/8kp5jdvypy-hue/watchtower/pull/37)),
-  which closes the destructive part of that finding.
-- The **Priority 2** `rvol_spike`/`relative_strength_break` list-position
-  baseline misalignment is **unchanged** (`detectors.py:240`) — a
-  statistical bug on the money path that announces itself nowhere.
+- **#13 (`run_live`/`run_replay` coverage)** — **DONE**: direct live and
+  replay regressions prove one symbol failure cannot stop later symbols and
+  require the failure in heartbeat errors.
+- **#22 (Watchlist error discarded)** — **DONE**: both watchlist and
+  `fetchToday` failures are surfaced; unknown signal state renders checking/
+  unavailable and never the false calm `quiet` label.
+- **#9, #11, #12, #14, #19, #20, #24** — **DONE**; see the corresponding
+  resolution evidence and regression tests in `full-code-review.md`.
+- **#8** is implemented and independently tested in PR #134, pending merge.
+- **#6, #10, #15–#18, #21, #23, #25–#27 remain open.** #6's mass-delist
+  half is guarded ([#37](https://github.com/8kp5jdvypy-hue/watchtower/pull/37)),
+  which closes its destructive path but not the whole finding.
+- The **Priority 2** `rvol_spike`/`relative_strength_break` timestamp
+  alignment defect is **DONE**: both detectors use exact DST-aware timestamp
+  alignment, with missing-bar regressions preventing list-position drift.
 
 ## Small items found during the 2026-08-15 sweep
 

@@ -237,22 +237,25 @@ retry — they may believe the bot is halted when it is still running.
 *Fix: distinguish "confirmed not halted" from "couldn't check" and alert
 loudly (not just fail open) on repeated check failures.*
 
-**19. `web-app/src/api.js:23` — a 200 response with an unparseable JSON body silently becomes `null`, indistinguishable from "still loading"**
+**19. RESOLVED — successful malformed API responses become explicit protocol errors**
 `await response.json().catch(() => null)` guards this on the success path
 too, not just the error path. Downstream, every consumer (`Today.jsx`,
 `Feed.jsx`, `SignalDetail.jsx`, `Watchlist.jsx`, `Performance.jsx`) gates
 content strictly on `data &&`, so a malformed-but-200 response renders
 identically to "hasn't fetched yet" rather than surfacing an error.
-*Fix: only swallow the parse failure on non-ok responses; on `response.ok`
-with a bad body, throw/set an explicit error state.*
+*Resolution: `parseApiResponse()` throws `ApiProtocolError` for malformed,
+null, or primitive successful bodies while retaining the HTTP status for
+unreadable error responses. Regression tests pin both paths.*
 
-**20. `web-app/src/App.jsx:60-61` — any `/me` failure (network blip, 500, timeout) is treated as "signed out"**
+**20. RESOLVED — only an authoritative `/me` 401 becomes "signed out"**
 `api.me().then(setAccount).catch(() => setAccount(null))` renders the
 `Login` screen for every failure mode, not just an actual invalid session.
 An active user hitting a transient backend hiccup gets silently logged out
 with no retry affordance.
-*Fix: distinguish auth failure (401) from transport failure; only clear
-the session on the former.*
+*Resolution: the auth boundary classifies only `ApiError(401)` as signed
+out. Network, server, and protocol failures render a distinct session-
+unavailable screen that explicitly says the account was not signed out and
+offers a retry.*
 
 **21. `tradebot/journal.py:219-223,267-288` (`cluster_id`/`write_cluster`) — the detection identity key is a 64-bit-truncated SHA-256 with a silent `ON CONFLICT ... DO UPDATE`**
 A genuine collision between two different `(symbol, session, ts_utc,
@@ -263,12 +266,13 @@ gap relative to every other identity key in this codebase (e.g. outbox's
 *Fix: widen the truncation or add a collision check (verify the existing
 row's non-hash fields match before allowing the upsert to proceed).*
 
-**22. `web-app/src/components/Watchlist.jsx:19-21` — the signals-feed fetch's error is discarded, making "fetch failed" look identical to "no active signals"**
+**22. RESOLVED — a failed watchlist signal fetch cannot render "quiet"**
 `const { data: today } = useApiData(fetchToday)` never destructures
 `error`; a failed `/signals/today` while `/watchlist` succeeds renders the
 calm "quiet" badge for every symbol with no indication anything failed.
-*Fix: destructure and surface `error` from the hook; render a distinct
-error state instead of the default "quiet" badge.*
+*Resolution: Watchlist surfaces the signals error, suppresses every calm
+`quiet` label while status is unknown, and uses explicit `checking` or
+`unavailable` row states until real signal data exists.*
 
 **23. `tests/telegram_bot/test_handlers.py:64-70` (`_ctx()`) — every one of ~80 handler tests hardcodes `chat_id == user_id`, structurally**
 No test in this file ever constructs a context where `chat_id` differs
@@ -282,14 +286,19 @@ the shape of the project's known past incident.
 distinct from `user_id`/`telegram_user_id` to give at least one test in the
 file the power to catch an identity mixup.*
 
-**24. `web-app/src/hooks/useQuotes.js:37-39` — a sustained quote-fetch outage is invisible to the user indefinitely**
+**24. RESOLVED — sustained and server-hidden quote degradation is explicit**
 `.catch(() => { if (!cancelled && !hasLoaded) setQuotes({}) })` discards
 the error after the first successful load; stale quotes stay on screen
 with no "as of" indicator. Reads as a deliberate choice for transient
 blips per the file's own comments, but nothing distinguishes a 5-second
 hiccup from an hours-long outage.
-*Fix: track time-since-last-successful-quote and surface a staleness
-indicator past some threshold.*
+*Resolution: `/quotes` now discloses provider failure, stale cached symbols,
+missing symbols, cache age, and check time even on its graceful 200 fallback.
+The hook validates quote payloads, tracks last success and elapsed freshness,
+preserves real last-known values during transient failures, and renders
+reconnecting/delayed/partial/unavailable notices with an as-of time. Tests
+prove neither client-side poll failure nor backend stale-cache fallback can
+remain `live`.*
 
 ### LOW
 
@@ -345,10 +354,10 @@ cross-referenced rather than repeated in full.
 | 12 | `tradebot/analytics.py:56-108` | Dead backfill jobs (never called) | See finding #25 — not "silent failure" so much as "silent non-existence" |
 | 13 | `web-app/src/components/SignalDetail.jsx:33-61` | Frontend infers "pending" from absence, no ceiling | See finding #9 |
 | 14 | `tradebot/api/app.py:498-517` | API response ambiguous between two very different states | See finding #14 |
-| 15 | `web-app/src/api.js:23` | 200 + bad body → silent `null`, looks like "loading" | See finding #19 |
-| 16 | `web-app/src/App.jsx:60-61` | Any `/me` failure → treated as signed-out | See finding #20 |
-| 17 | `web-app/src/components/Watchlist.jsx:19-21` | Fetch error discarded, looks like "no signals" | See finding #22 |
-| 18 | `web-app/src/hooks/useQuotes.js:37-39` | Sustained outage invisible after first successful load | See finding #24 |
+| 15 | `web-app/src/api.js` | **RESOLVED:** malformed successful bodies throw a protocol error | See finding #19 |
+| 16 | `web-app/src/App.jsx` | **RESOLVED:** only 401 signs out; other failures get retry UI | See finding #20 |
+| 17 | `web-app/src/components/Watchlist.jsx` | **RESOLVED:** signal failure suppresses false `quiet` labels | See finding #22 |
+| 18 | quote API + `useQuotes.js` | **RESOLVED:** stale/provider/partial/poll degradation is visible | See finding #24 |
 | 19 | `tradebot/funnel_events.py:57-65`, `tradebot/client_errors.py:38-51` | Public endpoints intentionally "silently ignore" bad input | **Not a bug** — explicitly documented anti-enumeration discipline; flagged here only so it isn't mistaken for an oversight during any future audit |
 
 **Systemic observation:** the project's only two active "is anything

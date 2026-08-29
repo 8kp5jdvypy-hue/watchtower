@@ -503,6 +503,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             s for s in symbols
             if s not in cache or (now - cache[s][1]).total_seconds() > QUOTE_CACHE_TTL_SECONDS
         ]
+        provider_error = False
         if stale:
             try:
                 fetched = fetch_quotes(stale)
@@ -514,11 +515,37 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 # TTL) instead of 500ing symbols that didn't need a fetch
                 # at all.
                 logger.exception("fetch_quotes failed; serving cached quotes where available")
+                provider_error = True
             else:
                 for symbol, q in fetched.items():
                     cache[symbol] = (q, now)
 
-        return jsonify({"quotes": {s: _to_jsonable(cache[s][0]) for s in symbols if s in cache}})
+        cache_age_seconds = {
+            s: max(0.0, (now - cache[s][1]).total_seconds())
+            for s in symbols
+            if s in cache
+        }
+        stale_symbols = sorted(
+            s for s, age in cache_age_seconds.items()
+            if age > QUOTE_CACHE_TTL_SECONDS
+        )
+        missing_symbols = sorted(s for s in symbols if s not in cache)
+        return jsonify(
+            {
+                "quotes": {s: _to_jsonable(cache[s][0]) for s in symbols if s in cache},
+                # Operational freshness is separate from the quote's own
+                # exchange timestamp. A vendor failure may still return a
+                # useful cached last trade, but consumers must be able to say
+                # that it is cached/stale rather than presenting it as live.
+                "freshness": {
+                    "provider_error": provider_error,
+                    "stale_symbols": stale_symbols,
+                    "missing_symbols": missing_symbols,
+                    "cache_age_seconds": cache_age_seconds,
+                    "checked_at_utc": now.isoformat(),
+                },
+            }
+        )
 
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (

@@ -109,6 +109,27 @@ test.describe('magic-link verification', () => {
 })
 
 test.describe('authenticated session', () => {
+  test('a transient session-check failure is not misrepresented as signed out', async ({ page }) => {
+    let healthy = false
+    await page.route('**/me', (route) => route.fulfill(
+      healthy
+        ? { status: 200, json: defaultAccount() }
+        : { status: 503, json: { error: 'temporarily unavailable' } }
+    ))
+    for (const [pattern, body] of Object.entries(EMPTY_AUTHENTICATED_RESPONSES)) {
+      await page.route(pattern, (route) => route.fulfill({ status: 200, json: body }))
+    }
+
+    await page.goto('/')
+    await expect(page.getByText('Perch couldn’t verify your session.')).toBeVisible()
+    await expect(page.getByText('Your account has not been signed out.')).toBeVisible()
+    await expect(page.locator('.login-shell')).toHaveCount(0)
+
+    healthy = true
+    await page.getByRole('button', { name: 'Try again' }).click()
+    await expect(page.locator('.app-shell')).toBeVisible()
+  })
+
   test('bypasses Login entirely, even when the URL still says ?mode=signup', async ({ page }) => {
     await mockLoggedIn(page)
     await page.goto('/?mode=signup')

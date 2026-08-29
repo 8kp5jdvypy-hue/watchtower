@@ -110,6 +110,35 @@
   background: var(--bg);
   color: var(--ink-dim);
 }
+.session-error-shell {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  padding: 1.5rem;
+  text-align: center;
+  background: var(--bg);
+  color: var(--ink-dim);
+}
+.session-error-shell h1 {
+  margin: 0.4rem 0 0;
+  color: var(--ink);
+  font-family: var(--display);
+  font-size: var(--step-1);
+}
+.session-error-shell p { margin: 0; max-width: 38ch; line-height: 1.55; font-size: 0.88rem; }
+.session-retry-button {
+  margin-top: 0.4rem;
+  border: 1px solid var(--cyan);
+  border-radius: var(--radius-control);
+  background: rgba(52, 226, 255, 0.08);
+  color: var(--cyan);
+  padding: 0.55rem 1rem;
+  font-family: var(--mono);
+  cursor: pointer;
+}
 .loading-label {
   font-family: var(--display);
   font-weight: 600;

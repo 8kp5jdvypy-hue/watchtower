@@ -14,15 +14,15 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
-    baseURL: 'http://localhost:5183',
+    baseURL: 'http://127.0.0.1:5183',
     trace: 'retain-on-failure',
   },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
   ],
   webServer: {
-    command: 'npm run dev -- --port 5183',
-    url: 'http://localhost:5183',
+    command: 'npm run dev -- --host 127.0.0.1 --port 5183',
+    url: 'http://127.0.0.1:5183',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
   },

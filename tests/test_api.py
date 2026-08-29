@@ -252,6 +252,9 @@ def test_quotes_returns_real_quotes_for_watchlist_symbols(app, client, monkeypat
     body = response.get_json()
     assert set(body["quotes"].keys()) == {"SPY", "QQQ"}
     assert body["quotes"]["SPY"]["last"] == 100.0
+    assert body["freshness"]["provider_error"] is False
+    assert body["freshness"]["stale_symbols"] == []
+    assert body["freshness"]["missing_symbols"] == []
 
 
 def test_quotes_silently_drops_symbols_outside_the_watchlist(app, client, monkeypatch):
@@ -267,6 +270,7 @@ def test_quotes_silently_drops_symbols_outside_the_watchlist(app, client, monkey
     response = client.get("/quotes?symbols=SPY,DOGE")
     body = response.get_json()
     assert set(body["quotes"].keys()) == {"SPY"}
+    assert body["freshness"]["missing_symbols"] == []
 
 
 def test_quotes_omits_a_symbol_the_vendor_has_no_quote_for(app, client, monkeypatch):
@@ -282,6 +286,8 @@ def test_quotes_omits_a_symbol_the_vendor_has_no_quote_for(app, client, monkeypa
     response = client.get("/quotes?symbols=SPY,QQQ")
     body = response.get_json()
     assert set(body["quotes"].keys()) == {"SPY"}
+    assert body["freshness"]["provider_error"] is False
+    assert body["freshness"]["missing_symbols"] == ["QQQ"]
 
 
 def test_quotes_caches_within_the_ttl(app, client, monkeypatch):
@@ -327,7 +333,12 @@ def test_quotes_serves_stale_cache_instead_of_500ing_on_a_vendor_failure(app, cl
 
     response = client.get("/quotes?symbols=SPY")
     assert response.status_code == 200
-    assert response.get_json()["quotes"]["SPY"]["last"] == 100.0
+    body = response.get_json()
+    assert body["quotes"]["SPY"]["last"] == 100.0
+    assert body["freshness"]["provider_error"] is True
+    assert body["freshness"]["stale_symbols"] == ["SPY"]
+    assert body["freshness"]["missing_symbols"] == []
+    assert body["freshness"]["cache_age_seconds"]["SPY"] > api_app_module.QUOTE_CACHE_TTL_SECONDS
 
 
 def test_quotes_returns_200_with_no_quotes_when_vendor_fails_and_nothing_is_cached(app, client, monkeypatch):
@@ -343,7 +354,11 @@ def test_quotes_returns_200_with_no_quotes_when_vendor_fails_and_nothing_is_cach
 
     response = client.get("/quotes?symbols=SPY")
     assert response.status_code == 200
-    assert response.get_json()["quotes"] == {}
+    body = response.get_json()
+    assert body["quotes"] == {}
+    assert body["freshness"]["provider_error"] is True
+    assert body["freshness"]["stale_symbols"] == []
+    assert body["freshness"]["missing_symbols"] == ["SPY"]
 
 
 def test_activity_is_empty_with_no_linked_telegram_identity(app, client):
