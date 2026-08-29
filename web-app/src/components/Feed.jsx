@@ -8,6 +8,7 @@ import { bySeverity } from '../signalOrder'
 import { collapseDuplicates } from '../signalGrouping'
 import LiveStatus from './LiveStatus'
 import PerchMark from './PerchMark'
+import QuoteDataNotice from './QuoteDataNotice'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
 import './Views.css'
@@ -22,7 +23,7 @@ export default function Feed() {
   })
   const [openId, setOpenId] = useState(null)
   const symbols = useMemo(() => [...new Set((data?.signals ?? []).map((s) => s.symbol))], [data])
-  const quotes = useQuotes(symbols)
+  const quoteState = useQuotes(symbols)
 
   return (
     <div className="view">
@@ -32,6 +33,7 @@ export default function Feed() {
 
       {loading && <p className="empty-state">Loading…</p>}
       {error && !data && <p className="empty-state">Couldn't load the feed.</p>}
+      <QuoteDataNotice status={quoteState.status} lastSuccessAt={quoteState.lastSuccessAt} />
       {data && data.signals.length === 0 && (
         <div className="quiet-state">
           <PerchMark size={30} state="idle" />
@@ -40,7 +42,7 @@ export default function Feed() {
         </div>
       )}
       {data && bySeverity(collapseDuplicates(data.signals)).map((signal) => (
-        <SignalCard key={signal.id} signal={signal} quote={quotes[signal.symbol]} onView={setOpenId} />
+        <SignalCard key={signal.id} signal={signal} quote={quoteState.quotes[signal.symbol]} onView={setOpenId} />
       ))}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>

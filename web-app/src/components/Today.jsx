@@ -7,6 +7,7 @@ import { useQuotes } from '../hooks/useQuotes'
 import { bySeverity } from '../signalOrder'
 import LiveStatus from './LiveStatus'
 import PerchMark from './PerchMark'
+import QuoteDataNotice from './QuoteDataNotice'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
 import './Views.css'
@@ -32,7 +33,7 @@ export default function Today({ account }) {
   })
   const [openId, setOpenId] = useState(null)
   const symbols = useMemo(() => [...new Set((data?.signals ?? []).map((s) => s.symbol))], [data])
-  const quotes = useQuotes(symbols)
+  const quoteState = useQuotes(symbols)
 
   // Tracks which signal IDs are genuinely new since the LAST poll, not
   // just new to this component instance -- the initial load is a batch,
@@ -129,6 +130,7 @@ export default function Today({ account }) {
 
       {loading && <p className="empty-state">Loading…</p>}
       {error && !data && <p className="empty-state">Couldn't load today's signals.</p>}
+      <QuoteDataNotice status={quoteState.status} lastSuccessAt={quoteState.lastSuccessAt} />
       {data && data.signals.length === 0 && (
         <div className="quiet-state">
           <PerchMark size={30} state="idle" />
@@ -140,7 +142,7 @@ export default function Today({ account }) {
         <SignalCard
           key={signal.id}
           signal={signal}
-          quote={quotes[signal.symbol]}
+          quote={quoteState.quotes[signal.symbol]}
           onView={setOpenId}
           arrived={arrivedIds.has(signal.id)}
         />

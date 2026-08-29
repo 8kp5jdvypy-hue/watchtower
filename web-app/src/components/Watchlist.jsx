@@ -1,9 +1,11 @@
 import { useCallback, useMemo } from 'react'
 import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
+import { usePolling } from '../hooks/usePolling'
 import { useQuotes } from '../hooks/useQuotes'
 import { tierWeight } from '../signalOrder'
 import PerchMark from './PerchMark'
+import QuoteDataNotice from './QuoteDataNotice'
 import './Watchlist.css'
 import './Views.css'
 
@@ -18,8 +20,11 @@ export default function Watchlist() {
   const fetchWatchlist = useCallback(() => api.watchlist(), [])
   const fetchToday = useCallback(() => api.signalsToday(), [])
   const { data, error, loading } = useApiData(fetchWatchlist)
-  const { data: today } = useApiData(fetchToday)
-  const quotes = useQuotes(data?.symbols ?? [])
+  // Signal state is live market data too. Polling gives a transient failure a
+  // recovery path; while it is failing, unsignaled rows remain unavailable
+  // rather than being relabeled as calmly quiet from stale/absent data.
+  const { data: today, error: todayError } = usePolling(fetchToday)
+  const quoteState = useQuotes(data?.symbols ?? [])
 
   const signaled = useMemo(() => {
     const map = new Map()
@@ -55,12 +60,18 @@ export default function Watchlist() {
 
       {loading && <p className="empty-state">Loading…</p>}
       {error && <p className="empty-state">Couldn't load your watchlist.</p>}
+      {todayError && (
+        <p className="data-trust-notice data-trust-notice-unavailable" role="alert">
+          Signal status is unavailable. Quiet labels are hidden until it reconnects.
+        </p>
+      )}
+      <QuoteDataNotice status={quoteState.status} lastSuccessAt={quoteState.lastSuccessAt} />
 
       {data && (
         <div className="data-rows">
           {orderedSymbols.map((symbol) => {
             const sig = signaled.get(symbol)
-            const quote = quotes[symbol]
+            const quote = quoteState.quotes[symbol]
             return (
               <div className={`data-row wl-row${sig ? ' has-signal' : ''}`} key={symbol}>
                 <span className="data-row-symbol">{symbol}</span>
@@ -73,6 +84,10 @@ export default function Watchlist() {
                       <PerchMark size={11} state={sig.tier === 'high' ? 'alert' : 'confirmed'} accent={false} />
                       Signal
                     </span>
+                  ) : todayError ? (
+                    <span className="wl-unknown">unavailable</span>
+                  ) : !today ? (
+                    <span className="wl-unknown">checking</span>
                   ) : (
                     <span className="wl-quiet">quiet</span>
                   )}

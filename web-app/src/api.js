@@ -4,7 +4,8 @@
 // sent back on subsequent requests (the API and this app are on
 // different subdomains — api.perchmarkets.com / app.perchmarkets.com —
 // so the browser won't send it without this).
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_URL = import.meta.env?.VITE_API_URL || 'http://localhost:8000'
+export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 
 class ApiError extends Error {
   constructor(status, body) {
@@ -14,15 +15,63 @@ class ApiError extends Error {
   }
 }
 
-async function request(path, options = {}) {
-  const response = await fetch(`${API_URL}${path}`, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-  const body = await response.json().catch(() => null)
+class ApiProtocolError extends Error {
+  constructor(status, cause = null) {
+    super(`server returned an invalid response (${status})`)
+    this.name = 'ApiProtocolError'
+    this.status = status
+    this.cause = cause
+  }
+}
+
+class ApiTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`request timed out after ${timeoutMs}ms`)
+    this.name = 'ApiTimeoutError'
+    this.timeoutMs = timeoutMs
+  }
+}
+
+export async function parseApiResponse(response) {
+  let body
+  try {
+    body = await response.json()
+  } catch (error) {
+    if (response.ok) throw new ApiProtocolError(response.status, error)
+    throw new ApiError(response.status, null)
+  }
   if (!response.ok) throw new ApiError(response.status, body)
+  // Every successful Perch endpoint returns a JSON object. A syntactically
+  // valid `null`/primitive is still a broken application contract and must
+  // become an explicit error rather than looking like "still loading."
+  if (body === null || typeof body !== 'object') {
+    throw new ApiProtocolError(response.status)
+  }
   return body
+}
+
+export async function request(path, options = {}) {
+  const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchOptions } = options
+  const controller = new AbortController()
+  let timedOut = false
+  const timeoutId = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  try {
+    const response = await fetch(`${API_URL}${path}`, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      ...fetchOptions,
+      signal: controller.signal,
+    })
+    return await parseApiResponse(response)
+  } catch (error) {
+    if (timedOut) throw new ApiTimeoutError(timeoutMs)
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
 }
 
 export const api = {
@@ -69,4 +118,4 @@ export const api = {
 // navigations) -- no blob plumbing needed.
 export const JOURNAL_EXPORT_URL = `${API_URL}/journal/export.csv`
 
-export { ApiError }
+export { ApiError, ApiProtocolError, ApiTimeoutError }

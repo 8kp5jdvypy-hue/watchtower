@@ -70,6 +70,22 @@
 .quiet-state p { margin: 0; font-size: 0.86rem; max-width: 34ch; line-height: 1.55; }
 
 .empty-state { color: var(--ink-dim); font-size: 0.88rem; padding: 1.5rem 0; text-align: center; }
+.data-trust-notice {
+  margin: 0 0 1rem;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid rgba(255, 180, 84, 0.25);
+  border-radius: 6px;
+  background: rgba(255, 180, 84, 0.06);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+.data-trust-notice-unavailable {
+  border-color: rgba(251, 113, 133, 0.28);
+  background: rgba(251, 113, 133, 0.06);
+  color: var(--down);
+}
 
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
 /* Reads as a caption to the tier tiles directly above it, so it sits a

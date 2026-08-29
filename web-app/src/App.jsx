@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { track } from './analytics'
+import { authFailureState } from './authSession'
 import { SESSION_LABEL, useMarketClock } from './hooks/useMarketClock'
 import PerchMark from './components/PerchMark'
 import AmbientField from './components/AmbientField'
@@ -50,12 +51,24 @@ function LoadingShell() {
   )
 }
 
+function SessionUnavailable({ onRetry }) {
+  return (
+    <div className="session-error-shell" role="alert">
+      <PerchMark size={28} state="idle" />
+      <h1>Perch couldn’t verify your session.</h1>
+      <p>Your account has not been signed out. The service may be temporarily unavailable.</p>
+      <button type="button" className="session-retry-button" onClick={onRetry}>Try again</button>
+    </div>
+  )
+}
+
 function getMagicLinkToken() {
   return new URLSearchParams(window.location.search).get('token')
 }
 
 function App() {
   const [account, setAccount] = useState(undefined) // undefined = still checking, null = signed out
+  const [sessionError, setSessionError] = useState(null)
   const [activeTab, setActiveTab] = useState('today')
   // Set from the URL once, at mount -- cleared (see handleVerified) once
   // it's been used, never re-derived from the URL again, so nothing
@@ -65,7 +78,14 @@ function App() {
   const clock = useMarketClock()
 
   const checkSession = useCallback(() => {
-    api.me().then(setAccount).catch(() => setAccount(null))
+    setSessionError(null)
+    setAccount(undefined)
+    api.me()
+      .then(setAccount)
+      .catch((error) => {
+        if (authFailureState(error) === 'signed-out') setAccount(null)
+        else setSessionError(error)
+      })
   }, [])
 
   useEffect(() => {
@@ -103,6 +123,7 @@ function App() {
   }
 
   if (account === undefined) {
+    if (sessionError) return <SessionUnavailable onRetry={checkSession} />
     return <LoadingShell />
   }
 
