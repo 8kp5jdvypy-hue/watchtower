@@ -211,6 +211,15 @@ records distinct suppressed/eligible decision states and enforces at most one
 eligible row for a deterministic idempotency key. It remains offline and has
 no production outbox or customer-delivery dependency.
 
+The default-off supervisor and its independent immutable control suite live in
+`tradebot/postmarket_delivery_dry_run_shadow.py` and
+`tradebot/postmarket_delivery_dry_run_controls.py`. The controls inject stale,
+degraded, unauthorized, and revision-mismatched cases; prove database-level
+eligible-decision deduplication, delivery/provider isolation, the kill switch,
+and rollback; and refuse false attribution to dirty or mismatched code. These
+artifacts establish dry-run operability only and cannot authorize customer
+delivery.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.
