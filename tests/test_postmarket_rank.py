@@ -257,9 +257,14 @@ def test_rank_snapshot_orders_deterministically_and_is_digest_idempotent(tmp_pat
     assert second.created is False
     assert second.rank_run_id == first.rank_run_id
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_runs").fetchone()[0] == 1
-    assert latest_rank_summary(conn)["semantics"] == (
+    summary = latest_rank_summary(conn)
+    assert summary["semantics"] == (
         "heuristic_evidence_ordering_not_probability"
     )
+    assert summary["session_runs"] == summary["session_rankable_runs"] == 1
+    assert summary["session_peak_rankable_candidates"] == 2
+    assert summary["latest_exclusion_counts"] == {}
+    assert summary["latest_rankable_snapshot"]["top"][0]["symbol"] == "AAA"
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("UPDATE postmarket_candidate_ranks SET evidence_score=100")
 
@@ -315,6 +320,15 @@ def test_freshness_boundary_changes_digest_without_new_market_evidence(tmp_path)
         (stale.rank_run_id,),
     ).fetchone()[0]
     assert "OBSERVATION_STALE" in reasons
+    summary = latest_rank_summary(conn)
+    assert summary["rankable_candidates"] == 0
+    assert summary["unrankable_candidates"] == 1
+    assert summary["session_runs"] == 2
+    assert summary["session_rankable_runs"] == 1
+    assert summary["session_peak_rankable_candidates"] == 1
+    assert summary["latest_exclusion_counts"] == {"OBSERVATION_STALE": 1}
+    assert summary["latest_rankable_snapshot"]["rank_run_id"] == fresh.rank_run_id
+    assert summary["latest_rankable_snapshot"]["top"][0]["symbol"] == "AAA"
 
 
 def test_service_heartbeat_exposes_rank_semantics_and_top_candidates(tmp_path):
@@ -334,6 +348,10 @@ def test_service_heartbeat_exposes_rank_semantics_and_top_candidates(tmp_path):
     assert fields["rank_snapshot_created"] is True
     assert fields["rankable_candidates"] == 1
     assert fields["rank_top"][0][1] == "AAA"
+    assert fields["rank_session_peak_rankable_candidates"] == 1
+    assert fields["rank_session_rankable_runs"] == 1
+    assert fields["rank_latest_exclusion_counts"] == {}
+    assert fields["rank_latest_rankable_snapshot"]["top"][0]["symbol"] == "AAA"
     assert fields["latest_rank"]["semantics"] == (
         "heuristic_evidence_ordering_not_probability"
     )
