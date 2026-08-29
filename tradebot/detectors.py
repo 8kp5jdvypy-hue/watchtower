@@ -6,11 +6,17 @@ network, no clock reads, no globals — see CLAUDE.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from tradebot.config import DEFAULT_MARKET_PROXY, MARKET_PROXY_SYMBOLS
+
+
+EASTERN = ZoneInfo("America/New_York")
+RTH_OPEN = time(9, 30)
+BAR_MINUTES = 5
 
 # Calibrated 2026-08-05 (6-symbol watchlist, 577 clusters): mean 2.40
 # HIGH/day. Re-checked 2026-08-05 after adding vwap_break and
@@ -75,8 +81,11 @@ class DailyAnchors:
     # passed to build_anchors() (up to 20 in practice — see callers).
     swing_high: float
     swing_low: float
-    # bar index (0 = first RTH bar of the day) -> historical average
-    # cumulative volume through that bar, used by rvol_spike.
+    # Expected RTH time slot (0 = 09:30 ET, 1 = 09:35 ET, ...) ->
+    # historical average cumulative volume through that wall-clock slot,
+    # used by rvol_spike. This is deliberately a time slot rather than a
+    # list position: a missing vendor bar must not shift every later
+    # baseline comparison earlier by five minutes.
     avg_cum_volume_by_bar: Mapping[int, float]
 
 
@@ -112,6 +121,27 @@ def bar_close_ts(bar: Bar, bar_minutes: int = 5) -> datetime:
     return bar.ts + timedelta(minutes=bar_minutes)
 
 
+def _rth_bar_slot(bar: Bar, bar_minutes: int = BAR_MINUTES) -> int | None:
+    """Return the bar's expected zero-based RTH wall-clock slot.
+
+    Bar timestamps are UTC instants, while the US cash-session open follows
+    America/New_York daylight-saving time. Converting to ET before deriving
+    the slot keeps winter and summer history aligned. Off-grid, premarket,
+    and naive timestamps fail closed instead of being coerced into a slot.
+    """
+    if bar.ts.tzinfo is None or bar.ts.utcoffset() is None:
+        return None
+    local = bar.ts.astimezone(EASTERN)
+    if local.second or local.microsecond:
+        return None
+    minutes = local.hour * 60 + local.minute
+    open_minutes = RTH_OPEN.hour * 60 + RTH_OPEN.minute
+    elapsed = minutes - open_minutes
+    if elapsed < 0 or elapsed % bar_minutes:
+        return None
+    return elapsed // bar_minutes
+
+
 def build_anchors(
     symbol: str,
     session_date: date,
@@ -137,14 +167,19 @@ def build_anchors(
     swing_high = max(b.high for b in prior_daily_bars)
     swing_low = min(b.low for b in prior_daily_bars)
 
-    cum_by_bar_index: dict[int, list[int]] = {}
+    cum_by_bar_slot: dict[int, list[int]] = {}
     for session_bars in historical_session_bars:
         cum = 0
-        for i, b in enumerate(session_bars):
+        seen_slots: set[int] = set()
+        for b in session_bars:
+            slot = _rth_bar_slot(b)
+            if slot is None or slot in seen_slots:
+                continue
+            seen_slots.add(slot)
             cum += b.volume
-            cum_by_bar_index.setdefault(i, []).append(cum)
+            cum_by_bar_slot.setdefault(slot, []).append(cum)
     avg_cum_volume_by_bar = {
-        i: sum(values) / len(values) for i, values in cum_by_bar_index.items()
+        slot: sum(values) / len(values) for slot, values in cum_by_bar_slot.items()
     }
 
     return DailyAnchors(
@@ -236,10 +271,13 @@ def rvol_spike(
     _check_symbol(bars, anchors)
     if len(bars) < 2:
         return None
-    last = bars[-1]
-    bar_index = len(bars) - 1
-    baseline = anchors.avg_cum_volume_by_bar.get(bar_index)
-    prev_baseline = anchors.avg_cum_volume_by_bar.get(bar_index - 1)
+    last, prev = bars[-1], bars[-2]
+    bar_slot = _rth_bar_slot(last)
+    prev_bar_slot = _rth_bar_slot(prev)
+    if bar_slot is None or prev_bar_slot is None or prev_bar_slot >= bar_slot:
+        return None
+    baseline = anchors.avg_cum_volume_by_bar.get(bar_slot)
+    prev_baseline = anchors.avg_cum_volume_by_bar.get(prev_bar_slot)
     if not baseline or not prev_baseline:
         return None
     cum_volume = sum(b.volume for b in bars)
@@ -257,9 +295,9 @@ def rvol_spike(
         score=ratio,
         headline=(
             f"{last.symbol} cumulative volume {cum_volume:,} is {ratio:.1f}x "
-            f"the {bar_index + 1}-bar average ({baseline:,.0f})"
+            f"the {bar_slot + 1}-bar average ({baseline:,.0f})"
         ),
-        context={"cum_volume": cum_volume, "baseline": baseline, "bar_index": bar_index},
+        context={"cum_volume": cum_volume, "baseline": baseline, "bar_index": bar_slot},
     )
 
 
@@ -458,13 +496,9 @@ def relative_strength_break(
     market_bars is a {symbol: bars} map the caller (runner.py) builds
     once per while-loop iteration -- one shared fetch per proxy per
     tick, reused across every symbol evaluated that iteration, not
-    refetched per symbol. Symbol and proxy bars are aligned by
-    same-session bar INDEX, not by looking up the proxy's own
-    DailyAnchors, so this has no dependency on WATCHLIST iteration
-    order -- which is also why a proxy snapshot fetched once and reused
-    for several symbols' evaluations is safe: a later symbol with more
-    bars than the shared proxy snapshot has caught up to is handled by
-    the len(proxy_bars) < len(bars) guard below, not by re-fetching.
+    refetched per symbol. Symbol and proxy bars are aligned by exact bar
+    timestamp, so a missing bar in either stream cannot shift all later
+    comparisons. This has no dependency on WATCHLIST iteration order.
 
     Returns None — never raises — on any missing/short/misaligned
     market_bars, same fail-conservative discipline as every other
@@ -479,12 +513,21 @@ def relative_strength_break(
     if not market_bars:
         return None
     proxy_bars = market_bars.get(market_proxy)
-    if not proxy_bars or len(proxy_bars) < len(bars):
-        return None  # proxy hasn't caught up to this bar yet — never fabricate alignment
+    if not proxy_bars:
+        return None
 
     last, prev = bars[-1], bars[-2]
-    proxy_last, proxy_prev = proxy_bars[len(bars) - 1], proxy_bars[len(bars) - 2]
-    symbol_open, proxy_open = bars[0], proxy_bars[0]
+    if prev.ts >= last.ts or _rth_bar_slot(bars[0]) != 0:
+        return None
+    proxy_by_ts = {bar.ts: bar for bar in proxy_bars}
+    if len(proxy_by_ts) != len(proxy_bars):
+        return None
+    symbol_open = bars[0]
+    proxy_open = proxy_by_ts.get(symbol_open.ts)
+    proxy_prev = proxy_by_ts.get(prev.ts)
+    proxy_last = proxy_by_ts.get(last.ts)
+    if proxy_open is None or proxy_prev is None or proxy_last is None:
+        return None  # required proxy timestamps are absent — never fabricate alignment
     if symbol_open.close <= 0 or proxy_open.close <= 0:
         return None
 

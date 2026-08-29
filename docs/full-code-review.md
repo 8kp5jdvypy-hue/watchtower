@@ -388,17 +388,12 @@ once and frozen. The bugs that exist are statistical/alignment bugs rather
 than crashes or lookahead violations:
 
 - Finding #7 (sign convention) and #8 (missing news_driven filter) above.
-- `tradebot/detectors.py:240-252` (`rvol_spike`) and `tradebot/detectors.py:481-482`
-  (`relative_strength_break`) both key their historical/cross-symbol
-  baseline lookups by **list position** (`bar_index = len(bars) - 1`), not
-  by time-of-day. `runner.process_new_bar` skips a gapped bar
-  (`is_bar_gap`, `runner.py:302`) without inserting a placeholder, so once
-  a vendor silently drops one mid-session bar, every subsequent bar's
-  index is permanently off by one for the rest of the session — comparing
-  today's volume/price against the wrong historical/proxy bar with no
-  error or log line. *Fix: key both lookups by elapsed wall-clock time
-  (or bar timestamp) rather than list position, or pad gapped slots with a
-  placeholder so the index stays aligned.*
+- **Resolved after this review:** `rvol_spike` keys its historical and
+  current cumulative-volume lookups by DST-aware RTH wall-clock slot, while
+  `relative_strength_break` joins symbol and proxy bars by exact timestamp.
+  Missing/duplicate required timestamps fail closed. Regression tests retain
+  both former false-signal constructions so positional alignment cannot
+  silently return.
 
 ## Priority 3 — Data integrity
 

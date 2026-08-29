@@ -308,14 +308,12 @@ formally triaged the list.
 
 ### MEDIUM (11) / LOW (3)
 
-Not reviewed by a human yet per BACKLOG.md. Two categories worth a
-maintainer's attention sooner rather than later, per the review's own
-"Priority 2" section (separate from the ranked list): `rvol_spike` and
-`relative_strength_break` key their historical baselines by **list
-position**, not time-of-day — a silently dropped mid-session bar
-permanently misaligns every subsequent comparison for the rest of that
-session, with no error. Statistical, not a crash, but exactly the kind
-of bug that wouldn't announce itself.
+Not reviewed by a human yet per BACKLOG.md. The review's former
+"Priority 2" time-alignment defect is now closed: `rvol_spike` uses
+DST-aware RTH time slots and `relative_strength_break` uses exact timestamp
+joins. A silently dropped mid-session bar therefore cannot shift every
+subsequent baseline/proxy comparison; missing required timestamps abstain.
+Dedicated detector regressions preserve both former false-signal cases.
 
 ### Operational backlog (`docs/BACKLOG.md`)
 
