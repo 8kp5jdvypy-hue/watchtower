@@ -2,10 +2,41 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
+from tradebot.journal import code_version
 from tradebot.postmarket_external_context_shadow import external_context_enabled
-from tradebot.postmarket_health import DEFAULT_MAX_AGE_SECONDS, evaluate_postmarket_health
+from tradebot.postmarket_health import (
+    DEFAULT_MAX_AGE_SECONDS,
+    PostmarketHealth,
+    evaluate_supervised_health,
+)
+
+
+OBSERVER = "postmarket-external-context-shadow"
+
+
+def evaluate_external_context_health(
+    heartbeat_path: Path,
+    *,
+    enabled: bool,
+    expected_revision: str,
+    now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+) -> PostmarketHealth:
+    """Protect pre-close capture and post-detection enrichment all day."""
+    return evaluate_supervised_health(
+        heartbeat_path,
+        enabled=enabled,
+        expected_revision=expected_revision,
+        expected_observer=OBSERVER,
+        active_statuses=frozenset({"running", "ok"}),
+        inactive_statuses=frozenset({"idle", "pre_event", "running", "ok"}),
+        disabled_detail="external-context worker disabled by kill switch",
+        now=now,
+        max_age_seconds=max_age_seconds,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,8 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(str(exc))
         return 1
-    result = evaluate_postmarket_health(
-        args.heartbeat, enabled=enabled, max_age_seconds=args.max_age,
+    result = evaluate_external_context_health(
+        args.heartbeat,
+        enabled=enabled,
+        expected_revision=code_version() or "unknown",
+        max_age_seconds=args.max_age,
     )
     print(result.detail)
     return 0 if result.healthy else 1

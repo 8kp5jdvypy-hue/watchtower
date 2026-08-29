@@ -26,6 +26,88 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def evaluate_supervised_health(
+    heartbeat_path: Path,
+    *,
+    enabled: bool,
+    expected_revision: str,
+    expected_observer: str,
+    active_statuses: frozenset[str],
+    inactive_statuses: frozenset[str],
+    error_status_fields: tuple[str, ...] = (),
+    disabled_detail: str = "shadow observer disabled by kill switch",
+    now: datetime | None = None,
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
+) -> PostmarketHealth:
+    """Validate an always-heartbeating supervisor and its explicit children."""
+    current = (now or _utc_now()).astimezone(timezone.utc)
+    active = postmarket_is_active(current)
+    if max_age_seconds <= 0:
+        raise ValueError("max_age_seconds must be positive")
+    if not enabled:
+        return PostmarketHealth(True, False, active, disabled_detail)
+    try:
+        payload = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+        timestamp = payload["ts_utc"]
+        status = payload["status"]
+        observer = payload["observer"]
+        revision = payload["code_version"]
+        heartbeat_enabled = payload["enabled"]
+        if not all(isinstance(value, str) for value in (
+            timestamp, status, observer, revision,
+        )):
+            raise TypeError("heartbeat identity fields must be strings")
+        if not isinstance(heartbeat_enabled, bool):
+            raise TypeError("enabled must be a boolean")
+        heartbeat_ts = datetime.fromisoformat(timestamp)
+        if heartbeat_ts.tzinfo is None or heartbeat_ts.utcoffset() is None:
+            raise ValueError("ts_utc must be timezone-aware")
+        heartbeat_ts = heartbeat_ts.astimezone(timezone.utc)
+    except FileNotFoundError:
+        return PostmarketHealth(False, True, active, "no supervised heartbeat")
+    except (json.JSONDecodeError, KeyError, OSError, TypeError, UnicodeError, ValueError) as exc:
+        return PostmarketHealth(False, True, active, f"unreadable supervised heartbeat: {exc}")
+
+    age = (current - heartbeat_ts).total_seconds()
+    if age < 0:
+        return PostmarketHealth(
+            False, True, active, f"supervised heartbeat is {-age:.0f}s in the future", age,
+        )
+    if age >= max_age_seconds:
+        return PostmarketHealth(
+            False, True, active,
+            f"supervised heartbeat is stale ({age:.0f}s old; limit {max_age_seconds}s)",
+            age,
+        )
+    if not heartbeat_enabled:
+        return PostmarketHealth(False, True, active, "supervised heartbeat says disabled", age)
+    if observer != expected_observer:
+        return PostmarketHealth(
+            False, True, active, f"unexpected supervised observer: {observer}", age,
+        )
+    if revision != expected_revision:
+        return PostmarketHealth(
+            False, True, active,
+            f"supervised revision mismatch: heartbeat={revision} running={expected_revision}",
+            age,
+        )
+    allowed = active_statuses if active else inactive_statuses
+    if status not in allowed:
+        return PostmarketHealth(
+            False, True, active, f"unexpected supervised heartbeat status: {status}", age,
+        )
+    failed = [field for field in error_status_fields if payload.get(field) == "error"]
+    if failed:
+        return PostmarketHealth(
+            False, True, active, f"supervised subsystem error: {','.join(failed)}", age,
+        )
+    return PostmarketHealth(
+        True, True, active,
+        f"supervised heartbeat is fresh ({age:.0f}s old; {status}; revision={revision})",
+        age,
+    )
+
+
 def evaluate_postmarket_health(
     heartbeat_path: Path,
     *,

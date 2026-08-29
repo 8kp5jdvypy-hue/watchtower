@@ -23,6 +23,16 @@ backup.
 | `scripts/verify_backup.py` | Digest-check and isolated restore of one manifest-bound backup set; rejects missing databases, corrupt SQLite, and unsafe artifact archives |
 | `scripts/fetch_cache.py`, `scripts/purge_and_backfill_runts.py`, and other `scripts/*.py` tools | Not in the image (see Dockerfile) and need the app's real deps — see "Running `scripts/` tools in-container" below for the one correct invocation |
 
+The `postmarket-discovery` and `postmarket-external-context` health probes are
+intentionally stricter than the basic postmarket-window probe. When their kill
+switches are enabled, they require fresh heartbeats all day: finalized outcome,
+census, context, lifecycle, rank, and provider-proof maintenance runs outside
+the active window, while option expectation capture begins before the close.
+Both probes require the running revision and observer identity to match.
+Discovery also fails on any explicit subsystem `error`. A `degraded` evidence
+result remains visible but does not trigger a restart loop; missing market data
+is not the same as a dead worker.
+
 ## First-time VPS setup
 
 Sizing: this is a light workload (a handful of Python processes, SQLite,
