@@ -1,0 +1,663 @@
+"""Leakage-resistant empirical evaluation for the postmarket evidence rank.
+
+This module is offline, append-only, and delivery-incapable.  It stores a
+locked experiment contract, independently supplied labels, an explicit
+holdout-unblinding event, and reproducible baseline-versus-rank reports.  It
+does not fetch data, tune a threshold, send an alert, or place an order.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from dataclasses import asdict, dataclass
+from datetime import date, datetime, time, timezone
+from typing import Any, Iterable
+from zoneinfo import ZoneInfo
+
+import exchange_calendars as ecals
+
+
+EMPIRICAL_VERSION = 1
+TECHNICAL_MIN_RECALL = 0.95
+CALENDAR = ecals.get_calendar("XNYS")
+ET = ZoneInfo("America/New_York")
+CLASSIFICATIONS = {"eligible", "ineligible", "ambiguous"}
+LABEL_METHODS = {"blind_bar_review", "multi_provider_reconciliation"}
+SPLITS = {"development", "holdout"}
+
+
+EMPIRICAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS postmarket_rank_experiments (
+    experiment_id TEXT PRIMARY KEY,
+    empirical_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    rank_version INTEGER NOT NULL,
+    label_method TEXT NOT NULL,
+    development_sessions_json TEXT NOT NULL,
+    holdout_sessions_json TEXT NOT NULL,
+    selection_rule_json TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    manifest_sha256 TEXT NOT NULL UNIQUE,
+    CHECK (status='locked')
+);
+CREATE TABLE IF NOT EXISTS postmarket_independent_labels (
+    label_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL,
+    session TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    classification TEXT NOT NULL,
+    direction TEXT,
+    eligible_at_utc TEXT,
+    labeler TEXT NOT NULL,
+    label_method TEXT NOT NULL,
+    blinded_to_rank INTEGER NOT NULL,
+    reason_code TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    artifact_sha256 TEXT NOT NULL,
+    artifact_providers_json TEXT NOT NULL,
+    artifact_feeds_json TEXT NOT NULL,
+    artifact_acquired_at_utc TEXT NOT NULL,
+    recorded_at_utc TEXT NOT NULL,
+    UNIQUE(experiment_id,session,symbol,revision),
+    CHECK (classification IN ('eligible','ineligible','ambiguous')),
+    CHECK (direction IN ('up','down') OR direction IS NULL),
+    CHECK (blinded_to_rank=1)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_independent_labels_lookup
+    ON postmarket_independent_labels(experiment_id,session,symbol,revision);
+CREATE TABLE IF NOT EXISTS postmarket_holdout_unblinds (
+    unblind_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL UNIQUE,
+    unblinded_at_utc TEXT NOT NULL,
+    unblinded_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    label_inventory_sha256 TEXT NOT NULL,
+    holdout_labels INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS postmarket_rank_empirical_runs (
+    empirical_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT NOT NULL,
+    split TEXT NOT NULL,
+    evaluated_at_utc TEXT NOT NULL,
+    code_version TEXT,
+    input_digest_sha256 TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    report_sha256 TEXT NOT NULL,
+    UNIQUE(experiment_id,split,input_digest_sha256),
+    CHECK (split IN ('development','holdout'))
+);
+
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_experiments_no_update
+BEFORE UPDATE ON postmarket_rank_experiments BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_experiments is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_experiments_no_delete
+BEFORE DELETE ON postmarket_rank_experiments BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_experiments is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_independent_labels_no_update
+BEFORE UPDATE ON postmarket_independent_labels BEGIN
+    SELECT RAISE(ABORT, 'postmarket_independent_labels is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_independent_labels_no_delete
+BEFORE DELETE ON postmarket_independent_labels BEGIN
+    SELECT RAISE(ABORT, 'postmarket_independent_labels is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_holdout_unblinds_no_update
+BEFORE UPDATE ON postmarket_holdout_unblinds BEGIN
+    SELECT RAISE(ABORT, 'postmarket_holdout_unblinds is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_holdout_unblinds_no_delete
+BEFORE DELETE ON postmarket_holdout_unblinds BEGIN
+    SELECT RAISE(ABORT, 'postmarket_holdout_unblinds is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_empirical_runs_no_update
+BEFORE UPDATE ON postmarket_rank_empirical_runs BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_empirical_runs is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_empirical_runs_no_delete
+BEFORE DELETE ON postmarket_rank_empirical_runs BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_empirical_runs is append-only');
+END;
+"""
+
+
+@dataclass(frozen=True)
+class ExperimentPolicy:
+    min_precision: float
+    min_recall: float
+    min_definitive_labels: int
+    min_positive_labels: int
+
+
+@dataclass(frozen=True)
+class SelectionRule:
+    minimum_evidence_score: float
+    maximum_ordinal_rank: int | None
+
+
+@dataclass(frozen=True)
+class ClassificationMetrics:
+    definitive_labels: int
+    ambiguous_labels: int
+    positive_labels: int
+    selected: int
+    true_positives: int
+    false_positives: int
+    true_negatives: int
+    false_negatives: int
+    direction_mismatches: int
+    precision: float | None
+    recall: float | None
+
+
+@dataclass(frozen=True)
+class SessionMetrics:
+    session: str
+    baseline: ClassificationMetrics
+    candidate_rank: ClassificationMetrics
+    discovered_symbols: int
+    rankable_symbols: int
+    duplicate_candidate_rows: int
+
+
+@dataclass(frozen=True)
+class EmpiricalReport:
+    empirical_version: int
+    experiment_id: str
+    split: str
+    rank_version: int
+    sessions: tuple[str, ...]
+    selection_rule: SelectionRule
+    policy: ExperimentPolicy
+    baseline: ClassificationMetrics
+    candidate_rank: ClassificationMetrics
+    session_metrics: tuple[SessionMetrics, ...]
+    precision_delta: float | None
+    recall_delta: float | None
+    passed_locked_policy: bool
+    blocking_reasons: tuple[str, ...]
+    holdout_unblinded: bool
+    input_digest_sha256: str
+
+
+def ensure_empirical_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(EMPIRICAL_SCHEMA)
+
+
+def _utc(value: datetime, name: str) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _canonical(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_canonical(value).encode()).hexdigest()
+
+
+def _sessions(values: Iterable[date], name: str) -> tuple[str, ...]:
+    ordered = tuple(sorted(set(values)))
+    if not ordered:
+        raise ValueError(f"{name} must not be empty")
+    if any(not CALENDAR.is_session(value) for value in ordered):
+        raise ValueError(f"{name} must contain only XNYS sessions")
+    return tuple(value.isoformat() for value in ordered)
+
+
+def create_locked_experiment(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    created_at: datetime,
+    created_by: str,
+    rank_version: int,
+    label_method: str,
+    development_sessions: Iterable[date],
+    holdout_sessions: Iterable[date],
+    selection_rule: SelectionRule,
+    policy: ExperimentPolicy,
+) -> str:
+    """Lock all tuning and acceptance choices before holdout results exist."""
+    ensure_empirical_schema(conn)
+    if not experiment_id.strip() or not created_by.strip():
+        raise ValueError("experiment_id and created_by must be non-empty")
+    if rank_version <= 0:
+        raise ValueError("rank_version must be positive")
+    if label_method not in LABEL_METHODS:
+        raise ValueError(f"label_method must be one of {sorted(LABEL_METHODS)}")
+    dev = _sessions(development_sessions, "development_sessions")
+    holdout = _sessions(holdout_sessions, "holdout_sessions")
+    if set(dev) & set(holdout):
+        raise ValueError("development and holdout sessions must be disjoint")
+    if max(dev) >= min(holdout):
+        raise ValueError("all development sessions must precede every holdout session")
+    if not 0 <= selection_rule.minimum_evidence_score <= 100:
+        raise ValueError("minimum_evidence_score must be between 0 and 100")
+    if selection_rule.maximum_ordinal_rank is not None and selection_rule.maximum_ordinal_rank <= 0:
+        raise ValueError("maximum_ordinal_rank must be positive when supplied")
+    if not 0 < policy.min_precision <= 1:
+        raise ValueError("min_precision must be in (0,1]")
+    if not TECHNICAL_MIN_RECALL <= policy.min_recall <= 1:
+        raise ValueError(f"min_recall must be at least {TECHNICAL_MIN_RECALL}")
+    if policy.min_definitive_labels <= 0 or policy.min_positive_labels <= 0:
+        raise ValueError("label sample floors must be positive")
+    created = _utc(created_at, "created_at")
+    final_development_close = datetime.combine(
+        date.fromisoformat(max(dev)), time(20, 0), tzinfo=ET
+    ).astimezone(timezone.utc)
+    first_holdout_close = CALENDAR.session_close(date.fromisoformat(min(holdout))).to_pydatetime()
+    if created <= final_development_close:
+        raise ValueError("experiment must be locked after development sessions complete")
+    if created >= first_holdout_close:
+        raise ValueError("experiment must be locked before the first holdout session closes")
+    payload = {
+        "empirical_version": EMPIRICAL_VERSION,
+        "experiment_id": experiment_id.strip(),
+        "created_at_utc": created.isoformat(),
+        "created_by": created_by.strip(),
+        "rank_version": rank_version,
+        "label_method": label_method,
+        "development_sessions": dev,
+        "holdout_sessions": holdout,
+        "selection_rule": asdict(selection_rule),
+        "policy": asdict(policy),
+    }
+    manifest_digest = _digest(payload)
+    existing = conn.execute(
+        "SELECT manifest_sha256 FROM postmarket_rank_experiments WHERE experiment_id=?",
+        (experiment_id.strip(),),
+    ).fetchone()
+    if existing:
+        if existing[0] != manifest_digest:
+            raise ValueError("experiment_id is already locked to a different manifest")
+        return manifest_digest
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO postmarket_rank_experiments
+                (experiment_id,empirical_version,status,created_at_utc,created_by,
+                 rank_version,label_method,development_sessions_json,
+                 holdout_sessions_json,selection_rule_json,policy_json,manifest_sha256)
+            VALUES (?,?, 'locked',?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                payload["experiment_id"], EMPIRICAL_VERSION, payload["created_at_utc"],
+                payload["created_by"], rank_version, label_method, _canonical(dev),
+                _canonical(holdout), _canonical(asdict(selection_rule)),
+                _canonical(asdict(policy)), manifest_digest,
+            ),
+        )
+    return manifest_digest
+
+
+def _experiment(conn: sqlite3.Connection, experiment_id: str) -> sqlite3.Row:
+    previous = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM postmarket_rank_experiments WHERE experiment_id=?",
+            (experiment_id,),
+        ).fetchone()
+    finally:
+        conn.row_factory = previous
+    if row is None:
+        raise ValueError("unknown experiment_id")
+    return row
+
+
+def record_independent_label(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    session: date,
+    symbol: str,
+    classification: str,
+    direction: str | None,
+    eligible_at: datetime | None,
+    labeler: str,
+    reason_code: str,
+    rationale: str,
+    artifact_sha256: str,
+    artifact_providers: Iterable[str],
+    artifact_feeds: Iterable[str],
+    artifact_acquired_at: datetime,
+    recorded_at: datetime,
+) -> int:
+    """Append a label supplied without reading candidate or rank tables."""
+    ensure_empirical_schema(conn)
+    experiment = _experiment(conn, experiment_id)
+    allowed = set(json.loads(experiment["development_sessions_json"])) | set(
+        json.loads(experiment["holdout_sessions_json"])
+    )
+    if session.isoformat() not in allowed:
+        raise ValueError("label session is outside the locked experiment")
+    holdout_sessions = set(json.loads(experiment["holdout_sessions_json"]))
+    if session.isoformat() in holdout_sessions and conn.execute(
+        "SELECT 1 FROM postmarket_holdout_unblinds WHERE experiment_id=?",
+        (experiment_id,),
+    ).fetchone() is not None:
+        raise ValueError("holdout labels are frozen after unblinding")
+    canonical_symbol = symbol.strip().upper()
+    if not canonical_symbol or canonical_symbol != symbol.strip():
+        raise ValueError("symbol must be canonical uppercase")
+    if classification not in CLASSIFICATIONS:
+        raise ValueError(f"classification must be one of {sorted(CLASSIFICATIONS)}")
+    if classification == "eligible":
+        if direction not in {"up", "down"} or eligible_at is None:
+            raise ValueError("eligible labels require direction and eligible_at")
+        eligible_utc = _utc(eligible_at, "eligible_at")
+        if eligible_utc.astimezone(ET).date() != session:
+            raise ValueError("eligible_at must fall in the labeled session")
+        rth_close = CALENDAR.session_close(session).to_pydatetime().astimezone(timezone.utc)
+        session_end = datetime.combine(session, time(20, 0), tzinfo=ET).astimezone(timezone.utc)
+        if not rth_close <= eligible_utc <= session_end:
+            raise ValueError("eligible_at must fall in the postmarket window")
+        eligible_text = eligible_utc.isoformat()
+    else:
+        if direction is not None or eligible_at is not None:
+            raise ValueError("ineligible/ambiguous labels cannot declare direction or eligible_at")
+        eligible_text = None
+    if not all(value.strip() for value in (labeler, reason_code, rationale)):
+        raise ValueError("labeler, reason_code, and rationale must be non-empty")
+    if len(artifact_sha256) != 64 or any(c not in "0123456789abcdefABCDEF" for c in artifact_sha256):
+        raise ValueError("artifact_sha256 must be a 64-character hexadecimal digest")
+    providers = tuple(sorted({value.strip().lower() for value in artifact_providers if value.strip()}))
+    feeds = tuple(sorted({value.strip().lower() for value in artifact_feeds if value.strip()}))
+    if not providers or not feeds:
+        raise ValueError("artifact providers and feeds must be non-empty")
+    if experiment["label_method"] == "multi_provider_reconciliation" and len(providers) < 2:
+        raise ValueError("multi_provider_reconciliation requires at least two providers")
+    acquired = _utc(artifact_acquired_at, "artifact_acquired_at")
+    recorded = _utc(recorded_at, "recorded_at")
+    session_end = datetime.combine(session, time(20, 0), tzinfo=ET).astimezone(timezone.utc)
+    if acquired < session_end:
+        raise ValueError("independent evidence must be acquired after the session window")
+    if recorded < acquired:
+        raise ValueError("a label cannot be recorded before its evidence was acquired")
+    if eligible_at is not None and recorded < _utc(eligible_at, "eligible_at"):
+        raise ValueError("a label cannot be recorded before its eligibility instant")
+    revision = conn.execute(
+        """SELECT COALESCE(MAX(revision),0)+1 FROM postmarket_independent_labels
+           WHERE experiment_id=? AND session=? AND symbol=?""",
+        (experiment_id, session.isoformat(), canonical_symbol),
+    ).fetchone()[0]
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO postmarket_independent_labels
+                (experiment_id,session,symbol,revision,classification,direction,
+                 eligible_at_utc,labeler,label_method,blinded_to_rank,reason_code,
+                 rationale,artifact_sha256,artifact_providers_json,
+                 artifact_feeds_json,artifact_acquired_at_utc,recorded_at_utc)
+            VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?)
+            """,
+            (
+                experiment_id, session.isoformat(), canonical_symbol, revision,
+                classification, direction, eligible_text, labeler,
+                experiment["label_method"], reason_code, rationale,
+                artifact_sha256.lower(), _canonical(providers), _canonical(feeds),
+                acquired.isoformat(), recorded.isoformat(),
+            ),
+        )
+    return int(cursor.lastrowid)
+
+
+def _latest_labels(conn: sqlite3.Connection, experiment_id: str, sessions: tuple[str, ...]):
+    if not sessions:
+        return []
+    placeholders = ",".join("?" for _ in sessions)
+    previous = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute(
+            f"""
+            WITH latest AS (
+              SELECT experiment_id,session,symbol,MAX(revision) AS revision
+              FROM postmarket_independent_labels
+              WHERE experiment_id=? AND session IN ({placeholders})
+              GROUP BY experiment_id,session,symbol
+            )
+            SELECT l.* FROM postmarket_independent_labels l JOIN latest x
+              ON x.experiment_id=l.experiment_id AND x.session=l.session
+             AND x.symbol=l.symbol AND x.revision=l.revision
+            ORDER BY l.session,l.symbol
+            """,
+            (experiment_id, *sessions),
+        ).fetchall()
+    finally:
+        conn.row_factory = previous
+
+
+def unblind_holdout(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    unblinded_at: datetime,
+    unblinded_by: str,
+    reason: str,
+) -> str:
+    """Irreversibly record that holdout rank results may now be evaluated."""
+    ensure_empirical_schema(conn)
+    experiment = _experiment(conn, experiment_id)
+    if not unblinded_by.strip() or not reason.strip():
+        raise ValueError("unblinded_by and reason must be non-empty")
+    sessions = tuple(json.loads(experiment["holdout_sessions_json"]))
+    labels = _latest_labels(conn, experiment_id, sessions)
+    if not labels:
+        raise ValueError("holdout cannot be unblinded before independent labels exist")
+    inventory = [
+        {key: row[key] for key in (
+            "session", "symbol", "revision", "classification", "direction",
+            "eligible_at_utc", "artifact_sha256", "artifact_providers_json",
+            "artifact_feeds_json", "artifact_acquired_at_utc"
+        )}
+        for row in labels
+    ]
+    digest = _digest(inventory)
+    unblind_time = _utc(unblinded_at, "unblinded_at")
+    latest_label_time = max(datetime.fromisoformat(row["recorded_at_utc"]) for row in labels)
+    if unblind_time < latest_label_time:
+        raise ValueError("holdout cannot be unblinded before all labels were recorded")
+    existing = conn.execute(
+        "SELECT label_inventory_sha256 FROM postmarket_holdout_unblinds WHERE experiment_id=?",
+        (experiment_id,),
+    ).fetchone()
+    if existing:
+        if existing[0] != digest:
+            raise ValueError("holdout labels changed after unblinding")
+        return digest
+    with conn:
+        conn.execute(
+            """INSERT INTO postmarket_holdout_unblinds
+               (experiment_id,unblinded_at_utc,unblinded_by,reason,
+                label_inventory_sha256,holdout_labels) VALUES (?,?,?,?,?,?)""",
+            (
+                experiment_id, unblind_time.isoformat(),
+                unblinded_by.strip(), reason.strip(), digest, len(labels),
+            ),
+        )
+    return digest
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def _classify(labels, selected: dict[tuple[str, str], str]) -> ClassificationMetrics:
+    tp = fp = tn = fn = ambiguous = positives = mismatches = 0
+    for row in labels:
+        key = (row["session"], row["symbol"])
+        direction = selected.get(key)
+        if row["classification"] == "ambiguous":
+            ambiguous += 1
+            continue
+        if row["classification"] == "eligible":
+            positives += 1
+            if direction is None:
+                fn += 1
+            elif direction == row["direction"]:
+                tp += 1
+            else:
+                fp += 1
+                mismatches += 1
+        elif direction is None:
+            tn += 1
+        else:
+            fp += 1
+    definitive = len(labels) - ambiguous
+    label_keys = {(row["session"], row["symbol"]) for row in labels}
+    return ClassificationMetrics(
+        definitive, ambiguous, positives, len(label_keys & selected.keys()), tp, fp, tn, fn,
+        mismatches, _ratio(tp, tp + fp), _ratio(tp, tp + fn),
+    )
+
+
+def _selected_symbols(
+    conn: sqlite3.Connection,
+    sessions: tuple[str, ...],
+    rank_version: int,
+    rule: SelectionRule,
+) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str], dict[str, tuple[int, int]]]:
+    placeholders = ",".join("?" for _ in sessions)
+    previous = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        candidates = conn.execute(
+            f"""SELECT candidate_id,session,symbol,direction,first_detected_at
+                FROM postmarket_discovery_candidates WHERE session IN ({placeholders})
+                ORDER BY first_detected_at,candidate_id""", sessions,
+        ).fetchall()
+        ranks = conn.execute(
+            f"""
+            SELECT r.*,x.as_of_utc FROM postmarket_candidate_ranks r
+            JOIN postmarket_rank_runs x ON x.rank_run_id=r.rank_run_id
+            WHERE r.session IN ({placeholders}) AND x.rank_version=? AND r.rankable=1
+            ORDER BY x.as_of_utc,r.rank_id
+            """, (*sessions, rank_version),
+        ).fetchall()
+    finally:
+        conn.row_factory = previous
+    baseline: dict[tuple[str, str], str] = {}
+    candidate_ids: dict[int, tuple[str, str, str]] = {}
+    counts: dict[str, list[int]] = {session: [0, 0] for session in sessions}
+    for row in candidates:
+        key = (row["session"], row["symbol"])
+        counts[row["session"]][0] += 1
+        baseline.setdefault(key, row["direction"])
+        candidate_ids[int(row["candidate_id"])] = (*key, row["direction"])
+    chosen: dict[tuple[str, str], str] = {}
+    rankable_keys: set[tuple[str, str]] = set()
+    seen_candidates: set[int] = set()
+    for row in ranks:
+        candidate_id = int(row["candidate_id"])
+        if candidate_id in seen_candidates or candidate_id not in candidate_ids:
+            continue
+        seen_candidates.add(candidate_id)
+        session, symbol, direction = candidate_ids[candidate_id]
+        key = (session, symbol)
+        rankable_keys.add(key)
+        if float(row["evidence_score"]) < rule.minimum_evidence_score:
+            continue
+        if rule.maximum_ordinal_rank is not None and (
+            row["ordinal_rank"] is None or int(row["ordinal_rank"]) > rule.maximum_ordinal_rank
+        ):
+            continue
+        chosen.setdefault(key, direction)
+    for session, symbol in rankable_keys:
+        counts[session][1] += 1
+    stats = {
+        session: (len({key for key in baseline if key[0] == session}), values[1])
+        for session, values in counts.items()
+    }
+    return baseline, chosen, stats
+
+
+def evaluate_rank_experiment(
+    conn: sqlite3.Connection,
+    *,
+    experiment_id: str,
+    split: str,
+    evaluated_at: datetime,
+    code_version: str | None,
+) -> EmpiricalReport:
+    ensure_empirical_schema(conn)
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {sorted(SPLITS)}")
+    experiment = _experiment(conn, experiment_id)
+    if split == "holdout" and conn.execute(
+        "SELECT 1 FROM postmarket_holdout_unblinds WHERE experiment_id=?",
+        (experiment_id,),
+    ).fetchone() is None:
+        raise ValueError("holdout is sealed; record an explicit unblind event first")
+    sessions = tuple(json.loads(experiment[f"{split}_sessions_json"]))
+    labels = _latest_labels(conn, experiment_id, sessions)
+    rule = SelectionRule(**json.loads(experiment["selection_rule_json"]))
+    policy = ExperimentPolicy(**json.loads(experiment["policy_json"]))
+    baseline_selected, rank_selected, stats = _selected_symbols(
+        conn, sessions, int(experiment["rank_version"]), rule
+    )
+    baseline = _classify(labels, baseline_selected)
+    ranked = _classify(labels, rank_selected)
+    per_session = []
+    for session in sessions:
+        session_labels = [row for row in labels if row["session"] == session]
+        base_slice = {key: value for key, value in baseline_selected.items() if key[0] == session}
+        rank_slice = {key: value for key, value in rank_selected.items() if key[0] == session}
+        candidate_rows = conn.execute(
+            "SELECT COUNT(*) FROM postmarket_discovery_candidates WHERE session=?", (session,)
+        ).fetchone()[0]
+        per_session.append(SessionMetrics(
+            session, _classify(session_labels, base_slice), _classify(session_labels, rank_slice),
+            stats[session][0], stats[session][1], max(0, candidate_rows - stats[session][0]),
+        ))
+    inventory = {
+        "manifest_sha256": experiment["manifest_sha256"],
+        "split": split,
+        "labels": [{key: row[key] for key in row.keys()} for row in labels],
+        "baseline": sorted((*key, value) for key, value in baseline_selected.items()),
+        "ranked": sorted((*key, value) for key, value in rank_selected.items()),
+    }
+    input_digest = _digest(inventory)
+    blockers = []
+    if ranked.definitive_labels < policy.min_definitive_labels:
+        blockers.append("MIN_DEFINITIVE_LABELS_NOT_MET")
+    if ranked.positive_labels < policy.min_positive_labels:
+        blockers.append("MIN_POSITIVE_LABELS_NOT_MET")
+    if ranked.ambiguous_labels:
+        blockers.append("AMBIGUOUS_LABELS_PRESENT")
+    if ranked.direction_mismatches:
+        blockers.append("DIRECTION_MISMATCHES_PRESENT")
+    if ranked.precision is None or ranked.precision < policy.min_precision:
+        blockers.append("PRECISION_FLOOR_NOT_MET")
+    if ranked.recall is None or ranked.recall < policy.min_recall:
+        blockers.append("RECALL_FLOOR_NOT_MET")
+    report = EmpiricalReport(
+        EMPIRICAL_VERSION, experiment_id, split, int(experiment["rank_version"]), sessions,
+        rule, policy, baseline, ranked, tuple(per_session),
+        (ranked.precision - baseline.precision if ranked.precision is not None and baseline.precision is not None else None),
+        (ranked.recall - baseline.recall if ranked.recall is not None and baseline.recall is not None else None),
+        not blockers, tuple(blockers), split == "holdout", input_digest,
+    )
+    # The report itself is immutable and idempotent for the exact evidence inventory.
+    raw = _canonical(asdict(report))
+    with conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO postmarket_rank_empirical_runs
+                (experiment_id,split,evaluated_at_utc,code_version,input_digest_sha256,
+                 report_json,report_sha256) VALUES (?,?,?,?,?,?,?)
+            """,
+            (
+                experiment_id, split, _utc(evaluated_at, "evaluated_at").isoformat(),
+                code_version, input_digest, raw, hashlib.sha256(raw.encode()).hexdigest(),
+            ),
+        )
+    return report
