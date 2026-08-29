@@ -84,11 +84,10 @@ checklist once a real live SIP session closes cleanly on its own.
 
 ## Ops follow-ups from tonight
 
-1. **`deploy.sh` wrapper** so `GIT_SHA=$(git rev-parse --short HEAD)
-   docker compose up -d --build` isn't a rememberable-but-forgettable
-   convention — it already was forgotten once tonight. A wrapper script
-   (or Makefile target) makes the correct invocation the only one
-   available.
+1. **DONE — `deploy.sh` wrapper.** Source deployments now require one full-SHA
+   command that verifies main ancestry, backups, service revisions, Compose
+   health, SQLite integrity, and public health. The systemd boot unit cannot
+   rebuild with `GIT_SHA=unknown`.
 2. **RFAMU-type thin-symbol policy** — a symbol can detect (fire a
    cluster) but be too thin for the vendor to return intraday bars for
    at backfill time (confirmed real tonight: RFAMU, 1 of 33 symbols in

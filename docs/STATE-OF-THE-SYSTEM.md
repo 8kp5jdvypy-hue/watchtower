@@ -338,7 +338,7 @@ Statuses re-verified 2026-08-15:
 | `backup.sh` crashing under systemd (unset `$HOME`) | **MERGED** as PR #28 — off-box backups were failing nightly before this. |
 | Operational resilience review (deadman gap, autoheal) | **Still unmerged**, no PR. Branch `ops-resilience-review`. |
 | `broad_scan` honesty proposal (labeling, stats exclusion) | **Still unmerged**, doc only. **Needs a decision, not a session.** |
-| `deploy.sh` wrapper for the `GIT_SHA=...` invocation | **Open** — the convention was already forgotten once. |
+| `deploy.sh` wrapper for the `GIT_SHA=...` invocation | **DONE** — full-SHA deployment/ancestor rollback now enforce backups, Compose wait, per-service revision proof, SQLite checks, public health, and no-build boot supervision. |
 | RFAMU-type thin-symbol policy | **Open, undecided** — a human decision, not code. |
 | Near-close detection copy | **Open, not implemented.** |
 | First-session observation report (against a real, cleanly-closed live SIP session) | **Still owed, not delivered.** |

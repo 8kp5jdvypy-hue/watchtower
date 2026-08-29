@@ -104,8 +104,12 @@ if the symbols had been promoted earlier.
 ### P2 — operations and durability
 
 13. A real off-box restore drill is still owed.
-14. Deployment should be one exact-revision wrapper, not a command pattern
-    an operator must reconstruct.
+14. **Resolved:** source/image deployment is one mandatory full-SHA wrapper.
+    It refuses dirty/stale revisions, binds `GIT_SHA`, requires verified pre-
+    and postdeploy backups, waits for Compose health, verifies every Python
+    service revision, checks all five SQLite databases and the public API, and
+    supports only explicit ancestor rollback. Boot supervision no longer
+    rebuilds images with the `unknown` fallback.
 15. **Resolved:** metrics writes use a flushed, fsynced same-directory
     temporary file and atomic replace. Invalid JSON or a non-object root is
     logged loudly and copied to a collision-safe sibling before counters
@@ -243,6 +247,11 @@ evidence.
   for the requested column is benign. Disk, lock, readonly, malformed-schema,
   and unrelated migration failures now stop startup instead of presenting a
   partially migrated journal as healthy.
+- Exact-revision deployment: implemented as `scripts/deploy.sh`, with the
+  systemd boot unit changed to start existing verified images rather than
+  rebuild. Black-box tests cover the complete happy path plus malformed SHA,
+  dirty tree, stale main, backup, container revision, SQLite, and rollback
+  failures.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the
