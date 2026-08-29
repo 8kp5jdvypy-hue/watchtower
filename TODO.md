@@ -106,7 +106,7 @@ and operational gates pass.
     delivery/order isolation evidence with immutable revision-bound artifacts.
   - [ ] Deploy the control revision, run the exact three-artifact suite, review
     every internal check, and ship the evidence off-box.
-- [ ] Add the prospective aggregate market-wide discovery readiness gate that
+- [x] Add the prospective aggregate market-wide discovery readiness gate that
   reconciles clean audits, primary census, independent-provider proof,
   empirical holdout, discovery controls, rollback, and exact campaign policy.
 - [ ] Accumulate independently reviewed holdout labels, complete provider

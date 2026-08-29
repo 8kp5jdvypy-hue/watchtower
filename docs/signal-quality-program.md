@@ -173,8 +173,17 @@ Market-wide control implementation:
 discovery service's failure containment, default-off kill switch, and absence
 of alert/order delivery dependencies. Its immutable artifacts have a separate
 schema and cannot be replaced by the scheduled-earnings observer's controls.
-See `docs/postmarket-discovery-control-evidence.md`. Aggregate discovery
-readiness and prospective live evidence remain unfinished gates.
+See `docs/postmarket-discovery-control-evidence.md`.
+
+Market-wide aggregate gate implementation:
+`tradebot/postmarket_discovery_evidence_campaign.py` prospectively locks the
+session range, empirical identity, policy floors, providers, datasets, and
+eligible revisions. `tradebot/postmarket_discovery_evidence_gate.py` then
+requires exact clean-session inventories, reconciled full-universe censuses,
+separate independent-provider proofs, the matching empirical holdout, and all
+four operational controls. A pass is only eligible for owner review and cannot
+enable delivery. See `docs/postmarket-discovery-evidence-gate.md`. Prospective
+live evidence and owner review remain unfinished gates.
 
 ## Anti-goals
 
