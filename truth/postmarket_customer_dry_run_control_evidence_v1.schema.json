@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_control_evidence_v1.schema.json",
+  "title": "Postmarket customer-readiness dry-run control evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "status",
+    "revision",
+    "completed_at_utc",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "kind": {
+      "enum": [
+        "customer_dry_run_failure_injection",
+        "customer_dry_run_kill_switch",
+        "customer_dry_run_delivery_isolation",
+        "customer_dry_run_rollback_runbook"
+      ]
+    },
+    "status": {"enum": ["passed", "failed"]},
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$",
+      "not": {"const": "unknown"}
+    },
+    "completed_at_utc": {"type": "string", "format": "date-time"},
+    "checks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "passed", "evidence"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "passed": {"type": "boolean"},
+          "evidence": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

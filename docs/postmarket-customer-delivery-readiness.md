@@ -74,6 +74,61 @@ only explicitly through its corresponding environment path. Creating these
 files or enabling the switch is an owner operation and is not performed by a
 passing evidence gate or a routine deployment.
 
+## Immutable control evidence
+
+`tradebot.postmarket_delivery_dry_run_controls` runs four offline exercises:
+
+- failure injection for missing authorization, stale bars, degraded discovery,
+  revision mismatch, and transactional eligible-decision deduplication;
+- the independent default-off switch, disabled health behavior, and safe
+  default policy arguments;
+- static delivery/provider/order isolation across every readiness module and
+  the Compose service; and
+- the exact rollback runbook below.
+
+The suite uses deterministic fixtures and in-memory SQLite. It refuses a dirty
+worktree, a revision other than checked-out `HEAD`, a failed exercise, or an
+existing output directory. All four artifacts are written as one atomic,
+read-only set conforming to
+`truth/postmarket_customer_dry_run_control_evidence_v1.schema.json`.
+
+Run it only from the exact clean revision being reviewed:
+
+```bash
+REVISION=$(git rev-parse --short HEAD)
+docker compose run --rm postmarket-customer-dry-run \
+  python -m tradebot.postmarket_delivery_dry_run_controls \
+  --revision "$REVISION" \
+  --output-dir "data/postmarket_evidence/$REVISION/customer-dry-run-controls"
+```
+
+### Rollback runbook
+
+Customer delivery remains disabled throughout this dry run. To contain the
+readiness observer itself:
+
+1. Using the operator-approved secret editor, set exactly one line in
+   `/opt/perch/.env` to `POSTMARKET_CUSTOMER_DRY_RUN_ENABLED=0`, then verify the
+   file contains exactly that one key and value. Do not print other secrets.
+2. Recreate only the isolated service with an explicit safe override:
+
+   ```bash
+   cd /opt/perch
+   POSTMARKET_CUSTOMER_DRY_RUN_ENABLED=0 GIT_SHA=$(git rev-parse --short HEAD) \
+     docker compose up -d --no-deps --force-recreate postmarket-customer-dry-run
+   ```
+
+3. Verify the container environment reports the switch as `0`, the service is
+   healthy, and `data/postmarket_delivery_dry_run_heartbeat.json` reports
+   `enabled=false` and `status=disabled`.
+4. Verify `sqlite3 -readonly data/postmarket_shadow.db "PRAGMA quick_check;"`
+   returns `ok` and archive the incident evidence. Never delete or rewrite
+   `postmarket_delivery_dry_runs`; its suppressed and eligible dry-run rows are
+   append-only evidence.
+
+Rollback never restarts the runner, discovery, worker, bot, or API and never
+changes a customer-delivery switch because no customer-delivery path exists.
+
 Presentation is explicit: `ACTIONABLE`, `STALE`, `DEGRADED`, or `CLOSED`.
 Suppressed decisions retain every reason code. The evidence score remains a
 heuristic ordering score; it is never presented as confidence, probability,
