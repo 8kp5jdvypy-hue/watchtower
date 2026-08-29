@@ -18,7 +18,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from tradebot.journal import code_version, new_run_id
-from tradebot.postmarket_delivery_dry_run import ensure_dry_run_schema, route_dry_run
+from tradebot.postmarket_delivery_dry_run import (
+    DryRunTickEvidence,
+    ensure_dry_run_schema,
+    record_dry_run_tick,
+    route_dry_run,
+)
 from tradebot.postmarket_delivery_readiness import (
     DECISION_ELIGIBLE,
     DeliveryCandidate,
@@ -53,7 +58,10 @@ logger = logging.getLogger("watchtower.postmarket_delivery_dry_run_shadow")
 
 @dataclass(frozen=True)
 class DryRunTickResult:
+    tick_id: int
+    tick_created: bool
     session: str
+    scheduled_at_utc: str
     rank_run_id: int | None
     evaluated_candidates: int
     decisions_written: int
@@ -62,10 +70,47 @@ class DryRunTickResult:
     duplicate_decisions: int
     suppression_reasons: tuple[tuple[str, int], ...]
     operational_status: str
+    operational_reasons: tuple[str, ...]
+    scheduled_lag_ms: int
+    latency_ms: int
+    invariant_ok: bool
+    input_digest_sha256: str
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def dry_run_scheduled_at(
+    now: datetime,
+    *,
+    session_close: datetime,
+    interval_seconds: int = POLL_SECONDS,
+) -> datetime:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if session_close.tzinfo is None or session_close.utcoffset() is None:
+        raise ValueError("session_close must be timezone-aware")
+    if interval_seconds <= 0:
+        raise ValueError("interval_seconds must be positive")
+    elapsed = (now - session_close).total_seconds()
+    if elapsed < 0:
+        raise ValueError("now must not precede session_close")
+    slot = int(elapsed // interval_seconds)
+    return session_close + timedelta(seconds=slot * interval_seconds)
+
+
+def dry_run_sleep_seconds(
+    now: datetime,
+    *,
+    session_close: datetime,
+    interval_seconds: int = POLL_SECONDS,
+) -> float:
+    scheduled = dry_run_scheduled_at(
+        now, session_close=session_close, interval_seconds=interval_seconds
+    )
+    next_tick = scheduled + timedelta(seconds=interval_seconds)
+    return max(0.1, (next_tick - now).total_seconds())
 
 
 def dry_run_shadow_enabled(raw: str | None = None) -> bool:
@@ -269,7 +314,19 @@ def run_dry_run_tick(
     runtime_router_revision: str,
     run_id: str,
     operational_status: str,
+    operational_reasons: tuple[str, ...] = (),
+    scheduled_at: datetime | None = None,
 ) -> DryRunTickResult:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    if scheduled_at is not None and (
+        scheduled_at.tzinfo is None or scheduled_at.utcoffset() is None
+    ):
+        raise ValueError("scheduled_at must be timezone-aware")
+    started_at = now.astimezone(timezone.utc)
+    started_clock = time.perf_counter()
+    scheduled = (scheduled_at or now).astimezone(timezone.utc)
+    scheduled_lag_ms = max(0, round((started_at - scheduled).total_seconds() * 1000))
     ensure_dry_run_schema(conn)
     rank_run_id, candidates = load_latest_delivery_candidates(
         conn, session=session, rank_version=policy.rank_version
@@ -292,16 +349,62 @@ def run_dry_run_tick(
     reasons = Counter(
         reason for result in results for reason in result.reason_codes
     )
+    eligible = sum(result.decision == DECISION_ELIGIBLE for result in results)
+    suppressed = sum(result.decision != DECISION_ELIGIBLE for result in results)
+    written = sum(result.created for result in results)
+    duplicates = sum(not result.created for result in results)
+    invariant_ok = (
+        eligible + suppressed == len(results)
+        and written + duplicates == len(results)
+        and len({result.route_id for result in results}) == len(results)
+        and operational_status in {"clean", "degraded"}
+        and scheduled <= started_at
+    )
+    completed_at = _utc_now()
+    latency_ms = max(0, round((time.perf_counter() - started_clock) * 1000))
+    tick = record_dry_run_tick(
+        conn,
+        DryRunTickEvidence(
+            session=session.isoformat(),
+            scheduled_at_utc=scheduled.isoformat(),
+            started_at_utc=started_at.isoformat(),
+            completed_at_utc=completed_at.isoformat(),
+            rank_run_id=rank_run_id,
+            input_candidates=len(results),
+            decisions_written=written,
+            eligible_candidates=eligible,
+            suppressed_candidates=suppressed,
+            duplicate_decisions=duplicates,
+            operational_status=operational_status,
+            operational_reasons=operational_reasons,
+            scheduled_lag_ms=scheduled_lag_ms,
+            latency_ms=latency_ms,
+            invariant_ok=invariant_ok,
+            policy_sha256=policy.sha256,
+            authorization_sha256=authorization.sha256,
+            runtime_router_revision=runtime_router_revision,
+            run_id=run_id,
+        ),
+        tuple(result.route_id for result in results),
+    )
     return DryRunTickResult(
+        tick_id=tick.tick_id,
+        tick_created=tick.created,
         session=session.isoformat(),
+        scheduled_at_utc=scheduled.isoformat(),
         rank_run_id=rank_run_id,
         evaluated_candidates=len(results),
-        decisions_written=sum(result.created for result in results),
-        eligible_candidates=sum(result.decision == DECISION_ELIGIBLE for result in results),
-        suppressed_candidates=sum(result.decision != DECISION_ELIGIBLE for result in results),
-        duplicate_decisions=sum(not result.created for result in results),
+        decisions_written=written,
+        eligible_candidates=eligible,
+        suppressed_candidates=suppressed,
+        duplicate_decisions=duplicates,
         suppression_reasons=tuple(sorted(reasons.items())),
         operational_status=operational_status,
+        operational_reasons=operational_reasons,
+        scheduled_lag_ms=scheduled_lag_ms,
+        latency_ms=latency_ms,
+        invariant_ok=invariant_ok,
+        input_digest_sha256=tick.input_digest_sha256,
     )
 
 
@@ -371,6 +474,8 @@ def main() -> int:
         window = postmarket_window(now)
         assert window is not None
         session = window[0]
+        session_close = window[1]
+        scheduled_at = dry_run_scheduled_at(now, session_close=session_close)
         operational_status, operational_reasons = discovery_operational_status(
             DISCOVERY_HEARTBEAT_PATH,
             now=now,
@@ -387,6 +492,8 @@ def main() -> int:
                 runtime_router_revision=version,
                 run_id=run_id,
                 operational_status=operational_status,
+                operational_reasons=operational_reasons,
+                scheduled_at=scheduled_at,
             )
         except Exception as exc:
             conn.rollback()
@@ -401,7 +508,7 @@ def main() -> int:
             payload = {
                 **result.__dict__,
                 "suppression_reasons": dict(result.suppression_reasons),
-                "operational_reasons": list(operational_reasons),
+                "operational_reasons": list(result.operational_reasons),
                 "release_id": authorization.release_id,
                 "policy_sha256": policy.sha256,
                 "authorization_sha256": authorization.sha256,
@@ -419,7 +526,14 @@ def main() -> int:
                 result.operational_status,
             )
             write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("ok", _utc_now(), **payload))
-        time.sleep(POLL_SECONDS)
+        sleep_now = _utc_now()
+        time.sleep(
+            dry_run_sleep_seconds(
+                sleep_now,
+                session_close=session_close,
+                interval_seconds=POLL_SECONDS,
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -60,6 +60,51 @@ CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_runs_session
 CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_runs_candidate
     ON postmarket_delivery_dry_runs(candidate_id,route_id);
 
+CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_ticks (
+    tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    router_version INTEGER NOT NULL,
+    session TEXT NOT NULL,
+    scheduled_at_utc TEXT NOT NULL,
+    started_at_utc TEXT NOT NULL,
+    completed_at_utc TEXT NOT NULL,
+    rank_run_id INTEGER,
+    input_candidates INTEGER NOT NULL,
+    decisions_written INTEGER NOT NULL,
+    eligible_candidates INTEGER NOT NULL,
+    suppressed_candidates INTEGER NOT NULL,
+    duplicate_decisions INTEGER NOT NULL,
+    operational_status TEXT NOT NULL,
+    operational_reasons_json TEXT NOT NULL,
+    input_digest_sha256 TEXT NOT NULL,
+    scheduled_lag_ms INTEGER NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    invariant_ok INTEGER NOT NULL,
+    policy_sha256 TEXT NOT NULL,
+    authorization_sha256 TEXT NOT NULL,
+    runtime_router_revision TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    UNIQUE(session,router_version,scheduled_at_utc,policy_sha256),
+    CHECK (operational_status IN ('clean','degraded')),
+    CHECK (invariant_ok IN (0,1)),
+    CHECK (input_candidates >= 0),
+    CHECK (decisions_written >= 0),
+    CHECK (eligible_candidates >= 0),
+    CHECK (suppressed_candidates >= 0),
+    CHECK (duplicate_decisions >= 0),
+    CHECK (scheduled_lag_ms >= 0),
+    CHECK (latency_ms >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_run_ticks_session
+    ON postmarket_delivery_dry_run_ticks(session,tick_id);
+
+CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_tick_decisions (
+    tick_id INTEGER NOT NULL,
+    route_id INTEGER NOT NULL,
+    PRIMARY KEY (tick_id,route_id)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_run_tick_decisions_route
+    ON postmarket_delivery_dry_run_tick_decisions(route_id,tick_id);
+
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_runs_no_update
 BEFORE UPDATE ON postmarket_delivery_dry_runs BEGIN
     SELECT RAISE(ABORT, 'postmarket_delivery_dry_runs is append-only');
@@ -67,6 +112,22 @@ END;
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_runs_no_delete
 BEFORE DELETE ON postmarket_delivery_dry_runs BEGIN
     SELECT RAISE(ABORT, 'postmarket_delivery_dry_runs is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_ticks_no_update
+BEFORE UPDATE ON postmarket_delivery_dry_run_ticks BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_ticks is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_ticks_no_delete
+BEFORE DELETE ON postmarket_delivery_dry_run_ticks BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_ticks is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_tick_decisions_no_update
+BEFORE UPDATE ON postmarket_delivery_dry_run_tick_decisions BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_tick_decisions is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_tick_decisions_no_delete
+BEFORE DELETE ON postmarket_delivery_dry_run_tick_decisions BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_tick_decisions is append-only');
 END;
 """
 
@@ -82,6 +143,37 @@ class DryRunRouteResult:
     decision_fingerprint_sha256: str
 
 
+@dataclass(frozen=True)
+class DryRunTickEvidence:
+    session: str
+    scheduled_at_utc: str
+    started_at_utc: str
+    completed_at_utc: str
+    rank_run_id: int | None
+    input_candidates: int
+    decisions_written: int
+    eligible_candidates: int
+    suppressed_candidates: int
+    duplicate_decisions: int
+    operational_status: str
+    operational_reasons: tuple[str, ...]
+    scheduled_lag_ms: int
+    latency_ms: int
+    invariant_ok: bool
+    policy_sha256: str
+    authorization_sha256: str
+    runtime_router_revision: str
+    run_id: str
+
+
+@dataclass(frozen=True)
+class RecordedDryRunTick:
+    tick_id: int
+    created: bool
+    linked_decisions: int
+    input_digest_sha256: str
+
+
 def _aware_utc(value: datetime, name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
@@ -95,6 +187,129 @@ def _digest(payload: dict[str, object]) -> str:
 
 def ensure_dry_run_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(DRY_RUN_SCHEMA)
+
+
+def record_dry_run_tick(
+    conn: sqlite3.Connection,
+    evidence: DryRunTickEvidence,
+    route_ids: tuple[int, ...],
+) -> RecordedDryRunTick:
+    """Atomically append one scheduled cycle and its exact decision links."""
+    ensure_dry_run_schema(conn)
+    if evidence.input_candidates != len(route_ids):
+        raise ValueError("input_candidates must equal the route link inventory")
+    if len(route_ids) != len(set(route_ids)):
+        raise ValueError("route link inventory cannot contain duplicates")
+    linked_rows = []
+    if route_ids:
+        placeholders = ",".join("?" for _ in route_ids)
+        linked_rows = conn.execute(
+            f"""
+            SELECT route_id,session,rank_run_id,policy_sha256,
+                   authorization_sha256,runtime_router_revision
+            FROM postmarket_delivery_dry_runs
+            WHERE route_id IN ({placeholders})
+            ORDER BY route_id
+            """,
+            route_ids,
+        ).fetchall()
+    expected_identity = (
+        evidence.session,
+        evidence.rank_run_id,
+        evidence.policy_sha256,
+        evidence.authorization_sha256,
+        evidence.runtime_router_revision,
+    )
+    if len(linked_rows) != len(route_ids) or any(
+        tuple(row[1:]) != expected_identity for row in linked_rows
+    ):
+        raise ValueError("route link inventory does not match the tick evidence identity")
+    reasons_json = json.dumps(evidence.operational_reasons, separators=(",", ":"))
+    input_digest = _digest({
+        "router_version": DRY_RUN_ROUTER_VERSION,
+        "session": evidence.session,
+        "scheduled_at_utc": evidence.scheduled_at_utc,
+        "rank_run_id": evidence.rank_run_id,
+        "input_candidates": evidence.input_candidates,
+        "eligible_candidates": evidence.eligible_candidates,
+        "suppressed_candidates": evidence.suppressed_candidates,
+        "operational_status": evidence.operational_status,
+        "operational_reasons": list(evidence.operational_reasons),
+        "invariant_ok": evidence.invariant_ok,
+        "policy_sha256": evidence.policy_sha256,
+        "authorization_sha256": evidence.authorization_sha256,
+        "runtime_router_revision": evidence.runtime_router_revision,
+        "route_ids": list(route_ids),
+    })
+    with conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO postmarket_delivery_dry_run_ticks
+                (router_version,session,scheduled_at_utc,started_at_utc,
+                 completed_at_utc,rank_run_id,input_candidates,decisions_written,
+                 eligible_candidates,suppressed_candidates,duplicate_decisions,
+                 operational_status,operational_reasons_json,scheduled_lag_ms,
+                 input_digest_sha256,latency_ms,invariant_ok,policy_sha256,authorization_sha256,
+                 runtime_router_revision,run_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                DRY_RUN_ROUTER_VERSION, evidence.session,
+                evidence.scheduled_at_utc, evidence.started_at_utc,
+                evidence.completed_at_utc, evidence.rank_run_id,
+                evidence.input_candidates, evidence.decisions_written,
+                evidence.eligible_candidates, evidence.suppressed_candidates,
+                evidence.duplicate_decisions, evidence.operational_status,
+                reasons_json, evidence.scheduled_lag_ms, input_digest,
+                evidence.latency_ms,
+                int(evidence.invariant_ok), evidence.policy_sha256,
+                evidence.authorization_sha256, evidence.runtime_router_revision,
+                evidence.run_id,
+            ),
+        )
+        created = cursor.rowcount == 1
+        if created:
+            tick_id = int(cursor.lastrowid)
+            conn.executemany(
+                """
+                INSERT INTO postmarket_delivery_dry_run_tick_decisions
+                    (tick_id,route_id) VALUES (?,?)
+                """,
+                ((tick_id, route_id) for route_id in route_ids),
+            )
+        else:
+            row = conn.execute(
+                """
+                SELECT tick_id,input_digest_sha256
+                FROM postmarket_delivery_dry_run_ticks
+                WHERE session=? AND router_version=? AND scheduled_at_utc=?
+                  AND policy_sha256=?
+                """,
+                (
+                    evidence.session, DRY_RUN_ROUTER_VERSION,
+                    evidence.scheduled_at_utc, evidence.policy_sha256,
+                ),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("dry-run tick conflict could not be resolved")
+            if row[1] != input_digest:
+                raise ValueError(
+                    "scheduled dry-run tick already exists with different evidence"
+                )
+            tick_id = int(row[0])
+        linked = int(conn.execute(
+            """
+            SELECT COUNT(*) FROM postmarket_delivery_dry_run_tick_decisions
+            WHERE tick_id=?
+            """,
+            (tick_id,),
+        ).fetchone()[0])
+    return RecordedDryRunTick(
+        tick_id=tick_id,
+        created=created,
+        linked_decisions=linked,
+        input_digest_sha256=input_digest,
+    )
 
 
 def route_dry_run(
