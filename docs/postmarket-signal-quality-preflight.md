@@ -87,7 +87,9 @@ inspect every check; do not treat a safe shadow verdict as campaign readiness.
   REST key, and dedicated Massive S3 key pair;
 - `.backup-env` names a non-root remote path and a present passphrase file;
 - `PRAGMA quick_check` passes read-only for all five live databases;
-- the explicit backup manifest is recent, every digest matches, and the safe
+- the explicit backup manifest is recent, every digest matches, all five
+  signal-quality databases (including the irrebuildable Stage-1 evidence in
+  `universe.db`) are present, and the safe
   artifact archive contains both audit and evidence roots;
 - free disk meets the fixed minimum;
 - exactly four required controls pass at the exact checked-out revision; and

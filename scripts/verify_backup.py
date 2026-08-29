@@ -19,6 +19,9 @@ from pathlib import Path, PurePosixPath
 MANIFEST_PATTERN = re.compile(r"^manifest_(\d{8}T\d{6}Z)\.sha256$")
 DIGEST_LINE_PATTERN = re.compile(r"^([0-9a-f]{64}) [ *]([A-Za-z0-9_.-]+)$")
 DATABASES = {"journal", "users", "universe", "evaluations", "postmarket_shadow"}
+# Legacy off-box sets created before universe.db gained mandatory custody did
+# not include it. Keep isolated disaster restore backward-compatible; current
+# backup generation and signal-quality preflight separately require universe.db.
 REQUIRED_DATABASES = {"journal", "users", "evaluations", "postmarket_shadow"}
 ARTIFACT_ROOTS = {"postmarket_audits", "postmarket_evidence"}
 ARTIFACT_FILES = {

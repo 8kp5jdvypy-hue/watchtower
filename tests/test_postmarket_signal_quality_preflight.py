@@ -272,6 +272,27 @@ def test_stale_backup_blocks_shadow_deploy(tmp_path):
     ).passed
 
 
+def test_backup_without_universe_screening_evidence_blocks_shadow_deploy(tmp_path):
+    args = _fixture(tmp_path)
+    manifest = args["backup_manifest"]
+    manifest.write_text(
+        "\n".join(
+            line
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if "universe_" not in line
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = _evaluate(args)
+
+    assert report.safe_to_deploy_shadow is False
+    check = next(item for item in report.checks if item.name == "verified_backup_set")
+    assert check.passed is False
+    assert "missing signal-quality databases: ['universe']" in check.evidence
+
+
 def test_dirty_or_non_main_revision_blocks_shadow_deploy(tmp_path):
     dirty_args = _fixture(tmp_path / "dirty")
     (dirty_args["repo_root"] / "untracked.txt").write_text("dirty\n")

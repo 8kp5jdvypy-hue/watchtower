@@ -20,8 +20,9 @@ from scripts.verify_backup import restore_backup
 
 REPO_ROOT = Path(__file__).parents[1]
 BACKUP_SCRIPT = REPO_ROOT / "scripts" / "backup.sh"
-REQUIRED_DATABASES = ("journal", "users", "evaluations", "postmarket_shadow")
-ALL_DATABASES = (*REQUIRED_DATABASES, "universe")
+REQUIRED_DATABASES = ("journal", "users", "evaluations", "postmarket_shadow", "universe")
+ALL_DATABASES = REQUIRED_DATABASES
+LEGACY_REQUIRED_DATABASES = ("journal", "users", "evaluations", "postmarket_shadow")
 
 
 def _database(path: Path, marker: str) -> None:
@@ -232,9 +233,8 @@ def test_corrupt_required_database_fails_without_manifest(tmp_path):
     assert not list(backup_dir.glob("evaluations_*.db"))
 
 
-def test_optional_universe_and_artifacts_can_be_absent_on_fresh_install(tmp_path):
+def test_artifacts_can_be_absent_on_fresh_install(tmp_path):
     data, env_file = _fixture_data(tmp_path)
-    (data / "universe.db").unlink()
     for path in sorted(data.glob("postmarket_*"), reverse=True):
         if path.is_dir():
             shutil.rmtree(path)
@@ -245,6 +245,27 @@ def test_optional_universe_and_artifacts_can_be_absent_on_fresh_install(tmp_path
     assert "artifact archive skipped" in result.stdout
     assert set(report.databases) == set(REQUIRED_DATABASES)
     assert report.postmarket_artifacts == ()
+
+
+def test_legacy_offbox_manifest_without_universe_remains_restorable(tmp_path):
+    _, backup_dir = _run_backup(tmp_path)
+    manifest = _manifest(backup_dir)
+    universe = next(backup_dir.glob("universe_*.db.gz"))
+    universe.unlink()
+    manifest.write_text(
+        "\n".join(
+            line
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+            if "universe_" not in line
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = restore_backup(manifest, tmp_path / "legacy-restore")
+
+    assert set(report.databases) == set(LEGACY_REQUIRED_DATABASES)
+    assert "universe" not in report.databases
 
 
 def test_retention_deletes_only_recognized_backup_names(tmp_path):
@@ -432,11 +453,11 @@ fi
     assert any(name.startswith("postmarket_artifacts_") for name in names)
     assert any(name.startswith("manifest_") and name.endswith(".sha256.gpg") for name in names)
     assert any(name.startswith("env_") and name.endswith(".gpg") for name in names)
-    assert not any(name.startswith("universe_") for name in names)
+    assert any(name.startswith("universe_") and name.endswith(".db.gz.gpg") for name in names)
 
     # Fake gpg copies plaintext, so stripping the .gpg suffix simulates an
     # off-box download/decrypt. The remote manifest must restore the complete
-    # irrebuildable set without asking for the intentionally omitted universe.
+    # irrebuildable set, including Stage-1 screening evidence in universe.db.
     downloaded = tmp_path / "downloaded"
     downloaded.mkdir()
     for encrypted in capture.glob("*.gpg"):
@@ -446,7 +467,7 @@ fi
     remote_manifest = next(downloaded.glob("manifest_*.sha256"))
     report = restore_backup(remote_manifest, tmp_path / "offbox-restore")
     assert set(report.databases) == set(REQUIRED_DATABASES)
-    assert "universe" not in report.databases
+    assert "universe" in report.databases
     assert report.postmarket_artifacts
 
 

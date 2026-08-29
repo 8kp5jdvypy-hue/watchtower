@@ -117,6 +117,9 @@ if the symbols had been promoted earlier.
     and failed publication leaves the previous file intact.
 16. Universe/screening retention needs a separately reviewed archival job;
     observability must not be deleted in the change that first records it.
+    The prerequisite custody gap is closed: `universe.db` is now required in
+    local and encrypted off-box backup sets because its Stage-1 screening
+    evidence is not rebuildable from the asset catalog.
 
 ## Target architecture
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
 # Nightly backup of every durable SQLite database plus immutable postmarket
-# audits/control evidence. journal.db, users.db, evaluations.db, and
-# postmarket_shadow.db are required: silently omitting one would create a
-# backup set that cannot reconstruct Perch's decisions or evidence chain.
-# universe.db remains optional because it is rebuildable from the asset catalog.
+# audits/control evidence. All five databases are required: universe.db now
+# contains irrebuildable Stage-1 screening ticks/events in addition to the
+# rebuildable asset catalog, so silently omitting it would destroy Perch's
+# market-wide miss and recall evidence.
 #
 # Uses Python sqlite3's online backup API, not `cp`, so a snapshot taken while a
 # process is mid-write never captures a torn file. Every snapshot is checked
@@ -30,9 +30,8 @@
 # vendor relationship, S3-compatible so rclone needs no DO-specific
 # code) and the tested restore procedure.
 #
-# universe.db is NOT shipped off-box — cheaply rebuildable from Alpaca's
-# asset catalog (tradebot.universe.refresh_universe), unlike the other
-# databases and postmarket artifacts.
+# universe.db is shipped off-box. Its asset catalog can be rebuilt, but its
+# Stage-1 screening decisions cannot.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,9 +41,8 @@ BACKUP_DIR="${BACKUP_DIR:-$REPO_ROOT/backups}"
 ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
 RETAIN_DAYS="${RETAIN_DAYS:-14}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-REQUIRED_DBS=(journal users evaluations postmarket_shadow)
-OPTIONAL_DBS=(universe)
-OFFBOX_DBS=(journal users evaluations postmarket_shadow)
+REQUIRED_DBS=(journal users evaluations postmarket_shadow universe)
+OFFBOX_DBS=(journal users evaluations postmarket_shadow universe)
 GENERATED=()
 
 if [[ ! "$RETAIN_DAYS" =~ ^[0-9]+$ ]]; then
@@ -72,7 +70,7 @@ backup_database() {
   echo "backed up $db.db -> $(basename "$dest").gz"
 }
 
-for db in "${REQUIRED_DBS[@]}" "${OPTIONAL_DBS[@]}"; do
+for db in "${REQUIRED_DBS[@]}"; do
   backup_database "$db"
 done
 
@@ -136,8 +134,8 @@ else
         -o "$OFFBOX_STAGE/${name}.gpg" "$src"
   }
 
-  # Every irrebuildable database is encrypted. universe.db is deliberately
-  # excluded because it can be rebuilt from the asset catalog.
+  # Every irrebuildable database is encrypted, including universe.db because
+  # its Stage-1 screening evidence cannot be rebuilt from the asset catalog.
   for db in "${OFFBOX_DBS[@]}"; do
     gz="$BACKUP_DIR/${db}_${STAMP}.db.gz"
     if [[ -f "$gz" ]]; then
@@ -153,10 +151,9 @@ else
     OFFBOX_MANIFEST_FILES+=("$artifact_name")
   fi
 
-  # The local manifest includes optional universe.db when present, but that
-  # rebuildable database is intentionally not shipped off-box. Build the
-  # encrypted remote manifest from the exact off-box payload instead of
-  # uploading a manifest that references a file recovery cannot download.
+  # Build the encrypted remote manifest from the exact off-box payload instead
+  # of assuming it is identical to the local set (the latter may gain new local
+  # artifacts independently in a future revision).
   offbox_manifest_plain="$OFFBOX_STAGE/${manifest_name}.plain"
   (
     cd "$BACKUP_DIR"
