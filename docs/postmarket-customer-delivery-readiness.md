@@ -41,6 +41,15 @@ transition, and rank run. It is necessary but not sufficient for delivery: a
 future router still needs an append-only routing ledger to enforce the key
 transactionally.
 
+`tradebot.postmarket_delivery_dry_run.py` supplies that offline ledger. It
+stores every distinct suppression state, permits a formerly suppressed item to
+become eligible when its conditions genuinely change, and uses a partial
+unique index to record at most one eligible dry-run decision for an
+idempotency key. Exact duplicate suppression states are also idempotent. The
+ledger is append-only and stores the policy and authorization digests, exact
+candidate/transition/rank IDs, controls, runtime revision, reason codes, and
+presentation. It still has no customer-delivery dependency.
+
 Presentation is explicit: `ACTIONABLE`, `STALE`, `DEGRADED`, or `CLOSED`.
 Suppressed decisions retain every reason code. The evidence score remains a
 heuristic ordering score; it is never presented as confidence, probability,
@@ -60,9 +69,9 @@ different, separately controlled owner action.
 ## Still required before customer delivery
 
 This foundation intentionally leaves delivery unimplemented. A later,
-separately reviewed change must provide an isolated router service, immutable
-decision/delivery ledgers, transactional deduplication, customer eligibility
-and quiet-hours behavior, stale/degraded rendering, a dedicated kill-switch
-control, failure injection, rollback evidence, and explicit owner activation.
+separately reviewed change must provide an isolated supervised router service,
+customer eligibility and quiet-hours behavior, stale/degraded rendering, a
+dedicated kill-switch control, failure injection, rollback evidence, an
+immutable delivery ledger, and explicit owner activation.
 Those controls must be proven against the evidence-qualified revision before
 any customer-alert readiness claim.

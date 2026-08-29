@@ -206,6 +206,11 @@ remaining router, ledger, rendering, delivery controls, rollback proof, and
 owner activation are explicitly unfinished. See
 `docs/postmarket-customer-delivery-readiness.md`.
 
+The companion `tradebot/postmarket_delivery_dry_run.py` ledger atomically
+records distinct suppressed/eligible decision states and enforces at most one
+eligible row for a deterministic idempotency key. It remains offline and has
+no production outbox or customer-delivery dependency.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.
