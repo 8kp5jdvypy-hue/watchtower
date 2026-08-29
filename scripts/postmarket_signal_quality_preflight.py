@@ -15,11 +15,15 @@ import shlex
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tarfile
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.verify_backup import _parse_manifest, _verify_files, validate_artifact_archive
 from tradebot.postmarket_reference_manifest import parse_reference_manifest

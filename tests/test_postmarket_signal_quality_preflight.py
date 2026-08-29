@@ -7,6 +7,7 @@ import io
 import json
 import sqlite3
 import subprocess
+import sys
 import tarfile
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,25 @@ SECRETS = {
     "MASSIVE_S3_ACCESS_KEY_ID": "massive-s3-id-secret",
     "MASSIVE_S3_SECRET_ACCESS_KEY": "massive-s3-secret-secret",
 }
+
+
+def test_script_is_directly_executable_outside_repository(tmp_path):
+    script = (
+        Path(__file__).parents[1]
+        / "scripts"
+        / "postmarket_signal_quality_preflight.py"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--expected-revision" in result.stdout
 
 
 def _git(repo: Path, *args: str) -> str:
