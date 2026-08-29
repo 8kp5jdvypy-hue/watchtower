@@ -99,6 +99,16 @@ and operational gates pass.
 - [x] Prospectively lock aggregate evidence dates, policy floors,
   feeds/providers, and eligible audit/observer revisions before the first
   covered session; require its digest in the final evidence package.
+- [ ] Prove market-wide discovery operational controls at the deployed revision.
+  - [x] Add offline failure injection proving stale/outage screens stop before
+    persistence and missing bulk bars cannot fabricate candidates.
+  - [x] Add an independent default-off kill-switch exercise and static
+    delivery/order isolation evidence with immutable revision-bound artifacts.
+  - [ ] Deploy the control revision, run the exact three-artifact suite, review
+    every internal check, and ship the evidence off-box.
+- [ ] Add the prospective aggregate market-wide discovery readiness gate that
+  reconciles clean audits, primary census, independent-provider proof,
+  empirical holdout, discovery controls, rollback, and exact campaign policy.
 - [ ] Accumulate independently reviewed holdout labels, complete provider
   comparison, satisfy the aggregate evidence gate, and obtain owner review.
 - [x] Add append-only point-in-time option-implied-move/news evidence in an
