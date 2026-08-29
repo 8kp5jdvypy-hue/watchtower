@@ -65,6 +65,9 @@ and operational gates pass.
   - [x] Persistence-span timing, heartbeat fields, and audit-v3 reconciliation.
   - [ ] Deploy in shadow and verify a complete clean timing session.
 - [ ] Independent full-universe recall census and miss report.
+  - [x] Bounded full-universe completed-bar replay and append-only attempts.
+  - [x] Stage-1 false-negative reasons, detection delay, recall, and miss reports.
+  - [ ] Configure an independent comparison provider and verify live census load.
 - [ ] Volatility, relative-strength, tradability, catalyst, and confidence features.
 - [ ] Candidate lifecycle transitions and interpretable versioned rank.
 - [ ] Blinded holdout, walk-forward metrics, evidence gate, and owner review.

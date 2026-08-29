@@ -35,6 +35,12 @@ from tradebot.postmarket_quality_backfill import (
     run_due_quality_backfill,
     write_completed_quality_reports,
 )
+from tradebot.postmarket_recall_census import (
+    latest_census_report_summary,
+    next_due_census_session,
+    run_recall_census,
+    write_census_report,
+)
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.universe import active_symbols, connect as connect_universe
 
@@ -130,6 +136,12 @@ def _bars_fetch(symbols: list[str], session: date):
     from tradebot.vendors.alpaca import fetch_intraday_bars_bulk
 
     return fetch_intraday_bars_bulk(symbols, session)
+
+
+def _census_bars_fetch(symbols: list[str], start: datetime, end: datetime):
+    from tradebot.vendors.alpaca import fetch_intraday_bars_window_bulk
+
+    return fetch_intraday_bars_window_bulk(symbols, start=start, end=end)
 
 
 def _data_feed() -> str:
@@ -485,6 +497,99 @@ def quality_backfill_heartbeat_fields(
         }
 
 
+def recall_census_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    universe_conn,
+    *,
+    data_feed: str,
+    version: str | None,
+    bars_fetch: Callable[[list[str], datetime, datetime], dict] = _census_bars_fetch,
+) -> dict:
+    """Run at most one finalized full-universe census attempt per idle cycle."""
+    try:
+        due = next_due_census_session(shadow_conn, now=now)
+        if due is None:
+            return {
+                "recall_census_status": "current",
+                "latest_recall_census": latest_census_report_summary(AUDIT_DIR),
+            }
+        session, session_close, postmarket_end = due
+        result, _ = run_recall_census(
+            shadow_conn,
+            universe_symbols=active_symbols(universe_conn),
+            session=session,
+            session_close=session_close,
+            postmarket_end=postmarket_end,
+            now=now,
+            run_id=new_run_id(),
+            code_version=version,
+            data_feed=data_feed,
+            bars_fetch=bars_fetch,
+        )
+        report, written = write_census_report(
+            shadow_conn, AUDIT_DIR, result.census_id
+        )
+        logger.info(
+            "postmarket_recall_census session=%s attempt=%s status=%s "
+            "universe=%s fetched=%s eligible_pairs=%s tp=%s fn=%s fp=%s "
+            "recall=%s unavailable=%s errors=%s latency_ms=%s report_written=%s",
+            result.session,
+            result.attempt,
+            result.status,
+            result.universe_symbols,
+            result.fetched_symbols,
+            result.eligible_pairs,
+            result.true_positive_pairs,
+            result.false_negative_pairs,
+            result.false_positive_pairs,
+            result.recall,
+            result.unavailable_symbols,
+            result.error_count,
+            result.latency_ms,
+            written,
+        )
+        return {
+            "recall_census_status": result.status,
+            "recall_census_session": result.session,
+            "recall_census_attempt": result.attempt,
+            "recall_census_universe": result.universe_symbols,
+            "recall_census_fetched": result.fetched_symbols,
+            "recall_census_eligible_pairs": result.eligible_pairs,
+            "recall_census_false_negatives": result.false_negative_pairs,
+            "recall_census_recall": result.recall,
+            "recall_census_unavailable": result.unavailable_symbols,
+            "recall_census_errors": result.error_count,
+            "recall_census_latency_ms": result.latency_ms,
+            "recall_census_report_written": written,
+            "latest_recall_census": {
+                "session": report.session,
+                "report_version": report.report_version,
+                "operational_complete": report.operational_complete,
+                "evidence_eligible": report.evidence_eligible,
+                "recall": report.metrics["recall"],
+                "false_negative_pairs": report.metrics["false_negative_pairs"],
+                "unavailable_symbols": report.metrics["unavailable_symbols"],
+                "issue_codes": list(report.issue_codes),
+            },
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket recall census failed")
+        try:
+            latest = latest_census_report_summary(AUDIT_DIR)
+        except Exception as summary_exc:
+            latest = {
+                "status": "error",
+                "error": f"{type(summary_exc).__name__}: {summary_exc}"[:1000],
+            }
+        return {
+            "recall_census_status": "error",
+            "recall_census_error": f"{type(exc).__name__}: {exc}"[:1000],
+            "latest_recall_census": latest,
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -529,6 +634,13 @@ def main() -> int:
                 version=version,
                 run_id=run_id,
             )
+            census_fields = recall_census_heartbeat_fields(
+                now,
+                shadow_conn,
+                universe_conn,
+                data_feed=data_feed,
+                version=version,
+            )
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
@@ -536,6 +648,7 @@ def main() -> int:
                     now,
                     **discovery_audit_heartbeat_fields(now),
                     **quality_fields,
+                    **census_fields,
                 ),
             )
             time.sleep(idle_sleep_seconds(now))

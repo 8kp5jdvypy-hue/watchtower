@@ -75,6 +75,11 @@ timing. See `docs/postmarket-timing-truth.md`.
 - Stage-1 recall, false-negative symbols, detection delay, and reason codes.
 - Provider disagreement and unavailable-universe accounting.
 
+Implementation: `tradebot/postmarket_recall_census.py` snapshots and replays
+the active universe in bounded chunks, writes append-only per-symbol evidence,
+and publishes immutable miss reports. See `docs/postmarket-recall-census.md`.
+Independent provider comparison remains explicitly unconfigured.
+
 ### 4. Context and tradability
 
 - ATR/expected-move normalization and SPY/sector-relative movement.
