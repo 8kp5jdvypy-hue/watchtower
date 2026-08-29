@@ -116,6 +116,30 @@ verdict. Reviews are campaign/case/reviewer unique and append-only in
 not cryptographic proof of a human identity; the final release review must
 still verify reviewer identity and independence outside the software.
 
+The reviewer workflow uses only explicit files and route ids—no ad hoc SQL:
+
+```bash
+python -m tradebot.postmarket_customer_dry_run_review list \
+  --db data/postmarket_shadow.db \
+  --campaign data/postmarket_customer_dry_run_campaign.json
+
+python -m tradebot.postmarket_customer_dry_run_review export \
+  --db data/postmarket_shadow.db \
+  --campaign data/postmarket_customer_dry_run_campaign.json \
+  --route-id ROUTE_ID \
+  --output data/postmarket_evidence/reviews/ROUTE_ID.case.json
+
+python -m tradebot.postmarket_customer_dry_run_review record \
+  --db data/postmarket_shadow.db \
+  --case data/postmarket_evidence/reviews/ROUTE_ID.case.json \
+  --assessment data/postmarket_evidence/reviews/ROUTE_ID.assessment.json
+```
+
+Assessment files must conform exactly to
+`truth/postmarket_customer_dry_run_review_assessment_v1.schema.json`. Listing
+and export open the database read-only. Only `record` mutates it, and that
+mutation is the append-only review row.
+
 `tradebot.postmarket_customer_dry_run_gate` is the final aggregate dry-run
 check. It reopens the append-only database read-only, recomputes every covered
 daily audit, verifies the exact campaign and four control digests, reconciles

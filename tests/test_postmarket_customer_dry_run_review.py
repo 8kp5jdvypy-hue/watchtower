@@ -9,9 +9,11 @@ import pytest
 from tradebot.postmarket_customer_dry_run_review import (
     REVIEW_ATTESTATION,
     build_review_case,
+    list_eligible_review_cases,
     record_independent_review,
     write_review_case_atomic,
 )
+from tradebot.postmarket_customer_dry_run_campaign import POLICY_FIELDS
 from tradebot.postmarket_delivery_dry_run import ensure_dry_run_schema
 
 
@@ -93,6 +95,39 @@ def _assessment(**changes):
     return payload
 
 
+def _campaign():
+    return {
+        "schema_version": 1,
+        "status": "locked",
+        "campaign_id": "campaign-1",
+        "locked_at_utc": "2026-08-27T12:00:00+00:00",
+        "coverage_start": "2026-08-28",
+        "coverage_end": "2026-08-28",
+        "expected_sessions": ["2026-08-28"],
+        "delivery_policy_sha256": "c" * 64,
+        "owner_authorization_sha256": "d" * 64,
+        "owner_authorization_expires_at_utc": "2026-10-01T00:00:00+00:00",
+        "release_id": "release-1",
+        "router_version": 1,
+        "rank_version": 1,
+        "control_evidence_sha256s": [str(index) * 64 for index in range(1, 5)],
+        "policy": {
+            "min_clean_sessions": 10,
+            "min_eligible_decisions": 20,
+            "min_independently_reviewed_cases": 20,
+            "min_distinct_reviewed_symbols": 10,
+            "min_owner_review_approval_rate": 0.9,
+            "min_session_coverage_pct": 100,
+            "max_scheduled_lag_seconds": 30,
+            "max_tick_latency_seconds": 10,
+            "allowed_audit_versions": [1],
+            "allowed_audit_code_versions": ["abc1234"],
+            "allowed_runtime_router_revisions": ["abc1234"],
+            **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
+        },
+    }
+
+
 def test_case_is_point_in_time_digest_bound_and_excludes_future_outcomes(tmp_path):
     conn, route_id = _conn()
     case = build_review_case(
@@ -110,6 +145,24 @@ def test_case_is_point_in_time_digest_bound_and_excludes_future_outcomes(tmp_pat
     assert stat.S_IMODE(path.stat().st_mode) == 0o444
     with pytest.raises(FileExistsError):
         write_review_case_atomic(path, case)
+
+
+def test_list_is_campaign_scoped_and_does_not_require_review_table():
+    conn, route_id = _conn()
+    rows = list_eligible_review_cases(
+        conn, campaign=_campaign(), campaign_sha256=CAMPAIGN
+    )
+    assert rows == ({
+        "route_id": route_id,
+        "session": "2026-08-28",
+        "symbol": "OKTA",
+        "direction": "up",
+        "evaluated_at_utc": NOW.isoformat(),
+        "rank_run_id": 7,
+        "candidate_id": 11,
+        "transition_id": 5,
+        "review_count": 0,
+    },)
 
 
 def test_approved_review_is_append_only_and_exactly_bound():
