@@ -14,7 +14,7 @@ backup.
 |---|---|
 | `Dockerfile` | One image for worker/bot/runner/postmarket shadows/api (they share code/deps; only the command differs) |
 | `requirements.txt` | Pinned direct dependencies for the image |
-| `docker-compose.yml` | worker / bot / runner / scheduled and market-wide postmarket shadows / api / caddy services with restart policies and market-aware healthchecks |
+| `docker-compose.yml` | worker / bot / runner / postmarket shadows / default-off customer-readiness dry run / api / caddy services with restart policies and market-aware healthchecks |
 | `docs/postmarket-discovery-daily-audit.md` | Immutable daily coverage, provenance, lifecycle, and conservation audit for market-wide discovery |
 | `docs/postmarket-signal-quality-preflight.md` | Read-only exact-revision, database, backup, control, credential, and licensed-reference preflight before the complete shadow stack is deployed |
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
@@ -33,6 +33,16 @@ Both probes require the running revision and observer identity to match.
 Discovery also fails on any explicit subsystem `error`. A `degraded` evidence
 result remains visible but does not trigger a restart loop; missing market data
 is not the same as a dead worker.
+
+The `postmarket-customer-dry-run` service is independently default-off and has
+no delivery/outbox dependency. When explicitly enabled, its health probe
+requires a fresh matching-revision heartbeat all day. Enabled startup also
+requires exact policy and dry-run owner-authorization files; the discovery
+heartbeat must be fresh and clean before any row is classified eligible.
+Routine deployment must leave `POSTMARKET_CUSTOMER_DRY_RUN_ENABLED=0` until the
+evidence campaign, policy, and dry-run authorization have been separately
+reviewed. Even enabled mode records readiness decisions only and cannot contact
+customers.
 
 Before deploying the complete signal-quality stack, run the fail-closed
 preflight in `docs/postmarket-signal-quality-preflight.md`. A safe shadow
