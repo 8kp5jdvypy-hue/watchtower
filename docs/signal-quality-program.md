@@ -53,6 +53,11 @@ The program is complete only when all of the following are true:
 - Directional returns, MFE, MAE, time-to-MFE, and cohort quality reports.
 - Next-session resolution through the actual exchange calendar.
 
+Implementation: `tradebot/postmarket_quality.py` owns provider-free outcome
+semantics; `tradebot/postmarket_quality_backfill.py` performs bounded candidate-
+only fetch orchestration and immutable report publication. Operational details
+are in `docs/postmarket-outcome-quality.md`.
+
 ### 2. Timing truth
 
 - Scheduled-versus-actual cycle lag and missed-cycle count.

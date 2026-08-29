@@ -28,6 +28,11 @@ from tradebot.postmarket_discovery import (
     select_discovery_symbols,
 )
 from tradebot.postmarket_discovery_audit import write_completed_discovery_audits
+from tradebot.postmarket_quality_backfill import (
+    latest_quality_report_summaries,
+    run_due_quality_backfill,
+    write_completed_quality_reports,
+)
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.universe import active_symbols, connect as connect_universe
 
@@ -347,6 +352,71 @@ def discovery_audit_heartbeat_fields(now: datetime) -> dict:
         }
 
 
+def quality_backfill_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    *,
+    data_feed: str,
+    version: str | None,
+    run_id: str,
+    bars_fetch: Callable[[list[str], date], dict] = _bars_fetch,
+) -> dict:
+    """Run bounded outcome maintenance and make every failure visible."""
+    try:
+        result = run_due_quality_backfill(
+            shadow_conn,
+            now=now,
+            data_feed=data_feed,
+            code_version=version,
+            run_id=run_id,
+            bars_fetch=bars_fetch,
+        )
+        reports = write_completed_quality_reports(
+            shadow_conn,
+            AUDIT_DIR,
+            now=now,
+            report_code_version=version,
+        )
+        if result.candidates_planned or reports:
+            logger.info(
+                "postmarket_quality_backfill candidates=%s fetch_sessions=%s "
+                "symbols_fetched=%s marks_written=%s unresolved=%s errors=%s "
+                "reports_written=%s latency_ms=%s",
+                result.candidates_planned,
+                result.candidate_sessions_fetched,
+                result.symbols_fetched,
+                result.marks_written,
+                result.unresolved_checkpoints,
+                result.fetch_errors,
+                len(reports),
+                result.latency_ms,
+            )
+        return {
+            "quality_backfill_status": (
+                "degraded"
+                if result.fetch_errors or result.unresolved_checkpoints
+                else "current"
+            ),
+            "quality_candidates_planned": result.candidates_planned,
+            "quality_marks_written": result.marks_written,
+            "quality_unresolved_checkpoints": result.unresolved_checkpoints,
+            "quality_fetch_errors": result.fetch_errors,
+            "quality_fetch_error_details": list(result.fetch_error_details[:20]),
+            "quality_reports_written": len(reports),
+            "latest_quality_reports": list(
+                latest_quality_report_summaries(AUDIT_DIR)
+            ),
+            "quality_latency_ms": result.latency_ms,
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket quality backfill failed")
+        return {
+            "quality_backfill_status": "error",
+            "quality_backfill_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -384,9 +454,21 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
+            quality_fields = quality_backfill_heartbeat_fields(
+                now,
+                shadow_conn,
+                data_feed=data_feed,
+                version=version,
+                run_id=run_id,
+            )
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
-                _heartbeat("idle", now, **discovery_audit_heartbeat_fields(now)),
+                _heartbeat(
+                    "idle",
+                    now,
+                    **discovery_audit_heartbeat_fields(now),
+                    **quality_fields,
+                ),
             )
             time.sleep(idle_sleep_seconds(now))
             continue
@@ -429,8 +511,19 @@ def main() -> int:
                 result.error_count,
                 result.latency_ms,
             )
+            completed_now = _utc_now()
+            quality_fields = quality_backfill_heartbeat_fields(
+                completed_now,
+                shadow_conn,
+                data_feed=data_feed,
+                version=version,
+                run_id=run_id,
+            )
             write_heartbeat_atomic(
-                HEARTBEAT_PATH, _heartbeat("ok", _utc_now(), **result.__dict__)
+                HEARTBEAT_PATH,
+                _heartbeat(
+                    "ok", completed_now, **result.__dict__, **quality_fields
+                ),
             )
         time.sleep(POLL_SECONDS)
 

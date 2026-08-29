@@ -364,6 +364,8 @@ def compute_outcome_marks(
     next_session_rth_bars: Sequence[Bar],
     *,
     as_of: datetime,
+    postmarket_data_complete: bool = True,
+    next_session_data_complete: bool = True,
 ) -> tuple[OutcomeMark, ...]:
     """Compute every due checkpoint from supplied completed bars.
 
@@ -406,13 +408,13 @@ def compute_outcome_marks(
             results.append(
                 _available_mark(candidate, target, detection_ts, bar, postmarket)
             )
-        elif postmarket_final:
+        elif postmarket_final and postmarket_data_complete:
             results.append(
                 _no_bar_mark(candidate, target, detection_ts, "no completed postmarket bar")
             )
 
     close_target = targets[POSTMARKET_CLOSE]
-    if postmarket_final:
+    if postmarket_final and postmarket_data_complete:
         eligible = [
             bar
             for bar in postmarket
@@ -431,7 +433,7 @@ def compute_outcome_marks(
             )
 
     open_target = targets[NEXT_SESSION_OPEN]
-    if next_open_final:
+    if next_open_final and next_session_data_complete:
         opening_bar = next(
             (
                 bar
@@ -457,7 +459,7 @@ def compute_outcome_marks(
             )
 
     close_target = targets[NEXT_SESSION_CLOSE]
-    if next_close_final:
+    if next_close_final and next_session_data_complete:
         closing_bar = next(
             (
                 bar

@@ -226,6 +226,19 @@ def test_missing_prices_are_explicit_only_after_sessions_finalize():
     assert all(mark.price is None for mark in after_final)
 
 
+def test_incomplete_provider_responses_do_not_become_no_bar_truth():
+    after_final = compute_outcome_marks(
+        _candidate(),
+        (),
+        (),
+        as_of=datetime(2026, 8, 28, 20, 5, 1, tzinfo=UTC),
+        postmarket_data_complete=False,
+        next_session_data_complete=False,
+    )
+
+    assert after_final == ()
+
+
 def test_recording_is_append_only_idempotent_and_allows_later_correction(tmp_path):
     conn = sqlite3.connect(tmp_path / "quality.db")
     ensure_quality_schema(conn)
