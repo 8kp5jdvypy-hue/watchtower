@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useApiData } from '../hooks/useApiData'
 import { explainContext } from '../signalContext'
 import { SMALL_SAMPLE_THRESHOLD, interpretHistory, isRoughlyFlat } from '../signalHistory'
+import { explicitOutcomeRows, outcomeResolutionLabel } from '../signalOutcomes'
 import { kindLabel } from '../kindLabels'
 import PerchMark from './PerchMark'
 import './SignalDetail.css'
@@ -17,53 +18,6 @@ function absoluteTime(tsUtc) {
 
 function pct(value) {
   return value == null ? '—' : `${(value * 100).toFixed(0)}%`
-}
-
-// The fixed checkpoints journal.backfill_marks() ever writes (see
-// tradebot/journal.py's OUTCOME_OFFSETS_MIN) -- a stable UI constant, not
-// detection logic. "At session close" is handled separately below since
-// it isn't a fixed offset.
-const AFTER_DETECTION_OFFSETS = [15, 30, 60]
-
-// One row per possible checkpoint, whether or not it's backfilled yet --
-// a signal detected late in the session may never get all of them, and
-// that's normal, not an error (see /signals/<id>'s marks field: empty
-// until journal.backfill_marks() runs, once, at session end). Missing
-// rows render a resolution estimate rather than a bare "Pending", so the
-// section reads as "still developing on this schedule," not "broken."
-function afterDetectionRows(marks) {
-  return [
-    ...AFTER_DETECTION_OFFSETS.map((offsetMin) => ({
-      key: `offset-${offsetMin}`,
-      label: `+${offsetMin} min after detection`,
-      offsetMin,
-      mark: marks?.find((m) => m.offset_min === offsetMin && !m.at_close),
-    })),
-    { key: 'close', label: 'At session close', offsetMin: null, mark: marks?.find((m) => m.at_close) },
-  ]
-}
-
-// backfill_marks() only ever runs once, at session close, for every
-// checkpoint including +15min -- there's no incremental resolution (see
-// tradebot/journal.py's backfill_marks()). So a checkpoint whose target
-// time hasn't arrived yet can honestly be given that time ("resolves
-// ~2:47 PM"), but once the target time has passed, the only honest thing
-// left to say is that it's waiting on the once-daily close batch, same
-// as the close row itself -- showing the already-elapsed target time
-// there would look exactly as broken as a bare "Pending" did.
-// Returns both lengths of the label; SignalDetail renders them in two
-// spans and CSS picks one per viewport (design review M8: the full
-// sentence wraps every row of the 390px marks table onto two lines,
-// collapsing the two-column ledger into an eight-line list).
-function pendingResolutionLabel(offsetMin, tsUtc) {
-  if (offsetMin != null) {
-    const targetMs = new Date(tsUtc).getTime() + offsetMin * 60 * 1000
-    if (Date.now() < targetMs) {
-      const time = new Date(targetMs).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-      return { full: `Resolves ~${time}`, short: `Resolves ~${time}` }
-    }
-  }
-  return { full: 'Resolves after session close', short: 'After close' }
 }
 
 // Matches .signal-detail's CSS transition duration -- see sd-panel-in/
@@ -312,7 +266,7 @@ export default function SignalDetail({ id, onClose }) {
               <section className="sd-section">
                 <h2 className="sd-section-title">After detection</h2>
                 <ul className="sd-marks-list">
-                  {afterDetectionRows(data.marks).map(({ key, label, offsetMin, mark }) => (
+                  {explicitOutcomeRows(data).map(({ key, label, offsetMin, mark, status }) => (
                     <li className="sd-mark-row" key={key}>
                       <span className="sd-mark-label">{label}</span>
                       {mark ? (
@@ -321,7 +275,7 @@ export default function SignalDetail({ id, onClose }) {
                         </span>
                       ) : (
                         (() => {
-                          const pending = pendingResolutionLabel(offsetMin, data.ts_utc)
+                          const pending = outcomeResolutionLabel(status, offsetMin, data.ts_utc)
                           return (
                             <span className="sd-mark-pending">
                               <span className="sd-pending-full">{pending.full}</span>

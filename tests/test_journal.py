@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +11,12 @@ import pytest
 from tradebot.detectors import Detection
 from tradebot.journal import (
     CLOSE_MARK_OFFSET_MIN,
+    MARK_STATUS_AVAILABLE,
+    MARK_STATUS_DATA_UNAVAILABLE,
+    MARK_STATUS_DELAYED,
+    MARK_STATUS_NOT_REACHED,
+    MARK_STATUS_PENDING,
+    MARK_STATUS_WAITING,
     MIN_HISTORY_SAMPLE,
     backfill_marks,
     cluster_id,
@@ -21,6 +28,8 @@ from tradebot.journal import (
     iv_rank,
     kind_performance,
     get_contract_outcome,
+    outcome_checkpoints,
+    outcome_resolution_status,
     pending_contract_backfills,
     pending_contract_close_backfills,
     pending_contract_day_range_backfills,
@@ -438,6 +447,214 @@ def test_backfill_marks_default_offsets_are_15_30_60_and_close(tmp_path):
 
     assert set(marks) == {15, 30, CLOSE_MARK_OFFSET_MIN}  # 60 isn't reached, 5 is no longer a checkpoint
     assert marks[15] == 102  # first bar closing at/after rth_open + 15m
+
+
+def test_backfill_marks_appends_explicit_available_not_reached_and_unavailable_events(tmp_path):
+    cache_dir = tmp_path / "cache"
+    detection_ts = datetime(2026, 6, 15, 19, 45, tzinfo=timezone.utc)
+    # Final RTH bar opens 19:55Z and closes at the official 20:00Z close.
+    bars = [
+        _bar_row(detection_ts, 100),
+        _bar_row(detection_ts + timedelta(minutes=5), 101),
+        _bar_row(detection_ts + timedelta(minutes=10), 102),
+    ]
+    _write_bar_csv(cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv", bars)
+    _write_bar_csv(cache_dir / SYMBOL / "daily.csv", [_bar_row(detection_ts - timedelta(days=1), 99)])
+    conn = connect(tmp_path / "journal.db")
+    detection_id = write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=detection_ts.isoformat(),
+        kinds="gap", headlines="h", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+
+    backfill_marks(conn, SESSION, cache_dir=cache_dir)
+    rows = conn.execute(
+        "SELECT offset_min,status,reason,price FROM mark_resolution_events "
+        "WHERE detection_id=? ORDER BY event_id",
+        (detection_id,),
+    ).fetchall()
+    assert rows == [
+        (15, MARK_STATUS_AVAILABLE, "cached_session_bar", 102.0),
+        (30, MARK_STATUS_NOT_REACHED, "target_after_session_close", None),
+        (60, MARK_STATUS_NOT_REACHED, "target_after_session_close", None),
+        (CLOSE_MARK_OFFSET_MIN, MARK_STATUS_AVAILABLE, "session_close_bar", 102.0),
+    ]
+
+    # A repair rerun appends a second complete attempt; it never updates or
+    # deletes the original evidence.
+    backfill_marks(conn, SESSION, cache_dir=cache_dir)
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT attempt_id),COUNT(*) FROM mark_resolution_events WHERE detection_id=?",
+        (detection_id,),
+    ).fetchone() == (2, 8)
+
+    # A later failed retry is preserved as operational evidence but cannot
+    # downgrade real prices that were already resolved successfully.
+    (cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv").unlink()
+    assert backfill_marks(conn, SESSION, cache_dir=cache_dir) == 0
+    after_failed_retry = outcome_checkpoints(
+        conn, detection_id, detection_ts, SESSION,
+        now=datetime(2026, 6, 15, 20, 45, tzinfo=timezone.utc),
+    )
+    assert [row.status for row in after_failed_retry] == [
+        MARK_STATUS_AVAILABLE,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_AVAILABLE,
+    ]
+    assert [row.price for row in after_failed_retry] == [102.0, None, None, 102.0]
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT attempt_id),COUNT(*) FROM mark_resolution_events WHERE detection_id=?",
+        (detection_id,),
+    ).fetchone() == (3, 12)
+
+
+def test_missing_cache_produces_durable_data_unavailable_events(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_ts = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=detection_ts.isoformat(),
+        kinds="gap", headlines="h", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+
+    backfill_marks(conn, SESSION, cache_dir=tmp_path / "missing-cache")
+    rows = conn.execute(
+        "SELECT offset_min,status,reason,price FROM mark_resolution_events "
+        "WHERE detection_id=? ORDER BY event_id",
+        (detection_id,),
+    ).fetchall()
+    assert len(rows) == 4
+    assert {row[1] for row in rows} == {MARK_STATUS_DATA_UNAVAILABLE}
+    assert {row[2] for row in rows} == {"missing_cache_file"}
+    assert all(row[3] is None for row in rows)
+
+    # Repairing the cache appends a successful attempt. The latest attempt
+    # becomes the API truth without erasing the original failed evidence.
+    cache_dir = tmp_path / "missing-cache"
+    _write_bar_csv(
+        cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv",
+        [
+            _bar_row(detection_ts + timedelta(minutes=10), 101),
+            _bar_row(detection_ts + timedelta(minutes=25), 102),
+            _bar_row(detection_ts + timedelta(minutes=55), 103),
+            _bar_row(detection_ts + timedelta(minutes=385), 104),
+        ],
+    )
+    assert backfill_marks(conn, SESSION, cache_dir=cache_dir) == 4
+    repaired = outcome_checkpoints(
+        conn, detection_id, detection_ts, SESSION,
+        now=datetime(2026, 6, 15, 20, 30, tzinfo=timezone.utc),
+    )
+    assert [row.status for row in repaired] == [MARK_STATUS_AVAILABLE] * 4
+    assert [row.price for row in repaired] == [101.0, 102.0, 103.0, 104.0]
+    assert outcome_resolution_status(repaired) == "RESOLVED"
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT attempt_id),COUNT(*) FROM mark_resolution_events WHERE detection_id=?",
+        (detection_id,),
+    ).fetchone() == (2, 8)
+
+
+def test_premarket_only_cache_cannot_masquerade_as_session_close(tmp_path):
+    cache_dir = tmp_path / "cache"
+    premarket = datetime(2026, 6, 15, 12, 0, tzinfo=timezone.utc)
+    _write_bar_csv(
+        cache_dir / SYMBOL / f"intraday_{SESSION.isoformat()}.csv",
+        [_bar_row(premarket, 77.0)],
+    )
+    conn = connect(tmp_path / "journal.db")
+    detection_ts = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        conn, session=SESSION.isoformat(), symbol=SYMBOL, ts_utc=detection_ts.isoformat(),
+        kinds="gap", headlines="h", score=2.0, close=100.0, atr14=1.0,
+        trend="up", detections=[_detection(kind="gap")], code_version_str="abc",
+    )
+    conn.commit()
+
+    assert backfill_marks(conn, SESSION, cache_dir=cache_dir) == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM marks WHERE detection_id=?", (detection_id,)
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT status,reason FROM mark_resolution_events "
+        "WHERE detection_id=? AND offset_min=?",
+        (detection_id, CLOSE_MARK_OFFSET_MIN),
+    ).fetchone() == (MARK_STATUS_DATA_UNAVAILABLE, "no_session_bars")
+
+
+def test_mark_resolution_events_are_database_enforced_append_only(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    conn.execute(
+        "INSERT INTO mark_resolution_events "
+        "(attempt_id,detection_id,session,offset_min,status,reason,price,created_at,code_version) "
+        "VALUES ('a','d','2026-06-15',15,'DATA_UNAVAILABLE','test',NULL,'2026-06-15T20:01:00+00:00','v')"
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("UPDATE mark_resolution_events SET reason='changed'")
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM mark_resolution_events")
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(
+            "INSERT INTO mark_resolution_events "
+            "(attempt_id,detection_id,session,offset_min,status,reason,price,created_at,code_version) "
+            "VALUES ('bad','d','2026-06-15',30,'PENDING','test',NULL,'2026-06-15T20:01:00+00:00','v')"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        conn.execute(
+            "INSERT INTO mark_resolution_events "
+            "(attempt_id,detection_id,session,offset_min,status,reason,price,created_at,code_version) "
+            "VALUES ('bad','d','2026-06-15',30,'AVAILABLE','test',NULL,'2026-06-15T20:01:00+00:00','v')"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        conn.execute(
+            "INSERT INTO mark_resolution_events "
+            "(attempt_id,detection_id,session,offset_min,status,reason,price,created_at,code_version) "
+            "VALUES ('a','d','2026-06-15',15,'DATA_UNAVAILABLE','duplicate',NULL,'2026-06-15T20:02:00+00:00','v')"
+        )
+
+
+def test_outcome_checkpoints_distinguish_pending_waiting_delayed_and_not_reached(tmp_path):
+    conn = connect(tmp_path / "journal.db")
+    detection_ts = datetime(2026, 6, 15, 19, 45, tzinfo=timezone.utc)
+
+    before_close = outcome_checkpoints(
+        conn, "d", detection_ts, SESSION,
+        now=datetime(2026, 6, 15, 19, 50, tzinfo=timezone.utc),
+    )
+    assert [row.status for row in before_close] == [
+        MARK_STATUS_PENDING,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_PENDING,
+    ]
+    assert outcome_resolution_status(before_close) == MARK_STATUS_PENDING
+
+    in_grace = outcome_checkpoints(
+        conn, "d", detection_ts, SESSION,
+        now=datetime(2026, 6, 15, 20, 5, tzinfo=timezone.utc),
+    )
+    assert [row.status for row in in_grace] == [
+        MARK_STATUS_WAITING,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_WAITING,
+    ]
+    assert outcome_resolution_status(in_grace) == MARK_STATUS_WAITING
+
+    after_grace = outcome_checkpoints(
+        conn, "d", detection_ts, SESSION,
+        now=datetime(2026, 6, 15, 20, 16, tzinfo=timezone.utc),
+    )
+    assert [row.status for row in after_grace] == [
+        MARK_STATUS_DELAYED,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_NOT_REACHED,
+        MARK_STATUS_DELAYED,
+    ]
+    assert outcome_resolution_status(after_grace) == "DEGRADED"
 
 
 def _write_cluster_with_mark(conn, kind, trend, close, price_at_30, ts_utc, score=4.0, data_feed="iex", origin="watchlist"):

@@ -29,7 +29,7 @@ import dataclasses
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 
 from flask import Flask, g, jsonify, request, session
@@ -45,7 +45,14 @@ from tradebot import accounts, client_errors, config, funnel_events, rate_limit
 from tradebot.telegram_bot.access import can_access
 from tradebot.email_sender import build_email_sender
 from tradebot.journal import connect as journal_connect
-from tradebot.journal import CLOSE_MARK_OFFSET_MIN, historical_performance, kind_performance, tier_performance
+from tradebot.journal import (
+    CLOSE_MARK_OFFSET_MIN,
+    historical_performance,
+    kind_performance,
+    outcome_checkpoints,
+    outcome_resolution_status,
+    tier_performance,
+)
 from tradebot.marketdata import fetch_quotes
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
@@ -597,25 +604,37 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
             if primary_kind and trend
             else None
         )
-        # Real forward prices for THIS detection, once backfilled -- see
-        # journal.backfill_marks(), which only runs once, at the end of
-        # the session that produced this detection. Empty until then --
-        # never a live/current price, and never fabricated for an
-        # interval that hasn't been reached yet. at_close marks the
-        # CLOSE_MARK_OFFSET_MIN sentinel row so the frontend never needs
-        # to know that -1 means "session close." Render as "After
-        # detection" + offset_min, or "At session close" when at_close is
-        # true -- never as a live quote.
-        mark_rows = app.journal_conn.execute(
-            "SELECT offset_min, price FROM marks WHERE detection_id = ?", (id_,)
-        ).fetchall()
+        # Explicit checkpoint states, backed by the append-only
+        # mark_resolution_events ledger once the close batch runs. Before
+        # that, outcome_checkpoints derives only bounded calendar states
+        # (PENDING/WAITING/DELAYED); a missing row never silently means
+        # "pending" forever. The legacy marks field remains for deployed
+        # frontend compatibility and contains real prices only.
+        checkpoint_rows = outcome_checkpoints(
+            app.journal_conn,
+            id_,
+            datetime.fromisoformat(ts_utc),
+            date.fromisoformat(session),
+        )
         marks = [
             {
-                "offset_min": None if offset == CLOSE_MARK_OFFSET_MIN else offset,
-                "at_close": offset == CLOSE_MARK_OFFSET_MIN,
-                "price": price,
+                "offset_min": None if checkpoint.offset_min == CLOSE_MARK_OFFSET_MIN else checkpoint.offset_min,
+                "at_close": checkpoint.offset_min == CLOSE_MARK_OFFSET_MIN,
+                "price": checkpoint.price,
             }
-            for offset, price in sorted(mark_rows, key=lambda r: (r[0] == CLOSE_MARK_OFFSET_MIN, r[0]))
+            for checkpoint in checkpoint_rows
+            if checkpoint.price is not None
+        ]
+        outcomes = [
+            {
+                "offset_min": None if checkpoint.offset_min == CLOSE_MARK_OFFSET_MIN else checkpoint.offset_min,
+                "at_close": checkpoint.offset_min == CLOSE_MARK_OFFSET_MIN,
+                "status": checkpoint.status,
+                "price": checkpoint.price,
+                "reason": checkpoint.reason,
+                "resolved_at": checkpoint.resolved_at,
+            }
+            for checkpoint in checkpoint_rows
         ]
         return jsonify(
             {
@@ -638,6 +657,8 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "event_severity": event_severity,
                 "history": _to_jsonable(history),
                 "marks": marks,
+                "outcomes": outcomes,
+                "outcome_status": outcome_resolution_status(checkpoint_rows),
                 "origin": origin or "watchlist",
             }
         )
