@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from tradebot.postmarket_delivery_dry_run import route_dry_run
+from tradebot.postmarket_delivery_dry_run import (
+    DryRunTickEvidence,
+    record_dry_run_tick,
+    route_dry_run,
+)
 from tradebot.postmarket_delivery_readiness import (
     ACKNOWLEDGEMENT,
     DECISION_ELIGIBLE,
@@ -204,3 +208,94 @@ def test_router_has_no_live_provider_delivery_or_trading_dependency():
     imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
     for forbidden in ("telegram", "outbox", "requests", "alpaca", "broker", "order"):
         assert not any(forbidden in line for line in imports)
+
+
+def _tick_evidence(policy, authorization, **changes):
+    values = {
+        "session": "2026-08-28",
+        "scheduled_at_utc": NOW.isoformat(),
+        "started_at_utc": (NOW + timedelta(seconds=2)).isoformat(),
+        "completed_at_utc": (NOW + timedelta(seconds=3)).isoformat(),
+        "rank_run_id": 17,
+        "input_candidates": 1,
+        "decisions_written": 1,
+        "eligible_candidates": 1,
+        "suppressed_candidates": 0,
+        "duplicate_decisions": 0,
+        "operational_status": "clean",
+        "operational_reasons": (),
+        "scheduled_lag_ms": 2000,
+        "latency_ms": 1000,
+        "invariant_ok": True,
+        "policy_sha256": policy.sha256,
+        "authorization_sha256": authorization.sha256,
+        "runtime_router_revision": policy.router_revision,
+        "run_id": "run-1",
+    }
+    values.update(changes)
+    return DryRunTickEvidence(**values)
+
+
+def test_tick_and_exact_decision_links_are_atomic_append_only_and_idempotent(
+    conn, candidate, policy, authorization,
+):
+    route = _route(conn, candidate, policy, authorization)
+    evidence = _tick_evidence(policy, authorization)
+    first = record_dry_run_tick(conn, evidence, (route.route_id,))
+    rerun = record_dry_run_tick(
+        conn,
+        _tick_evidence(
+            policy,
+            authorization,
+            started_at_utc=(NOW + timedelta(seconds=4)).isoformat(),
+            completed_at_utc=(NOW + timedelta(seconds=5)).isoformat(),
+            decisions_written=0,
+            duplicate_decisions=1,
+            scheduled_lag_ms=4000,
+            latency_ms=500,
+            run_id="run-2",
+        ),
+        (route.route_id,),
+    )
+    assert first.created is True
+    assert rerun.created is False
+    assert rerun.tick_id == first.tick_id
+    assert rerun.input_digest_sha256 == first.input_digest_sha256
+    assert rerun.linked_decisions == 1
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE postmarket_delivery_dry_run_ticks SET latency_ms=0"
+        )
+    conn.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute("DELETE FROM postmarket_delivery_dry_run_tick_decisions")
+    conn.rollback()
+
+
+def test_tick_refuses_link_inventory_or_same_slot_evidence_drift(
+    conn, candidate, policy, authorization,
+):
+    route = _route(conn, candidate, policy, authorization)
+    evidence = _tick_evidence(policy, authorization)
+    with pytest.raises(ValueError, match="route link inventory"):
+        record_dry_run_tick(conn, evidence, ())
+    with pytest.raises(ValueError, match="tick evidence identity"):
+        record_dry_run_tick(conn, evidence, (999,))
+    record_dry_run_tick(conn, evidence, (route.route_id,))
+    with pytest.raises(ValueError, match="tick evidence identity"):
+        record_dry_run_tick(
+            conn,
+            _tick_evidence(policy, authorization, rank_run_id=18),
+            (route.route_id,),
+        )
+    with pytest.raises(ValueError, match="different evidence"):
+        record_dry_run_tick(
+            conn,
+            _tick_evidence(
+                policy,
+                authorization,
+                operational_status="degraded",
+                operational_reasons=("INJECTED_DEGRADATION",),
+            ),
+            (route.route_id,),
+        )

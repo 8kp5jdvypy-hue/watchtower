@@ -67,6 +67,17 @@ a complete rank, and an allowed evidence revision. Anything else is recorded
 as a degraded suppression. The service never imports a market-data provider,
 Telegram, the outbox, a broker, or order code.
 
+Every active-window cycle is also stored append-only in
+`postmarket_delivery_dry_run_ticks` on an exchange-close-anchored one-minute
+grid. A tick records scheduled/started/completed timestamps, scheduled lag,
+total latency, exact rank run, input/eligible/suppressed/deduplicated counts,
+operational status and reasons, provenance digests, runtime revision, and a
+conservation invariant. `postmarket_delivery_dry_run_tick_decisions` binds the
+tick atomically to its exact route rows. Each link must resolve to the same
+session, rank run, policy, authorization, and runtime revision. Exact reruns
+are idempotent; conflicting evidence for an existing scheduled slot fails
+rather than replacing the first record.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed

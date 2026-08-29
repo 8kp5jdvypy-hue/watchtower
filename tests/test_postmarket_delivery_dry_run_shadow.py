@@ -9,6 +9,8 @@ from tradebot.postmarket_delivery_dry_run_health import evaluate_dry_run_health
 from tradebot.postmarket_delivery_dry_run_shadow import (
     RUN_MODE,
     discovery_operational_status,
+    dry_run_scheduled_at,
+    dry_run_sleep_seconds,
     dry_run_shadow_enabled,
     load_contracts,
     load_latest_delivery_candidates,
@@ -71,6 +73,17 @@ def test_enable_parser_defaults_false(raw):
 def test_enable_parser_rejects_ambiguous_value():
     with pytest.raises(ValueError, match="POSTMARKET_CUSTOMER_DRY_RUN_ENABLED"):
         dry_run_shadow_enabled("maybe")
+
+
+def test_schedule_is_exchange_close_anchored_without_drift():
+    close = datetime(2026, 8, 28, 20, 0, tzinfo=timezone.utc)
+    now = close + timedelta(minutes=15, seconds=12, milliseconds=500)
+    assert dry_run_scheduled_at(now, session_close=close) == close + timedelta(
+        minutes=15
+    )
+    assert dry_run_sleep_seconds(now, session_close=close) == pytest.approx(47.5)
+    with pytest.raises(ValueError, match="must not precede"):
+        dry_run_scheduled_at(close - timedelta(seconds=1), session_close=close)
 
 
 def test_contracts_are_exact_regular_files(tmp_path):
@@ -203,10 +216,17 @@ def test_latest_exact_rank_snapshot_is_hydrated_and_routed():
             operational_status="clean",
         )
         assert result.evaluated_candidates == 1
+        assert result.tick_created is True
         assert result.eligible_candidates == 1
         assert result.decisions_written == 1
         assert conn.execute(
             "SELECT COUNT(*) FROM postmarket_delivery_dry_runs"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM postmarket_delivery_dry_run_ticks"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM postmarket_delivery_dry_run_tick_decisions"
         ).fetchone()[0] == 1
     finally:
         conn.close()
@@ -227,6 +247,7 @@ def test_missing_rank_run_is_an_explicit_empty_tick():
             operational_status="degraded",
         )
         assert result.rank_run_id is None
+        assert result.tick_created is True
         assert result.evaluated_candidates == 0
         assert result.operational_status == "degraded"
     finally:

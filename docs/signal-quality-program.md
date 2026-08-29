@@ -220,6 +220,12 @@ and rollback; and refuse false attribution to dirty or mismatched code. These
 artifacts establish dry-run operability only and cannot authorize customer
 delivery.
 
+The dry-run supervisor persists exchange-close-anchored cycle truth in
+append-only tick and tick-to-decision tables. Scheduled lag, total latency,
+conservation, operational reasons, exact rank provenance, and cross-release
+link invariants make clean-session coverage independently auditable instead of
+inferring it from a process heartbeat.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.
