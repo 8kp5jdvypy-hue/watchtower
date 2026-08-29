@@ -13,6 +13,9 @@ import pytest
 from tradebot.postmarket_discovery_evidence_campaign import (
     lock_discovery_evidence_campaign,
 )
+from tradebot.postmarket_discovery_evidence_set import (
+    seal_discovery_evidence_set,
+)
 from tradebot.postmarket_discovery_evidence_gate import (
     CALENDAR,
     POLICY_FIELDS,
@@ -371,6 +374,32 @@ def _rewrite_artifact(
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
+def _sealer_inputs(manifest_path: Path, manifest: dict) -> dict:
+    root = manifest_path.parent
+    return {
+        "evidence_set_version": manifest["evidence_set_version"],
+        "created_at": CREATED_AT,
+        "campaign_path": root / manifest["campaign_artifact"]["path"],
+        "discovery_audits": [
+            (date.fromisoformat(item["session"]), root / item["path"])
+            for item in manifest["discovery_audits"]
+        ],
+        "recall_census_reports": [
+            (date.fromisoformat(item["session"]), root / item["path"])
+            for item in manifest["recall_census_reports"]
+        ],
+        "provider_proof_reports": [
+            (date.fromisoformat(item["session"]), root / item["path"])
+            for item in manifest["provider_proof_reports"]
+        ],
+        "empirical_artifact": root / manifest["empirical_artifact"]["path"],
+        "control_artifacts": [
+            (item["kind"], root / item["path"])
+            for item in manifest["control_artifacts"]
+        ],
+    }
+
+
 def test_campaign_is_prospective_immutable_and_binds_empirical_identity(tmp_path):
     path = tmp_path / "campaign.json"
     digest, payload = lock_discovery_evidence_campaign(
@@ -439,6 +468,89 @@ def test_complete_reconciled_package_is_eligible_for_owner_review(tmp_path):
     assert report.metrics.empirical_recall == 1
     assert all(check.passed for check in report.checks)
     assert len(report.artifact_digests) == 35
+
+
+def test_explicit_sealer_publishes_only_a_passing_immutable_package(tmp_path):
+    source_path, manifest = _package(tmp_path)
+    output = source_path.parent / "sealed.json"
+
+    sealed = seal_discovery_evidence_set(
+        output,
+        **_sealer_inputs(source_path, manifest),
+    )
+
+    assert sealed.report.verdict == VERDICT_OWNER_REVIEW
+    assert sealed.sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert stat.S_IMODE(output.stat().st_mode) == 0o444
+    payload = json.loads(output.read_text())
+    assert [item["session"] for item in payload["discovery_audits"]] == [
+        session.isoformat() for session in SESSIONS
+    ]
+    assert len(sealed.report.artifact_digests) == 35
+    with pytest.raises(FileExistsError, match="refusing to replace"):
+        seal_discovery_evidence_set(
+            output,
+            **_sealer_inputs(source_path, manifest),
+        )
+
+
+def test_sealer_rejects_missing_explicit_session_without_publishing(tmp_path):
+    source_path, manifest = _package(tmp_path)
+    inputs = _sealer_inputs(source_path, manifest)
+    inputs["provider_proof_reports"] = inputs["provider_proof_reports"][:-1]
+    output = source_path.parent / "sealed.json"
+
+    with pytest.raises(ValueError, match="exact campaign sessions"):
+        seal_discovery_evidence_set(output, **inputs)
+
+    assert not output.exists()
+
+
+def test_sealer_rejects_not_ready_evidence_without_publishing(tmp_path):
+    source_path, manifest = _package(tmp_path)
+
+    def degrade(payload):
+        payload["operational_complete"] = True
+        payload["evidence_eligible"] = False
+        payload["issue_codes"] = ["PROVIDER_SYMBOL_COVERAGE_BELOW_99_PERCENT"]
+        payload["metrics"]["comparable_symbols"] = 90
+        payload["metrics"]["comparable_coverage"] = 0.9
+
+    _rewrite_artifact(source_path, "provider_proof_reports", 0, degrade)
+    output = source_path.parent / "sealed.json"
+
+    with pytest.raises(ValueError, match="not eligible for owner review"):
+        seal_discovery_evidence_set(
+            output,
+            **_sealer_inputs(source_path, manifest),
+        )
+
+    assert not output.exists()
+    assert not list(output.parent.glob(f".{output.name}.*.tmp"))
+
+
+def test_sealer_rejects_external_and_symlink_artifacts(tmp_path):
+    source_path, manifest = _package(tmp_path)
+    inputs = _sealer_inputs(source_path, manifest)
+    outside = tmp_path / "outside.json"
+    outside.write_text(Path(inputs["empirical_artifact"]).read_text())
+    inputs["empirical_artifact"] = outside
+
+    with pytest.raises(ValueError, match="inside the evidence-set directory"):
+        seal_discovery_evidence_set(
+            source_path.parent / "outside-sealed.json",
+            **inputs,
+        )
+
+    inputs = _sealer_inputs(source_path, manifest)
+    symlink = source_path.parent / "empirical-link.json"
+    symlink.symlink_to(Path(inputs["empirical_artifact"]))
+    inputs["empirical_artifact"] = symlink
+    with pytest.raises(ValueError, match="cannot be a symlink"):
+        seal_discovery_evidence_set(
+            source_path.parent / "symlink-sealed.json",
+            **inputs,
+        )
 
 
 def test_missing_session_inventory_is_not_ready(tmp_path):
@@ -638,6 +750,7 @@ def test_gate_import_graph_has_no_live_market_database_or_delivery_dependency():
     for name in (
         "postmarket_discovery_evidence_gate.py",
         "postmarket_discovery_evidence_campaign.py",
+        "postmarket_discovery_evidence_set.py",
     ):
         tree = ast.parse((root / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
