@@ -10,11 +10,11 @@ does this mean" judgment. That classification (which form types suppress
 vs. which are context-only) lives in tradebot.events, not here. This
 module's only job is: what got filed, for which company, on what date.
 
-EDGAR's browse feed gives a filing DATE, not a timestamp — there's no
-free intraday filing-time feed, so every event window built from this
-data necessarily covers the whole session, not a tighter intraday
-window. That's a real limitation of the source, not a shortcut taken
-here.
+This legacy browse-feed adapter gives a filing DATE, not a timestamp, so every
+event window built here covers the whole session. Acceptance-bounded XBRL replay
+context uses the separate submissions/companyfacts adapter in
+``tradebot.vendors.sec_companyfacts``; it does not retrofit timestamps into
+these date-only event rows.
 """
 from __future__ import annotations
 

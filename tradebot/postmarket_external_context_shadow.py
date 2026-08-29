@@ -101,6 +101,16 @@ def _halt_fetch(session):
     return fetch_halts(session)
 
 
+def _sec_context_configured() -> bool:
+    return bool(os.environ.get("SEC_EDGAR_USER_AGENT", "").strip())
+
+
+def _sec_context_fetch(symbol, cutoff):
+    from tradebot.vendors.sec_companyfacts import fetch_point_in_time_snapshot
+
+    return fetch_point_in_time_snapshot(symbol, cutoff)
+
+
 def write_heartbeat_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
@@ -216,6 +226,9 @@ def main() -> int:
                 option_fetch=_option_fetch, news_fetch=_news_fetch,
                 independent_fetch=_independent_fetch if second_provider_configured else None,
                 reference_fetch=_reference_fetch if second_provider_configured else None,
+                filing_context_fetch=(
+                    _sec_context_fetch if _sec_context_configured() else None
+                ),
                 halt_fetch=_halt_fetch,
             )
         except Exception as exc:

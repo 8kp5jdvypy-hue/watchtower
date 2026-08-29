@@ -34,14 +34,24 @@ canonical payload digest, revision, run, attempt, status, and error code.
   cap and outstanding-share fields are stored; float remains unavailable. These
   observations are not replay-safe rank inputs because a requested historical
   date is not proof that every underlying filing fact was public then.
+- `FILING_INDUSTRY_CLASSIFICATION` and `FILING_FUNDAMENTALS` use SEC
+  submissions, accession filing headers, and XBRL Company Facts. Every XBRL
+  row joins by accession number to its EDGAR acceptance timestamp and must
+  precede candidate detection by at least 15 minutes. SIC comes from that
+  accepted filing's header. Selected concepts include shares outstanding,
+  public-float value in USD, assets, liabilities, equity, cash, revenue, and
+  net income when actually reported. Missing concepts remain missing;
+  negative income/equity is preserved. SEC public float is explicitly a
+  dollar value, not float shares. These facts remain outside rank until
+  holdout evidence justifies a versioned scoring change.
 - `HALT_STATE` comes from Nasdaq Trader's official trade-halt RSS feed. The
   worker requests halts begun or resumed on the session at most once per batch,
   distinguishes a successful no-match from failure, and never infers a halt
   from missing bars.
 
 Alpaca SIP versus Alpaca IEX is never called independent-provider agreement.
-Float, GICS/ETF mapping, carry-forward halts begun on earlier sessions, and
-filing-availability-safe historical fundamentals remain explicit gaps.
+Float shares, GICS/ETF mapping, and carry-forward halts begun on earlier
+sessions remain explicit gaps.
 
 ## Operational isolation
 
@@ -65,9 +75,19 @@ availability time for every filing-derived field. Nasdaq Trader documents that
 its halt feed covers Nasdaq and other exchange-listed securities and refreshes
 once per minute; the adapter respects that cadence.
 
+SEC documents real-time submissions updates (typically under one second) and
+XBRL updates (typically under one minute), while warning that peak delays can
+be longer and that no exact first-public-availability timestamp exists. Perch
+therefore uses filing acceptance plus a locked 15-minute safety lag. This is
+conservative acceptance-bounded replay evidence, not a claim of an
+exchange-grade dissemination timestamp. Historical filing SIC is industry
+classification only and is never converted into an invented GICS sector or ETF.
+
 Source contracts:
 
 - [Massive custom stock bars](https://massive.com/docs/rest/stocks/aggregates/custom-bars)
 - [Massive ticker overview](https://www.massive.com/docs/rest/stocks/tickers/ticker-overview)
 - [Nasdaq Trader halt RSS specification](https://nasdaqtrader.com/Trader.aspx?id=TradeHaltRSS)
 - [Nasdaq Trader halt fields and codes](https://nasdaqtrader.com/Trader.aspx?id=TradeHaltCodes)
+- [SEC EDGAR submissions and XBRL APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)
+- [SEC EDGAR timestamp limitations](https://www.sec.gov/about/webmaster-frequently-asked-questions)
