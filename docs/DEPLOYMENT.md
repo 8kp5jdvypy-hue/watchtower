@@ -74,6 +74,14 @@ Four required today (`tradebot/vendors/alpaca.py`,
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — the bot's own token and the
   ops channel it posts summaries/heartbeats to.
 
+Optional shadow-evidence credentials:
+
+- `MASSIVE_API_KEY` — candidate-level Massive REST price/reference context.
+- `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` — dedicated
+  Massive flat-file credentials for the next-day full-universe provider proof.
+  These are distinct from the REST key and from ordinary AWS credentials. If
+  absent, the proof reports `unconfigured`; it does not silently reuse Alpaca.
+
 Two more, needed once the web dashboard's magic-link login goes live
 (`tradebot/email_sender.py`) — until both are set, magic links are
 logged instead of emailed (`DevEmailSender`), which is fine for local

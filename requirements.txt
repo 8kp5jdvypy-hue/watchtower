@@ -8,6 +8,7 @@ numpy==2.0.2
 exchange_calendars==4.5.6
 pandas_market_calendars==5.2.4
 requests==2.32.5
+boto3==1.43.82
 pytz==2026.3.post1
 tzdata==2026.3
 flask==3.1.3

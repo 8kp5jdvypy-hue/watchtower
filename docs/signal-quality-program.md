@@ -79,8 +79,10 @@ Implementation: `tradebot/postmarket_recall_census.py` snapshots and replays
 the active universe in bounded chunks, writes append-only per-symbol evidence,
 and publishes immutable miss reports. See `docs/postmarket-recall-census.md`.
 Candidate-level Massive comparison is implemented in the isolated external-
-context worker; the full-universe census still needs licensed second-provider
-coverage before its provider-independence gate can pass.
+context worker. A separate next-day Massive SIP flat-file proof replays the
+full frozen census universe, records independent recall/provider agreement and
+exact-bar divergence, and publishes immutable reports. Production credentials,
+entitlement validation, and clean live proofs remain gates.
 
 ### 4. Context and tradability
 

@@ -286,6 +286,8 @@ that point at all is proof the system came back (see
 | `TELEGRAM_BOT_TOKEN` | `--live`, the command bot, the worker | From BotFather |
 | `TELEGRAM_CHAT_ID` | `--live` | The ops/alerts chat the bot broadcasts to (system notices, morning briefing, weekly recap, the pinned status message). If this is a real Telegram *channel* (not a group), commands typed into it carry no sender identity at all — see `CHANNEL_COMMANDS_ENABLED` below and `/start`'s DM-only requirement |
 | `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | live market data | `tradebot/vendors/alpaca.py` is the only module that imports the Alpaca SDK |
+| `MASSIVE_API_KEY` | candidate external context | Optional licensed REST key for shadow-only independent price/reference observations; never a delivery input |
+| `MASSIVE_S3_ACCESS_KEY_ID` / `MASSIVE_S3_SECRET_ACCESS_KEY` | next-day full-universe provider proof | Optional dedicated Massive flat-file credentials; these are not AWS account credentials and are distinct from the REST key |
 | `SEC_EDGAR_USER_AGENT` | EDGAR filing checks | SEC requires a real contact in the User-Agent; requests without one get rate-limited or blocked. Defaults to a placeholder that identifies as this project |
 
 **Bot configuration**
