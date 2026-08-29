@@ -3184,7 +3184,7 @@ _HARNESS_DEFAULT_DB = object()
 
 def _drive_one_live_iteration(
     monkeypatch, tmp_path, watchlist, session_bars_by_symbol, halt_after_session_bars_calls,
-    db_path=_HARNESS_DEFAULT_DB,
+    db_path=_HARNESS_DEFAULT_DB, process_new_bar_side_effect=None,
 ):
     """session_bars_by_symbol[symbol] is either a list[Bar] (returned on
     every call) or a zero-arg callable (invoked fresh each call -- lets a
@@ -3241,7 +3241,7 @@ def _drive_one_live_iteration(
     def _spy_process_new_bar(*args, **kwargs):
         from tradebot import metrics as _metrics
 
-        process_new_bar_calls.append({
+        call = {
             "symbol": args[4], "market_bars": kwargs.get("market_bars"),
             "run_mode": kwargs.get("run_mode"), "run_id": kwargs.get("run_id"),
             # Captured HERE, mid-run: this is the point at which the real
@@ -3249,7 +3249,10 @@ def _drive_one_live_iteration(
             # only place "where would a live counter have gone" is a fact
             # rather than an inference.
             "metrics_path": _metrics.active_path(),
-        })
+        }
+        process_new_bar_calls.append(call)
+        if process_new_bar_side_effect is not None:
+            process_new_bar_side_effect(call)
 
     monkeypatch.setattr(runner_mod, "process_new_bar", _spy_process_new_bar)
 
@@ -3279,6 +3282,89 @@ def test_shared_proxy_fetch_happens_exactly_once_per_iteration_when_symbols_adva
     assert session_bars_calls.count("QQQ") == 2
     assert [c["symbol"] for c in process_new_bar_calls] == watchlist
     assert stats.errors == []
+
+
+def test_run_live_one_symbol_evaluation_failure_does_not_stop_market_pass(monkeypatch, tmp_path):
+    """The outer per-symbol boundary is a market-coverage invariant:
+    one detector/persistence failure must be attributed to that symbol and
+    every later symbol in the same pass must still reach process_new_bar."""
+    watchlist = ["BROKEN", "GOOD", "SPY", "QQQ"]
+    closed = [_proxy_test_bar("x", _CLOSED_BAR_OPEN)]
+
+    def _fail_one(call):
+        if call["symbol"] == "BROKEN":
+            raise RuntimeError("isolated symbol failure")
+
+    _, process_new_bar_calls, stats = _drive_one_live_iteration(
+        monkeypatch,
+        tmp_path,
+        watchlist,
+        {symbol: closed for symbol in watchlist},
+        halt_after_session_bars_calls=6,
+        process_new_bar_side_effect=_fail_one,
+    )
+
+    assert [call["symbol"] for call in process_new_bar_calls] == watchlist
+    assert len(stats.errors) == 1
+    assert "RuntimeError: isolated symbol failure" in stats.errors[0]
+
+
+def test_run_replay_one_symbol_evaluation_failure_does_not_stop_market_pass(monkeypatch, tmp_path):
+    """Replay uses the same per-symbol isolation contract as live mode.
+    Exercise the real replay loop so a future misplaced raise/return cannot
+    silently turn one bad symbol into loss of the rest of the market pass."""
+    watchlist = ["BROKEN", "GOOD"]
+    bar = _proxy_test_bar("x", _CLOSED_BAR_OPEN)
+
+    class _FakeReplayMarketData:
+        def __init__(self, cache_dir, symbol, session_date):
+            self.symbol = symbol
+            self.advanced = False
+
+        def advance(self):
+            if self.advanced:
+                return False
+            self.advanced = True
+            return True
+
+        def session_bars(self, symbol, session_date):
+            return [bar]
+
+        def daily_bars(self, symbol, n):
+            return [_proxy_test_bar(symbol, _CLOSED_BAR_OPEN - timedelta(days=1))]
+
+        def chain(self, symbol, expiry):
+            raise AssertionError("the process_new_bar spy owns evaluation")
+
+    evaluated: list[str] = []
+
+    def _process(*args, **kwargs):
+        symbol = args[4]
+        evaluated.append(symbol)
+        if symbol == "BROKEN":
+            raise RuntimeError("isolated replay symbol failure")
+
+    monkeypatch.setattr(runner_mod, "WATCHLIST", watchlist)
+    monkeypatch.setattr(runner_mod, "MARKET_PROXY_SYMBOLS", [])
+    monkeypatch.setattr(runner_mod, "ReplayMarketData", _FakeReplayMarketData)
+    monkeypatch.setattr(
+        runner_mod,
+        "_build_history_by_symbol",
+        lambda cache_dir, symbols, session_date, stats: {symbol: [] for symbol in symbols},
+    )
+    monkeypatch.setattr(runner_mod, "process_new_bar", _process)
+    monkeypatch.setattr(runner_mod, "HALT_FILE", tmp_path / "HALT")
+
+    stats = runner_mod.run_replay(
+        date(2026, 7, 23),
+        ConsoleAlerter(),
+        db_path=tmp_path / "replay.db",
+        cache_dir=tmp_path / "cache",
+    )
+
+    assert evaluated == watchlist
+    assert len(stats.errors) == 1
+    assert "RuntimeError: isolated replay symbol failure" in stats.errors[0]
 
 
 def test_run_live_stamps_live_mode_and_one_run_id_across_the_whole_session(monkeypatch, tmp_path):

@@ -184,19 +184,13 @@ the same contract: API/transport failures propagate to the day-range backfill
 logger, while a successful response with no trade bars returns `None`.
 Regression tests prove both attribution and sibling-contract isolation.
 
-**13. `tests/test_runner.py` — `run_replay`/`run_live`'s per-symbol exception-isolation loop (the highest-blast-radius path in the project) has zero automated test coverage**
-Both functions wrap each symbol's evaluation in
-`try/except Exception: ...; continue` (`runner.py:807-853`, `:1140-1154`)
-so one symbol's failure doesn't kill the whole scan. A repo-wide grep
-confirms `run_replay(`/`run_live(` are never called from any test —
-`tests/test_runner.py` states outright this is "exercised via an actual
-`--replay-date` run... not unit tests." A future change that broke the
-isolation (handler itself raising, or a stray `raise` replacing `continue`)
-would go green in CI while one bad symbol silently took down the scan for
-every watched ticker.
-*Fix: add a test that injects a symbol-evaluation failure (e.g. a
-`quote_fn` that raises) into `run_replay`/`run_live` and asserts the other
-symbols still get evaluated and `stats.errors` records it.*
+**13. RESOLVED — `run_replay`/`run_live` per-symbol exception isolation**
+
+Direct tests now execute both real loops, inject a failure from one symbol's
+`process_new_bar` call, prove every later symbol in the same pass is still
+evaluated, and assert the exception is retained in `HeartbeatStats.errors`.
+This pins the highest-blast-radius coverage boundary against a misplaced
+`raise`, `return`, or broken handler.
 
 ### MEDIUM
 
