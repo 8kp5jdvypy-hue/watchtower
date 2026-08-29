@@ -47,6 +47,11 @@ export default function Performance() {
               <div className="stat-tile-label">{tier.tier} · continuation rate</div>
               <div className="stat-tile-value">{pct(tier.continuation_rate)}</div>
               <div className="headline">n={tier.sample_size}, +{tier.offset_min}m</div>
+              {tier.excluded_news_driven > 0 && (
+                <div className="headline">
+                  Excludes {tier.excluded_news_driven} news-driven signal{tier.excluded_news_driven === 1 ? '' : 's'}
+                </div>
+              )}
             </div>
           ))}
         </div>

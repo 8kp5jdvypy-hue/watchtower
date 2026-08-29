@@ -31,8 +31,9 @@ ET = ZoneInfo("America/New_York")
 MIN_HISTORY_SAMPLE = 5
 
 # Decision B (docs/sip-migration-proposal.md, Option 1 -- post-cutover-only):
-# historical_performance()/tier_performance()/kind_performance() never blend
-# rows written under different data feeds into one continuation-rate number
+# historical_performance()/tier_performance()/kind_performance()/
+# hour_performance() never blend rows written under different data feeds into
+# one continuation-rate number
 # -- a feed change means different prices and volume baselines, the same
 # "don't fabricate a stat from an incompatible population" reasoning as the
 # existing news_driven exclusion. "Current feed" is read from the journal's
@@ -47,7 +48,7 @@ MIN_HISTORY_SAMPLE = 5
 #
 # The same clause also excludes broad_scan-promoted ("screening") symbols
 # -- see docs/broad-scan-honesty-proposal.md's finding (b). Bundled here
-# since both filters touch the same three queries and both are about "don't
+# since both filters touch the same four queries and both are about "don't
 # let a different measurement population masquerade as the historical
 # technical base rate."
 CURRENT_FEED_FILTER_SQL = """
@@ -1110,6 +1111,7 @@ class TierPerformance:
     continuation_rate: float
     avg_return_pct: float
     offset_min: int
+    excluded_news_driven: int = 0
 
 
 def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str, TierPerformance]:
@@ -1120,11 +1122,16 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
     MIN_HISTORY_SAMPLE data points are omitted rather than reported on
     too little data.
 
-    Also excludes pre-cutover-feed history and broad_scan-promoted
-    ("screening") symbols — see CURRENT_FEED_FILTER_SQL's docstring."""
+    Uses the same technical-performance population as
+    historical_performance()/kind_performance(): news-driven rows are
+    excluded, as are pre-cutover-feed history and broad_scan-promoted
+    ("screening") symbols. excluded_news_driven counts event-driven rows
+    that otherwise belong to the same feed/origin population, so the
+    omission remains visible rather than silently shrinking n. See
+    CURRENT_FEED_FILTER_SQL's docstring."""
     rows = conn.execute(
         f"""
-        SELECT d.tier, d.close, d.trend, m.price
+        SELECT d.tier, d.close, d.trend, m.price, d.news_driven
         FROM detections d
         JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
         WHERE {CURRENT_FEED_FILTER_SQL}
@@ -1133,7 +1140,11 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
     ).fetchall()
 
     by_tier: dict[str, list[float]] = {}
-    for tier, close, trend, price in rows:
+    excluded_news_driven: dict[str, int] = {}
+    for tier, close, trend, price, news_driven in rows:
+        if news_driven:
+            excluded_news_driven[tier] = excluded_news_driven.get(tier, 0) + 1
+            continue
         r = (price - close) / close
         signed = r if trend == "up" else -r
         by_tier.setdefault(tier, []).append(signed)
@@ -1148,6 +1159,7 @@ def tier_performance(conn: sqlite3.Connection, offset_min: int = 30) -> dict[str
             continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
             avg_return_pct=sum(returns) / len(returns) * 100,
             offset_min=offset_min,
+            excluded_news_driven=excluded_news_driven.get(tier, 0),
         )
     return result
 
@@ -1234,6 +1246,7 @@ class HourPerformance:
     continuation_rate: float
     avg_return_pct: float
     offset_min: int
+    excluded_news_driven: int = 0
 
 
 def hour_performance(
@@ -1255,32 +1268,41 @@ def hour_performance(
     tier=None includes every non-log tier; pass a specific tier (e.g.
     "high") to scope to just that one. Hours with fewer than
     MIN_HISTORY_SAMPLE data points are omitted rather than reported on
-    too little data.
+    too little data. Uses the same current-feed, watchlist-origin,
+    non-news-driven technical population as historical_performance(),
+    tier_performance(), and kind_performance(); excluded_news_driven keeps
+    the event-driven omissions visible per hour.
     """
     if tier is None:
         rows = conn.execute(
-            """
-            SELECT d.ts_utc, d.close, d.trend, m.price
+            f"""
+            SELECT d.ts_utc, d.close, d.trend, m.price, d.news_driven
             FROM detections d
             JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
             WHERE d.tier != 'log'
+              AND {CURRENT_FEED_FILTER_SQL}
             """,
             (offset_min,),
         ).fetchall()
     else:
         rows = conn.execute(
-            """
-            SELECT d.ts_utc, d.close, d.trend, m.price
+            f"""
+            SELECT d.ts_utc, d.close, d.trend, m.price, d.news_driven
             FROM detections d
             JOIN marks m ON m.detection_id = d.id AND m.offset_min = ?
             WHERE d.tier = ?
+              AND {CURRENT_FEED_FILTER_SQL}
             """,
             (offset_min, tier),
         ).fetchall()
 
     by_hour: dict[int, list[float]] = {}
-    for ts_utc, close, trend, price in rows:
+    excluded_news_driven: dict[int, int] = {}
+    for ts_utc, close, trend, price, news_driven in rows:
         hour = datetime.fromisoformat(ts_utc).astimezone(ET).hour
+        if news_driven:
+            excluded_news_driven[hour] = excluded_news_driven.get(hour, 0) + 1
+            continue
         r = (price - close) / close
         signed = r if trend == "up" else -r
         by_hour.setdefault(hour, []).append(signed)
@@ -1295,6 +1317,7 @@ def hour_performance(
             continuation_rate=sum(1 for r in returns if r > 0) / len(returns),
             avg_return_pct=sum(returns) / len(returns) * 100,
             offset_min=offset_min,
+            excluded_news_driven=excluded_news_driven.get(hour, 0),
         )
     return result
 

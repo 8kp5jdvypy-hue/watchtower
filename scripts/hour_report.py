@@ -45,7 +45,8 @@ def main() -> None:
         hp = result[hour]
         print(
             f"  {hour:02d}:00-{hour:02d}:59 ET   n={hp.sample_size:<5} "
-            f"continued={hp.continuation_rate * 100:5.1f}%  avg={hp.avg_return_pct:+.4f}%"
+            f"continued={hp.continuation_rate * 100:5.1f}%  avg={hp.avg_return_pct:+.4f}%  "
+            f"excluded_news={hp.excluded_news_driven}"
         )
     print(f"\ntotal sampled: {total}")
 

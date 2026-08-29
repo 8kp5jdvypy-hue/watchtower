@@ -958,6 +958,34 @@ def test_tier_performance_excludes_broad_scan_promoted_screening_symbols(tmp_pat
     assert result["high"].continuation_rate == pytest.approx(1.0)  # all 5 watchlist rows continued
 
 
+def test_tier_performance_excludes_news_driven_rows_and_reports_the_count(tmp_path):
+    """Tier and kind cards sit side by side in one API payload, so both
+    must describe the same clean technical population rather than letting
+    event-driven reversals contaminate only the tier aggregate."""
+    conn = connect(tmp_path / "journal.db")
+    base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
+    for i, mark in enumerate([105, 102, 101, 103, 104]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+        )
+    news_ids = [
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(base + timedelta(minutes=100 + 5 * i)).isoformat(), score=5.0,
+        )
+        for i, mark in enumerate([50, 40])
+    ]
+    for detection_id in news_ids:
+        conn.execute("UPDATE detections SET news_driven=1 WHERE id=?", (detection_id,))
+    conn.commit()
+
+    result = tier_performance(conn)
+    assert result["high"].sample_size == 5
+    assert result["high"].continuation_rate == pytest.approx(1.0)
+    assert result["high"].excluded_news_driven == 2
+
+
 def test_kind_performance_groups_by_kind_and_computes_real_stats(tmp_path):
     conn = connect(tmp_path / "journal.db")
     base = datetime(2026, 6, 15, 14, 0, tzinfo=timezone.utc)
@@ -1082,6 +1110,53 @@ def test_hour_performance_tier_none_includes_all_non_log_tiers(tmp_path):
     combined = hour_performance(conn, tier=None)
     assert scoped[14].sample_size == 5
     assert combined[14].sample_size == 8
+
+
+def test_hour_performance_uses_current_clean_watchlist_population(tmp_path):
+    """Hour analysis must not silently use a broader measurement era than
+    the tier/kind/similar-setup statistics it is compared with."""
+    conn = connect(tmp_path / "journal.db")
+    old_base = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)  # 14 ET
+    current_base = datetime(2026, 6, 16, 18, 0, tzinfo=timezone.utc)
+
+    # A complete old-feed sample that would reverse the result if blended.
+    for i in range(5):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=50,
+            ts_utc=(old_base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+            data_feed="iex", origin="watchlist",
+        )
+    # The current, clean watchlist population.
+    for i, mark in enumerate([105, 102, 101, 103, 104]):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(current_base + timedelta(minutes=5 * i)).isoformat(), score=5.0,
+            data_feed="sip", origin="watchlist",
+        )
+    # Same feed but screening-origin: outside the watchlist track record.
+    for i in range(5):
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=50,
+            ts_utc=(current_base + timedelta(minutes=60 + 5 * i)).isoformat(), score=5.0,
+            data_feed="sip", origin="screening",
+        )
+    # Same current feed/origin but event-driven: excluded and reported.
+    news_ids = [
+        _write_cluster_with_mark(
+            conn, kind="gap", trend="up", close=100.0, price_at_30=mark,
+            ts_utc=(current_base + timedelta(minutes=30 + 5 * i)).isoformat(), score=5.0,
+            data_feed="sip", origin="watchlist",
+        )
+        for i, mark in enumerate([50, 40])
+    ]
+    for detection_id in news_ids:
+        conn.execute("UPDATE detections SET news_driven=1 WHERE id=?", (detection_id,))
+    conn.commit()
+
+    result = hour_performance(conn, tier="high")
+    assert result[14].sample_size == 5
+    assert result[14].continuation_rate == pytest.approx(1.0)
+    assert result[14].excluded_news_driven == 2
 
 
 def test_historical_performance_normalizes_avg_return_by_each_rows_own_atr14(tmp_path):
