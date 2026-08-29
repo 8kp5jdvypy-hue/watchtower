@@ -394,12 +394,20 @@ END;
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, sql_type: str) -> None:
     """CREATE TABLE IF NOT EXISTS won't retroactively add a column to a
     pre-existing table — every column added after a table's first release
-    needs one of these so an existing data/journal.db picks it up."""
+    needs one of these so an existing data/journal.db picks it up.
+
+    SQLite does not provide ``ADD COLUMN IF NOT EXISTS``. Suppress only its
+    exact duplicate-column response for the requested column; lock, disk,
+    permission, malformed-schema, and every other OperationalError must abort
+    startup rather than masquerade as a completed migration.
+    """
     try:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
         conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as exc:
+        expected = f"duplicate column name: {column}".casefold()
+        if str(exc).strip().casefold() != expected:
+            raise
 
 
 def connect(db_path: Path | str = DEFAULT_DB_PATH, check_same_thread: bool = True) -> sqlite3.Connection:

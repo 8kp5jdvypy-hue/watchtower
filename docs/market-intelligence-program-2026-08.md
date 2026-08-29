@@ -239,6 +239,10 @@ evidence.
   corrupt-byte preservation, fail-closed unreadable/backup behavior, and
   crash-path regressions that prove the previous counter file survives a
   simulated replacement failure.
+- Schema-migration error integrity: implemented so only the exact duplicate
+  for the requested column is benign. Disk, lock, readonly, malformed-schema,
+  and unrelated migration failures now stop startup instead of presenting a
+  partially migrated journal as healthy.
 - Extended-hours customer alerts remain unimplemented and unauthorized.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the

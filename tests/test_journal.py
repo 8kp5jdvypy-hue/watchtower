@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tradebot import journal as journal_mod
 from tradebot.detectors import Detection
 from tradebot.journal import (
     CLOSE_MARK_OFFSET_MIN,
@@ -44,6 +45,55 @@ from tradebot.journal import (
 SYMBOL = "TEST"
 SESSION = date(2026, 6, 15)
 FIELDNAMES = ["ts", "open", "high", "low", "close", "volume"]
+
+
+def test_add_column_if_missing_suppresses_only_the_exact_existing_column_error():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sample (existing TEXT)")
+
+    journal_mod._add_column_if_missing(conn, "sample", "existing", "TEXT")
+
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(sample)")]
+    assert columns == ["existing"]
+
+
+def test_add_column_if_missing_adds_and_commits_a_real_new_column():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE sample (existing TEXT)")
+
+    journal_mod._add_column_if_missing(conn, "sample", "added", "INTEGER")
+
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(sample)")]
+    assert columns == ["existing", "added"]
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "database is locked",
+        "database or disk is full",
+        "disk I/O error",
+        "malformed database schema",
+        "attempt to write a readonly database",
+        "duplicate column name: another_column",
+    ],
+)
+def test_add_column_if_missing_propagates_every_non_target_operational_error(message):
+    class BrokenConnection:
+        def execute(self, sql):
+            raise sqlite3.OperationalError(message)
+
+        def commit(self):
+            pytest.fail("commit must not run after a failed ALTER TABLE")
+
+    with pytest.raises(sqlite3.OperationalError, match=message):
+        journal_mod._add_column_if_missing(
+            BrokenConnection(),
+            "sample",
+            "target_column",
+            "TEXT",
+        )
 
 
 def _detection(kind="level_break", score=4.0) -> Detection:
