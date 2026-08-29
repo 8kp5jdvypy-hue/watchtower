@@ -71,8 +71,10 @@ if the symbols had been promoted earlier.
    distinguishable as no range. Sibling contracts continue backfilling.
 8. Similar-setup/tier/hour populations still need one consistent
    `news_driven` exclusion contract and explicit coverage-era scoping.
-9. The per-symbol live exception-isolation loop needs a direct regression
-   test proving one bad symbol cannot stop the rest of the market pass.
+9. **Resolved:** direct live and replay loop regressions inject a failure in
+   one symbol's evaluation, prove every later symbol in the same market pass
+   still reaches evaluation, and require the failure to appear in
+   `HeartbeatStats.errors`.
 
 ### P1 — product trust
 

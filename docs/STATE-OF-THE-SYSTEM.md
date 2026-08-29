@@ -298,11 +298,10 @@ formally triaged the list.
   below a 50% plausibility floor, with an ERROR naming both counts.
 - **#7** (`historical_performance` sign convention) — **DONE** (PR #23),
   with regression tests asserting the sibling functions agree in sign.
-- **#13** (`run_live`/`run_replay` coverage) — **partially done**:
-  `run_live` now has tests, but the per-symbol exception-isolation loop
-  still has none. **Still the riskiest untested path in the project** —
-  it is what stops one bad symbol taking down the scan for every
-  watched ticker.
+- **#13** (`run_live`/`run_replay` coverage) — **DONE**: direct loop tests
+  inject one symbol-evaluation failure in live and replay modes, prove every
+  later symbol in that same pass is still evaluated, and assert the failure
+  is retained in `HeartbeatStats.errors`.
 - **#11** (partial cache file treated as complete) — **DONE**: atomic
   same-filesystem replacement and crash-path tests prevent a truncated final
   file from becoming the idempotency marker.
