@@ -35,6 +35,7 @@ from tradebot.postmarket_quality_backfill import (
     run_due_quality_backfill,
     write_completed_quality_reports,
 )
+from tradebot.postmarket_context import latest_context_summary, run_context_backfill
 from tradebot.postmarket_recall_census import (
     latest_census_report_summary,
     next_due_census_session,
@@ -142,6 +143,18 @@ def _census_bars_fetch(symbols: list[str], start: datetime, end: datetime):
     from tradebot.vendors.alpaca import fetch_intraday_bars_window_bulk
 
     return fetch_intraday_bars_window_bulk(symbols, start=start, end=end)
+
+
+def _daily_bars_fetch(symbols: list[str]):
+    from tradebot.vendors.alpaca import fetch_daily_bars_bulk
+
+    return fetch_daily_bars_bulk(symbols, lookback_days=45)
+
+
+def _quotes_fetch(symbols: list[str]):
+    from tradebot.vendors.alpaca import fetch_latest_quotes
+
+    return fetch_latest_quotes(symbols)
 
 
 def _data_feed() -> str:
@@ -590,6 +603,59 @@ def recall_census_heartbeat_fields(
         }
 
 
+def context_backfill_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    journal_conn,
+    universe_conn,
+    *,
+    version: str | None,
+    intraday_fetch: Callable[[list[str], date], dict] = _bars_fetch,
+    daily_fetch: Callable[[list[str]], dict] = _daily_bars_fetch,
+    quote_fetch: Callable[[list[str]], dict] = _quotes_fetch,
+) -> dict:
+    """Enrich a bounded candidate batch without affecting qualification."""
+    try:
+        result = run_context_backfill(
+            shadow_conn,
+            journal_conn,
+            universe_conn,
+            now=now,
+            code_version=version,
+            intraday_fetch=intraday_fetch,
+            daily_fetch=daily_fetch,
+            quote_fetch=quote_fetch,
+        )
+        if result.candidates_planned:
+            logger.info(
+                "postmarket_context_backfill planned=%s written=%s degraded=%s "
+                "fetch_errors=%s latency_ms=%s",
+                result.candidates_planned,
+                result.contexts_written,
+                result.degraded_contexts,
+                result.fetch_errors,
+                result.latency_ms,
+            )
+        return {
+            "context_backfill_status": (
+                "degraded" if result.degraded_contexts else "current"
+            ),
+            "context_candidates_planned": result.candidates_planned,
+            "contexts_written": result.contexts_written,
+            "context_degraded": result.degraded_contexts,
+            "context_fetch_errors": result.fetch_errors,
+            "context_latency_ms": result.latency_ms,
+            "latest_context": latest_context_summary(shadow_conn),
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket context backfill failed")
+        return {
+            "context_backfill_status": "error",
+            "context_backfill_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -627,6 +693,13 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
+            context_fields = context_backfill_heartbeat_fields(
+                now,
+                shadow_conn,
+                journal_conn,
+                universe_conn,
+                version=version,
+            )
             quality_fields = quality_backfill_heartbeat_fields(
                 now,
                 shadow_conn,
@@ -647,6 +720,7 @@ def main() -> int:
                     "idle",
                     now,
                     **discovery_audit_heartbeat_fields(now),
+                    **context_fields,
                     **quality_fields,
                     **census_fields,
                 ),
@@ -701,6 +775,13 @@ def main() -> int:
                 result.latency_ms,
             )
             completed_now = _utc_now()
+            context_fields = context_backfill_heartbeat_fields(
+                completed_now,
+                shadow_conn,
+                journal_conn,
+                universe_conn,
+                version=version,
+            )
             quality_fields = quality_backfill_heartbeat_fields(
                 completed_now,
                 shadow_conn,
@@ -711,7 +792,8 @@ def main() -> int:
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
-                    "ok", completed_now, **result.__dict__, **quality_fields
+                    "ok", completed_now, **result.__dict__, **context_fields,
+                    **quality_fields
                 ),
             )
         sleep_now = _utc_now()

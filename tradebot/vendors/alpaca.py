@@ -520,6 +520,12 @@ def fetch_latest_quote(symbol: str) -> MDQuote:
         bid=float(q.bid_price),
         ask=float(q.ask_price),
         last=float((q.bid_price + q.ask_price) / 2),
+        bid_size=(
+            float(q.bid_size) if getattr(q, "bid_size", None) is not None else None
+        ),
+        ask_size=(
+            float(q.ask_size) if getattr(q, "ask_size", None) is not None else None
+        ),
     )
 
 
@@ -552,6 +558,14 @@ def fetch_latest_quotes(symbols: list[str]) -> dict[str, MDQuote]:
                 bid=float(q.bid_price),
                 ask=float(q.ask_price),
                 last=float((q.bid_price + q.ask_price) / 2),
+                bid_size=(
+                    float(q.bid_size)
+                    if getattr(q, "bid_size", None) is not None else None
+                ),
+                ask_size=(
+                    float(q.ask_size)
+                    if getattr(q, "ask_size", None) is not None else None
+                ),
             )
     return out
 

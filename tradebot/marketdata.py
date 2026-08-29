@@ -49,6 +49,8 @@ class Quote:
     bid: float
     ask: float
     last: float
+    bid_size: float | None = None
+    ask_size: float | None = None
 
 
 @dataclass(frozen=True)
