@@ -53,7 +53,13 @@ def deploy_env(tmp_path):
     (scripts / "deploy.sh").chmod(0o755)
     (root / "docker-compose.yml").write_text("services: {}\n")
     (root / ".env").write_text("TEST_ONLY=1\n")
-    for unit in ("perch.service", "perch-backup.service", "perch-backup.timer"):
+    for unit in (
+        "perch.service",
+        "perch-backup.service",
+        "perch-backup.timer",
+        "perch-screening-archive.service",
+        "perch-screening-archive.timer",
+    ):
         shutil.copy2(REPO_ROOT / "systemd" / unit, root / "systemd" / unit)
     for database in DATABASES:
         (root / "data" / database).write_bytes(b"test database placeholder")
@@ -211,6 +217,9 @@ def test_happy_path_binds_revision_backs_up_waits_and_verifies_every_surface(dep
     installed = (deploy_env["systemd_target"] / "perch.service").read_text()
     assert "ExecStart=/usr/bin/docker compose up -d\n" in installed
     assert "ExecStart=/usr/bin/docker compose up -d --build" not in installed
+    assert "systemctl enable --now perch-screening-archive.timer" in log
+    assert (deploy_env["systemd_target"] / "perch-screening-archive.service").is_file()
+    assert (deploy_env["systemd_target"] / "perch-screening-archive.timer").is_file()
 
 
 def test_requires_a_full_sha_before_running_any_external_command(deploy_env):

@@ -75,7 +75,7 @@ for db in "${REQUIRED_DBS[@]}"; do
 done
 
 ARTIFACT_INPUTS=()
-for directory in postmarket_audits postmarket_evidence; do
+for directory in postmarket_audits postmarket_evidence screening_archives; do
   [[ -d "$DATA_DIR/$directory" ]] && ARTIFACT_INPUTS+=("$directory")
 done
 for contract in \

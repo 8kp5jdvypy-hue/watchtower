@@ -115,11 +115,13 @@ if the symbols had been promoted earlier.
     logged loudly and copied to a collision-safe sibling before counters
     restart; failure to preserve or read the original aborts the increment,
     and failed publication leaves the previous file intact.
-16. Universe/screening retention needs a separately reviewed archival job;
-    observability must not be deleted in the change that first records it.
-    The prerequisite custody gap is closed: `universe.db` is now required in
-    local and encrypted off-box backup sets because its Stage-1 screening
-    evidence is not rebuildable from the asset catalog.
+16. **Archive prerequisite resolved; pruning remains unimplemented.**
+    `universe.db` is required in local and encrypted off-box backup sets.
+    A nightly pre-backup job now deterministically archives every missing
+    completed Stage-1 session, verifies content identities, catches up after
+    downtime, and enters the encrypted artifact set. This release deliberately
+    contains no source deletion; destructive retention remains a separate
+    review after real archive/restore reconciliation.
 
 ## Target architecture
 

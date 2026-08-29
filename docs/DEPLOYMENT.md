@@ -20,6 +20,8 @@ backup.
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
 | `systemd/perch.service` | Brings the Compose stack up on boot |
 | `systemd/perch-backup.{service,timer}` | Nightly SQLite backup via `scripts/backup.sh` |
+| `systemd/perch-screening-archive.{service,timer}` | Nightly deterministic archive of every unarchived completed Stage-1 session before backup; never prunes source rows |
+| `docs/screening-evidence-archive.md` | Archive format, verifier, catch-up, custody, and future-pruning gate |
 | `scripts/backup.sh` | Verified online snapshots of all five durable SQLite databases plus immutable postmarket audits/evidence, SHA-256 manifesting, 14-day rotation, and encrypted off-box shipping of irrebuildable state — see Backups below |
 | `scripts/verify_backup.py` | Digest-check and isolated restore of one manifest-bound backup set; rejects missing databases, corrupt SQLite, and unsafe artifact archives |
 | `scripts/fetch_cache.py`, `scripts/purge_and_backfill_runts.py`, and other `scripts/*.py` tools | Not in the image (see Dockerfile) and need the app's real deps — see "Running `scripts/` tools in-container" below for the one correct invocation |
@@ -63,8 +65,8 @@ of users; resize later if a Postgres migration changes that.
    apt-get install -y sqlite3
    ```
 3. Create a non-root deploy user, add it to the `docker` group.
-4. Clone the repo to `/opt/perch` (or adjust the paths in the two
-   systemd unit files if you use a different path).
+4. Clone the repo to `/opt/perch` (or adjust the paths in the systemd unit
+   files if you use a different path).
 5. Place `.env` at `/opt/perch/.env` (see **Secrets** below) — never
    committed, already covered by `.gitignore`.
 6. **DNS, before the stack comes up**: point `api.perchmarkets.com` at
@@ -76,12 +78,13 @@ of users; resize later if a Postgres migration changes that.
    dashboard, once it's deployed) is separate — that one *should* stay
    proxied through Cloudflare, since it's a Workers static-assets
    Worker (`perch-dashboard`), not something this VPS serves.
-7. `cp systemd/perch.service systemd/perch-backup.* /etc/systemd/system/`
+7. `cp systemd/perch.service systemd/perch-backup.* systemd/perch-screening-archive.* /etc/systemd/system/`
    then:
    ```bash
    systemctl daemon-reload
    systemctl enable --now perch.service
    systemctl enable --now perch-backup.timer
+   systemctl enable --now perch-screening-archive.timer
    ```
 8. Verify: `docker compose ps`, `docker compose logs -f runner`,
    `docker compose logs caddy` (should show a successful certificate
@@ -182,8 +185,9 @@ It writes gzip'd, timestamped online snapshots of `journal.db`, `users.db`,
 fail loudly. Although the asset catalog inside `universe.db` is rebuildable,
 its Stage-1 screening ticks and per-symbol decisions are not.
 
-The job also archives `data/postmarket_audits/` and
-`data/postmarket_evidence/` when present. Every SQLite snapshot passes
+The job also archives `data/postmarket_audits/`,
+`data/postmarket_evidence/`, and verified `data/screening_archives/` when
+present. Every SQLite snapshot passes
 `PRAGMA quick_check`; the artifact archive is rejected if it contains a
 symlink, special file, absolute path, traversal, or unexpected root. A
 `manifest_<stamp>.sha256` binds every file in that timestamped set. Local

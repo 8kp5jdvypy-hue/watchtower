@@ -10,12 +10,15 @@ import sqlite3
 import subprocess
 import tarfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from scripts.sqlite_snapshot import snapshot
 from scripts.verify_backup import restore_backup
+from tradebot.screening_archive import archive_screening_session, verify_screening_archive
+from tradebot.universe import connect as connect_universe
 
 
 REPO_ROOT = Path(__file__).parents[1]
@@ -52,6 +55,39 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
     )
     (evidence / "kill_switch.json").write_text(
         '{"status":"passed"}\n', encoding="utf-8"
+    )
+    universe = connect_universe(data / "universe.db")
+    universe.execute(
+        """
+        INSERT INTO screening_ticks
+          (session,tick_utc,run_id,run_mode,screen_version,code_version,
+           audit_mode,universe_count,thresholds_json,counts_json,invariant_ok,
+           promotion_limit,latency_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "2026-08-28",
+            "2026-08-28T20:00:00+00:00",
+            "backup-fixture",
+            "live",
+            2,
+            "abcdef1",
+            0,
+            1,
+            "{}",
+            '{"quiet":1}',
+            1,
+            25,
+            10,
+        ),
+    )
+    universe.commit()
+    universe.close()
+    archive_screening_session(
+        data / "universe.db",
+        data / "screening_archives",
+        session="2026-08-28",
+        now=datetime(2026, 8, 29, 0, 30, tzinfo=timezone.utc),
     )
     env_file = tmp_path / ".env"
     env_file.write_text("SECRET=not-a-real-secret\n", encoding="utf-8")
@@ -181,6 +217,11 @@ def test_complete_backup_set_restores_every_database_and_artifact(tmp_path):
         / "controls"
         / "kill_switch.json"
     ).is_file()
+    screening_archives = list(
+        (restore_dir / "data" / "screening_archives").glob("screening_*.jsonl.gz")
+    )
+    assert len(screening_archives) == 1
+    assert verify_screening_archive(screening_archives[0]).tick_count == 1
     assert json.loads((restore_dir / "restore_report.json").read_text())["stamp"]
 
 
@@ -238,6 +279,7 @@ def test_artifacts_can_be_absent_on_fresh_install(tmp_path):
     for path in sorted(data.glob("postmarket_*"), reverse=True):
         if path.is_dir():
             shutil.rmtree(path)
+    shutil.rmtree(data / "screening_archives")
 
     result, backup_dir = _run_backup(tmp_path, data=data, env_file=env_file)
     report = restore_backup(_manifest(backup_dir), tmp_path / "restore")
@@ -338,6 +380,24 @@ def test_backup_rejects_symlinked_postmarket_artifact_before_manifest(tmp_path):
 
     assert result.returncode != 0
     assert "artifact archive contains non-file entry" in result.stdout
+    assert not list(backup_dir.glob("manifest_*.sha256"))
+
+
+def test_backup_rejects_tampered_screening_archive_before_manifest(tmp_path):
+    data, env_file = _fixture_data(tmp_path)
+    archive = next((data / "screening_archives").glob("screening_*.jsonl.gz"))
+    archive.chmod(0o644)
+    archive.write_bytes(archive.read_bytes() + b"tampered")
+
+    result, backup_dir = _run_backup(
+        tmp_path,
+        data=data,
+        env_file=env_file,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "screening archive digest does not match its filename" in result.stdout
     assert not list(backup_dir.glob("manifest_*.sha256"))
 
 
