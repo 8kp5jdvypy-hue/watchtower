@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from tradebot.config import liquidity_class
 from tradebot.detectors import Detection, bar_close_ts, tier_for_score
-from tradebot.marketdata import ReplayMarketData
+from tradebot.marketdata import ReplayMarketData, XNYS
 
 logger = logging.getLogger("watchtower.journal")
 ET = ZoneInfo("America/New_York")
@@ -62,6 +62,13 @@ CURRENT_FEED_FILTER_SQL = """
 # `contract_selections` (mid_close) so both share one query pattern.
 CLOSE_MARK_OFFSET_MIN = -1
 OUTCOME_OFFSETS_MIN = (15, 30, 60)
+MARK_STATUS_AVAILABLE = "AVAILABLE"
+MARK_STATUS_NOT_REACHED = "NOT_REACHED_BEFORE_CLOSE"
+MARK_STATUS_DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+MARK_STATUS_PENDING = "PENDING"
+MARK_STATUS_WAITING = "WAITING_FOR_CLOSE_BATCH"
+MARK_STATUS_DELAYED = "DELAYED"
+OUTCOME_BACKFILL_GRACE_MINUTES = 15
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = REPO_ROOT / "data" / "journal.db"
@@ -172,6 +179,43 @@ CREATE TABLE IF NOT EXISTS marks (
     price REAL NOT NULL,
     PRIMARY KEY (detection_id, offset_min)
 );
+
+-- Append-only resolution truth for every regular-session outcome checkpoint.
+-- A missing marks row alone cannot distinguish "not due", "late detection",
+-- and "the close batch ran but data was unavailable". Each backfill attempt
+-- records that distinction without rewriting earlier attempts; marks remains
+-- the compact latest-price table consumed by historical analytics.
+CREATE TABLE IF NOT EXISTS mark_resolution_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    attempt_id TEXT NOT NULL,
+    detection_id TEXT NOT NULL,
+    session TEXT NOT NULL,
+    offset_min INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('AVAILABLE', 'NOT_REACHED_BEFORE_CLOSE', 'DATA_UNAVAILABLE')
+    ),
+    reason TEXT,
+    price REAL,
+    created_at TEXT NOT NULL,
+    code_version TEXT NOT NULL,
+    CHECK (
+        (status = 'AVAILABLE' AND price IS NOT NULL)
+        OR (status != 'AVAILABLE' AND price IS NULL)
+    ),
+    UNIQUE (attempt_id, detection_id, offset_min)
+);
+CREATE INDEX IF NOT EXISTS idx_mark_resolution_events_latest
+    ON mark_resolution_events(detection_id, offset_min, event_id DESC);
+CREATE TRIGGER IF NOT EXISTS mark_resolution_events_no_update
+BEFORE UPDATE ON mark_resolution_events
+BEGIN
+    SELECT RAISE(ABORT, 'mark_resolution_events is append-only: UPDATE is not permitted');
+END;
+CREATE TRIGGER IF NOT EXISTS mark_resolution_events_no_delete
+BEFORE DELETE ON mark_resolution_events
+BEGIN
+    SELECT RAISE(ABORT, 'mark_resolution_events is append-only: DELETE is not permitted');
+END;
 
 CREATE TABLE IF NOT EXISTS iv_history (
     symbol TEXT NOT NULL,
@@ -689,10 +733,16 @@ def set_extreme_mover(conn: sqlite3.Connection, detection_id: str, gap_pct: floa
 
 
 def _all_bars_for_session(cache_dir: Path, symbol: str, session_date: date):
+    """Completed RTH bars used for regular-session detection outcomes.
+
+    Premarket bars are deliberately excluded: if an RTH cache is missing
+    but premarket prints exist, the last premarket price is not a session
+    close and must never be persisted as one.
+    """
     md = ReplayMarketData(cache_dir, symbol, session_date)
     while md.advance():
         pass
-    bars = list(md.premarket_bars(symbol, session_date)) + list(md.session_bars(symbol, session_date))
+    bars = list(md.session_bars(symbol, session_date))
     bars.sort(key=lambda b: b.ts)
     return bars
 
@@ -726,28 +776,32 @@ def backfill_marks(
     one CLOSE_MARK_OFFSET_MIN row per detection — the session's actual
     final bar close, not a fixed-minutes offset, so every alert gets a
     real end-of-day outcome regardless of when in the session it fired.
-    Skips an offset silently if the session ended before reaching it, and
-    skips the close mark if there are no bars at all — never fabricates a
-    price. Automatic and unconditional: called once at the end of every
-    replay/live session (see runner.py), never gated on how the alert
-    performed — a loss is exactly as recordable as a win.
+    Never fabricates a price. An offset the session could not reach and a
+    checkpoint whose data is unavailable receive different append-only
+    resolution events, even though neither receives a compact marks row.
+    Automatic and unconditional: called once at the end of every replay/live
+    session (see runner.py), never gated on how the alert performed — a loss
+    is exactly as recordable as a win.
 
     2026-08-12 incident: an absent cache file and "cached, but nothing
     new to add" both silently produce zero bars here (see
     marketdata._read_bars's `if not path.exists(): return []`), so a
     genuinely missing intraday file for the session being backfilled was
-    indistinguishable from an ordinary quiet outcome. Logs an ERROR line
-    per symbol whose expected intraday cache file doesn't exist, so that
-    specific failure shape is loud in the logs even though the return
-    value (a bare int) has no room to carry it — see runner.py's caller,
-    which alerts on the aggregate mark count regardless of which symbols
-    caused it."""
+    indistinguishable from an ordinary quiet outcome. The durable
+    DATA_UNAVAILABLE event now carries that failure into the API/UI in
+    addition to the ERROR log; the bare integer return remains the count of
+    real price marks written for backward compatibility."""
     cache_dir = Path(cache_dir)
     rows = conn.execute(
         "SELECT id, symbol, ts_utc FROM detections WHERE session = ?", (session.isoformat(),)
     ).fetchall()
 
+    attempt_id = uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat()
+    revision = code_version()
+    session_close = XNYS.session_close(session).to_pydatetime().astimezone(timezone.utc)
     bars_by_symbol: dict[str, list] = {}
+    data_error_by_symbol: dict[str, str | None] = {}
     missing_cache_symbols: set[str] = set()
     written = 0
     for detection_id, symbol, ts_utc in rows:
@@ -755,25 +809,59 @@ def backfill_marks(
             intraday_path = cache_dir / symbol / f"intraday_{session.isoformat()}.csv"
             if not intraday_path.exists():
                 missing_cache_symbols.add(symbol)
-            bars_by_symbol[symbol] = _all_bars_for_session(cache_dir, symbol, session)
+                data_error_by_symbol[symbol] = "missing_cache_file"
+            else:
+                data_error_by_symbol[symbol] = None
+            try:
+                bars_by_symbol[symbol] = _all_bars_for_session(cache_dir, symbol, session)
+            except Exception as exc:
+                logger.error(
+                    "backfill_marks(session=%s): cached bars unreadable for %s exception=%s",
+                    session.isoformat(), symbol, type(exc).__name__,
+                )
+                bars_by_symbol[symbol] = []
+                data_error_by_symbol[symbol] = f"cache_read_failed:{type(exc).__name__}"
         bars = bars_by_symbol[symbol]
         detection_ts = datetime.fromisoformat(ts_utc)
         for offset in offsets_min:
             target = detection_ts + timedelta(minutes=offset)
-            price = _price_at_or_after(bars, target)
-            if price is None:
-                continue
-            conn.execute(
-                "INSERT OR REPLACE INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
-                (detection_id, offset, price),
+            if target > session_close:
+                status, reason, price = MARK_STATUS_NOT_REACHED, "target_after_session_close", None
+            else:
+                price = _price_at_or_after(bars, target)
+                if price is None:
+                    status = MARK_STATUS_DATA_UNAVAILABLE
+                    reason = data_error_by_symbol[symbol] or "no_bar_at_or_after_target"
+                else:
+                    status, reason = MARK_STATUS_AVAILABLE, "cached_session_bar"
+                    conn.execute(
+                        "INSERT OR REPLACE INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
+                        (detection_id, offset, price),
+                    )
+                    written += 1
+            _record_mark_resolution_event(
+                conn, attempt_id=attempt_id, detection_id=detection_id,
+                session=session, offset_min=offset, status=status, reason=reason,
+                price=price, created_at=created_at, revision=revision,
             )
-            written += 1
         if bars:
+            close_price = bars[-1].close
             conn.execute(
                 "INSERT OR REPLACE INTO marks (detection_id, offset_min, price) VALUES (?, ?, ?)",
-                (detection_id, CLOSE_MARK_OFFSET_MIN, bars[-1].close),
+                (detection_id, CLOSE_MARK_OFFSET_MIN, close_price),
             )
             written += 1
+            close_status, close_reason = MARK_STATUS_AVAILABLE, "session_close_bar"
+        else:
+            close_price = None
+            close_status = MARK_STATUS_DATA_UNAVAILABLE
+            close_reason = data_error_by_symbol[symbol] or "no_session_bars"
+        _record_mark_resolution_event(
+            conn, attempt_id=attempt_id, detection_id=detection_id,
+            session=session, offset_min=CLOSE_MARK_OFFSET_MIN,
+            status=close_status, reason=close_reason, price=close_price,
+            created_at=created_at, revision=revision,
+        )
     if missing_cache_symbols:
         logger.error(
             "backfill_marks(session=%s): no cached intraday file for %s -- outcomes for "
@@ -782,6 +870,140 @@ def backfill_marks(
         )
     conn.commit()
     return written
+
+
+_MARK_FINAL_STATUSES = {
+    MARK_STATUS_AVAILABLE,
+    MARK_STATUS_NOT_REACHED,
+    MARK_STATUS_DATA_UNAVAILABLE,
+}
+
+
+def _record_mark_resolution_event(
+    conn: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    detection_id: str,
+    session: date,
+    offset_min: int,
+    status: str,
+    reason: str | None,
+    price: float | None,
+    created_at: str,
+    revision: str,
+) -> None:
+    if status not in _MARK_FINAL_STATUSES:
+        raise ValueError(f"invalid final mark resolution status: {status}")
+    if (status == MARK_STATUS_AVAILABLE) != (price is not None):
+        raise ValueError("AVAILABLE requires price and non-AVAILABLE forbids price")
+    conn.execute(
+        """
+        INSERT INTO mark_resolution_events
+            (attempt_id,detection_id,session,offset_min,status,reason,price,created_at,code_version)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            attempt_id, detection_id, session.isoformat(), offset_min, status,
+            reason, price, created_at, revision,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class OutcomeCheckpoint:
+    offset_min: int
+    status: str
+    price: float | None
+    reason: str | None
+    resolved_at: str | None
+
+
+def outcome_checkpoints(
+    conn: sqlite3.Connection,
+    detection_id: str,
+    detection_ts: datetime,
+    session: date,
+    *,
+    now: datetime | None = None,
+) -> list[OutcomeCheckpoint]:
+    """Return every fixed/close checkpoint with an explicit state.
+
+    Durable close-batch events win. Historical marks written before the
+    ledger shipped remain AVAILABLE. Only checkpoints with neither are
+    derived from the clock/calendar: pending before their target, waiting
+    during the bounded close-batch grace period, and DELAYED afterward.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None or detection_ts.tzinfo is None:
+        raise ValueError("now and detection_ts must be timezone-aware")
+    marks = dict(
+        conn.execute(
+            "SELECT offset_min,price FROM marks WHERE detection_id=?",
+            (detection_id,),
+        ).fetchall()
+    )
+    latest_events: dict[int, tuple[str, str | None, float | None, str]] = {}
+    latest_available: dict[int, tuple[str | None, str]] = {}
+    for offset, status, reason, price, created_at in conn.execute(
+        """
+        SELECT offset_min,status,reason,price,created_at
+        FROM mark_resolution_events
+        WHERE detection_id=?
+        ORDER BY event_id
+        """,
+        (detection_id,),
+    ):
+        latest_events[offset] = (status, reason, price, created_at)
+        if status == MARK_STATUS_AVAILABLE:
+            latest_available[offset] = (reason, created_at)
+
+    session_close: datetime | None = None
+    if XNYS.is_session(session):
+        session_close = XNYS.session_close(session).to_pydatetime().astimezone(timezone.utc)
+    grace_end = (
+        session_close + timedelta(minutes=OUTCOME_BACKFILL_GRACE_MINUTES)
+        if session_close is not None else None
+    )
+
+    result: list[OutcomeCheckpoint] = []
+    for offset in (*OUTCOME_OFFSETS_MIN, CLOSE_MARK_OFFSET_MIN):
+        # A real persisted price is monotonic customer outcome truth. A later
+        # retry failure remains visible in the append-only event ledger, but
+        # cannot downgrade or contradict an already resolved checkpoint.
+        if offset in marks:
+            if offset in latest_available:
+                reason, resolved_at = latest_available[offset]
+            else:
+                reason, resolved_at = "legacy_mark", None
+            status, price = MARK_STATUS_AVAILABLE, marks[offset]
+        elif offset in latest_events:
+            status, reason, event_price, resolved_at = latest_events[offset]
+            price = event_price
+        else:
+            target = session_close if offset == CLOSE_MARK_OFFSET_MIN else detection_ts + timedelta(minutes=offset)
+            if offset != CLOSE_MARK_OFFSET_MIN and session_close is not None and target > session_close:
+                status, reason = MARK_STATUS_NOT_REACHED, "target_after_session_close"
+            elif target is not None and now < target:
+                status, reason = MARK_STATUS_PENDING, "target_not_reached"
+            elif grace_end is not None and now <= grace_end:
+                status, reason = MARK_STATUS_WAITING, "close_batch_grace"
+            else:
+                status = MARK_STATUS_DELAYED
+                reason = "no_resolution_event_after_grace" if session_close is not None else "invalid_session_calendar"
+            price, resolved_at = None, None
+        result.append(OutcomeCheckpoint(offset, status, price, reason, resolved_at))
+    return result
+
+
+def outcome_resolution_status(checkpoints: list[OutcomeCheckpoint]) -> str:
+    statuses = {checkpoint.status for checkpoint in checkpoints}
+    if MARK_STATUS_DATA_UNAVAILABLE in statuses or MARK_STATUS_DELAYED in statuses:
+        return "DEGRADED"
+    if statuses <= {MARK_STATUS_AVAILABLE, MARK_STATUS_NOT_REACHED}:
+        return "RESOLVED"
+    if MARK_STATUS_WAITING in statuses:
+        return MARK_STATUS_WAITING
+    return MARK_STATUS_PENDING
 
 
 @dataclass(frozen=True)

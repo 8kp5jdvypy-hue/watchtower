@@ -309,8 +309,11 @@ formally triaged the list.
 - **#12** (contract-forward vendor failure hidden as absence) — **DONE**:
   chain and day-range provider failures reach the per-contract logger;
   successful absent-contract/no-trade results remain non-fabricated absences.
-- **#8, #9, #10** — **still open**, each confirmed present in current
-  `main`.
+- **#9** (ambiguous missing outcome marks) — **DONE**: an append-only
+  per-checkpoint resolution ledger and bounded calendar-derived pre-backfill
+  states now distinguish pending, waiting, unavailable, not reached, and
+  delayed outcomes through the API and signal-detail UI.
+- **#8, #10** — **still open**, each confirmed present in current `main`.
 
 ### MEDIUM (11) / LOW (3)
 

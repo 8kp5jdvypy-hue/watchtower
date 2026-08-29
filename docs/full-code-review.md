@@ -138,17 +138,18 @@ to `tier_performance`/`hour_performance`; add a
 existing kind/historical ones (their absence for tier is itself a signal
 this was an oversight).*
 
-**9. `web-app/src/components/SignalDetail.jsx:33-61` — "pending" is inferred from the absence of a mark row, with no way to distinguish a stalled backfill from an outage**
+**9. RESOLVED — `web-app/src/components/SignalDetail.jsx` no longer infers every missing mark as "pending"**
 `afterDetectionRows()`/`pendingResolutionLabel()` always renders either a
 countdown or a calm "Resolves after session close" — indefinitely, with no
 upper bound and no explicit status field. This is exactly tonight's
 incident on the frontend side: nothing here (or in the API response —
 see finding #14 below) can distinguish "hasn't happened yet" from "the
 backfill ran and silently wrote nothing."
-*Fix: once fix #2 adds an explicit backfill-status signal, thread it
-through `/signals/<id>` and have this component render a distinct "outcome
-delayed — check status" state once session close + some grace period has
-passed with still-empty marks.*
+*Resolution: `/signals/<id>` now exposes total per-checkpoint outcome states
+and an aggregate resolution status. The component renders separate pending,
+close-batch waiting, not-reached, data-unavailable, and delayed copy; legacy
+servers still fall back to real mark rows. Missing resolution after the
+bounded post-close grace period is degraded rather than calm indefinitely.*
 
 **10. `tests/telegram_bot/test_handlers.py:37,769-781` — the admin-halt test collapses three conceptually different IDs onto the same literal `999`, the exact shape of the project's known chat_id incident**
 The shared `_app()` fixture sets `admin_ids=frozenset({999})`; the halt
@@ -199,14 +200,16 @@ symbols still get evaluated and `stats.errors` records it.*
 
 ### MEDIUM
 
-**14. `tradebot/api/app.py:498-517` (`signal_detail`) — `marks: []` is architecturally ambiguous between "not yet backfilled" and "backfilled, wrote nothing"**
+**14. RESOLVED — `signal_detail` makes outcome resolution explicit even when `marks` is empty**
 The endpoint's own comment acknowledges marks are "empty until [backfill]
 ... never fabricated for an interval that hasn't been reached yet," but
 there's no field distinguishing those two empty states, which is the root
 cause of finding #9 above being possible on the frontend at all.
-*Fix: add a `backfill_status`/`marks_backfilled_at` field (session-level or
-per-detection) so the frontend can render a real error state instead of an
-indefinite "Pending."*
+*Resolution: the journal records an append-only event for every requested
+checkpoint on every close-batch attempt. SQLite constraints enforce valid
+final states, price consistency, attempt uniqueness, and no update/delete.
+The endpoint returns `outcomes` with status/reason/resolution time plus an
+aggregate `outcome_status`; historical real-price marks remain compatible.*
 
 **15. `tradebot/metrics.py:46-57` (`increment`) — a corrupted counters file is silently reset to `{}`, discarding all historical counts, then overwritten non-atomically**
 `except (json.JSONDecodeError, OSError): data = {}` treats any corruption

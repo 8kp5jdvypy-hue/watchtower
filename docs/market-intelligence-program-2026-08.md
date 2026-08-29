@@ -76,8 +76,13 @@ if the symbols had been promoted earlier.
 
 ### P1 — product trust
 
-10. Missing outcome marks remain ambiguous in the API/UI after their
-    expected resolution time.
+10. **Resolved:** every regular-session checkpoint now has an explicit
+    resolution state. The append-only ledger distinguishes available prices,
+    targets the session could not reach, and failed data resolution without
+    fabricating marks. Before the close batch, the API derives bounded
+    pending/waiting states; after its grace period, a missing ledger event is
+    explicitly delayed/degraded. Signal detail renders those states instead
+    of treating every absent mark as indefinitely pending.
 11. Quote staleness can remain invisible after the first successful UI
     fetch; several frontend fetch errors still render as quiet/loading or
     signed-out states.

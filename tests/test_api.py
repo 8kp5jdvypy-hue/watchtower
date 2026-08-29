@@ -8,7 +8,7 @@ entitlements.py (already covered in their own test files).
 from __future__ import annotations
 
 import io
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,13 @@ from tradebot import accounts, funnel_events, rate_limit
 from tradebot.api.app import MAX_REQUEST_BODY_BYTES, create_app
 from tradebot.detectors import Detection
 from tradebot.email_sender import DevEmailSender
-from tradebot.journal import CLOSE_MARK_OFFSET_MIN, write_cluster
+from tradebot.journal import (
+    CLOSE_MARK_OFFSET_MIN,
+    MARK_STATUS_AVAILABLE,
+    MARK_STATUS_DATA_UNAVAILABLE,
+    backfill_marks,
+    write_cluster,
+)
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 
@@ -552,9 +558,12 @@ def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, clie
     # (there are none), so historical_performance() correctly reports
     # nothing rather than a stat built on too little data.
     assert body["history"] is None
-    # No marks backfilled yet (backfill_marks() hasn't run for this
-    # session) -- an honest empty list, not a fabricated "pending" entry.
+    # No prices are fabricated. The parallel outcomes field is total: all
+    # four checkpoints have an explicit calendar/ledger-derived status.
     assert body["marks"] == []
+    assert len(body["outcomes"]) == 4
+    assert all("status" in checkpoint for checkpoint in body["outcomes"])
+    assert "outcome_status" in body
 
 
 def test_signal_detail_includes_backfilled_marks_in_after_detection_order(app, client):
@@ -596,6 +605,49 @@ def test_signal_detail_includes_backfilled_marks_in_after_detection_order(app, c
         {"offset_min": 60, "at_close": False, "price": 455.0},
         {"offset_min": None, "at_close": True, "price": 458.0},
     ]
+    assert [checkpoint["status"] for checkpoint in body["outcomes"]] == [
+        MARK_STATUS_AVAILABLE,
+        MARK_STATUS_AVAILABLE,
+        MARK_STATUS_AVAILABLE,
+        MARK_STATUS_AVAILABLE,
+    ]
+    assert body["outcome_status"] == "RESOLVED"
+
+
+def test_signal_detail_exposes_close_batch_data_failure_instead_of_pending(app, client, tmp_path):
+    session_date = date(2026, 6, 15)
+    detected_at = datetime(2026, 6, 15, 13, 30, tzinfo=timezone.utc)
+    detection_id = write_cluster(
+        app.journal_conn,
+        session=session_date.isoformat(),
+        symbol="SPY",
+        ts_utc=detected_at.isoformat(),
+        kinds="gap",
+        headlines="SPY gapped up",
+        score=5.0,
+        close=450.0,
+        atr14=2.0,
+        trend="up",
+        detections=[Detection("SPY", "gap", detected_at, 5.0, "SPY gapped up", {})],
+        code_version_str="test",
+    )
+    app.journal_conn.commit()
+    # Real close-batch call, deliberately without the required cache file.
+    backfill_marks(app.journal_conn, session_date, cache_dir=tmp_path / "missing-cache")
+
+    token = _request_and_extract_token(app, client, "outcome-failure@example.com")
+    _verify_token(client, token)
+    body = client.get(f"/signals/{detection_id}").get_json()
+
+    assert body["marks"] == []
+    assert body["outcome_status"] == "DEGRADED"
+    assert [checkpoint["status"] for checkpoint in body["outcomes"]] == [
+        MARK_STATUS_DATA_UNAVAILABLE,
+        MARK_STATUS_DATA_UNAVAILABLE,
+        MARK_STATUS_DATA_UNAVAILABLE,
+        MARK_STATUS_DATA_UNAVAILABLE,
+    ]
+    assert {checkpoint["reason"] for checkpoint in body["outcomes"]} == {"missing_cache_file"}
 
 
 def test_signal_detail_404s_for_an_unknown_id(app, client):
