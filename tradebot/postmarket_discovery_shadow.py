@@ -36,6 +36,12 @@ from tradebot.postmarket_quality_backfill import (
     write_completed_quality_reports,
 )
 from tradebot.postmarket_context import latest_context_summary, run_context_backfill
+from tradebot.postmarket_lifecycle import (
+    latest_open_session,
+    lifecycle_summary,
+    lifecycle_window,
+    run_lifecycle_pass,
+)
 from tradebot.postmarket_recall_census import (
     latest_census_report_summary,
     next_due_census_session,
@@ -656,6 +662,75 @@ def context_backfill_heartbeat_fields(
         }
 
 
+def lifecycle_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    *,
+    data_feed: str,
+    version: str | None,
+    run_id: str,
+    existing_evaluations: tuple[ReactionEvaluation, ...] = (),
+    bars_fetch: Callable[[list[str], date], dict] = _bars_fetch,
+) -> dict:
+    """Observe every open candidate, including symbols absent from Stage 1."""
+    try:
+        active_window = postmarket_window(now)
+        if active_window is not None and active_window[1] <= now <= active_window[2]:
+            session, session_close, window_end = active_window
+        else:
+            session = latest_open_session(shadow_conn)
+            if session is None:
+                return {
+                    "lifecycle_status": "current",
+                    "latest_lifecycle": lifecycle_summary(shadow_conn),
+                }
+            session_close, window_end = lifecycle_window(session)
+        result = run_lifecycle_pass(
+            shadow_conn,
+            session=session,
+            session_close=session_close,
+            window_end=window_end,
+            now=now,
+            code_version=version,
+            run_id=run_id,
+            data_feed=data_feed,
+            bars_fetch=bars_fetch,
+            existing_evaluations=existing_evaluations,
+        )
+        if result.tracked_candidates or result.transitions_written:
+            logger.info(
+                "postmarket_lifecycle session=%s tracked=%s fetched=%s "
+                "observations=%s transitions=%s states=%s errors=%s latency_ms=%s",
+                result.session,
+                result.tracked_candidates,
+                result.symbols_fetched,
+                result.observations_written,
+                result.transitions_written,
+                dict(result.states_written),
+                result.error_count,
+                result.latency_ms,
+            )
+        return {
+            "lifecycle_status": "degraded" if result.error_count else "current",
+            "lifecycle_session": result.session,
+            "lifecycle_tracked": result.tracked_candidates,
+            "lifecycle_symbols_fetched": result.symbols_fetched,
+            "lifecycle_observations_written": result.observations_written,
+            "lifecycle_transitions_written": result.transitions_written,
+            "lifecycle_states_written": dict(result.states_written),
+            "lifecycle_errors": result.error_count,
+            "lifecycle_latency_ms": result.latency_ms,
+            "latest_lifecycle": lifecycle_summary(shadow_conn),
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("postmarket lifecycle maintenance failed")
+        return {
+            "lifecycle_status": "error",
+            "lifecycle_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -693,6 +768,13 @@ def main() -> int:
     while True:
         now = _utc_now()
         if not postmarket_is_active(now):
+            lifecycle_fields = lifecycle_heartbeat_fields(
+                now,
+                shadow_conn,
+                data_feed=data_feed,
+                version=version,
+                run_id=run_id,
+            )
             context_fields = context_backfill_heartbeat_fields(
                 now,
                 shadow_conn,
@@ -720,6 +802,7 @@ def main() -> int:
                     "idle",
                     now,
                     **discovery_audit_heartbeat_fields(now),
+                    **lifecycle_fields,
                     **context_fields,
                     **quality_fields,
                     **census_fields,
@@ -732,7 +815,7 @@ def main() -> int:
             window = postmarket_window(now)
             assert window is not None
             session, session_close, _ = window
-            result, _, _ = run_discovery_tick(
+            result, _, evaluations = run_discovery_tick(
                 shadow_conn,
                 active_universe=set(active_symbols(universe_conn)),
                 scheduled_earnings=set(
@@ -775,6 +858,14 @@ def main() -> int:
                 result.latency_ms,
             )
             completed_now = _utc_now()
+            lifecycle_fields = lifecycle_heartbeat_fields(
+                completed_now,
+                shadow_conn,
+                data_feed=data_feed,
+                version=version,
+                run_id=run_id,
+                existing_evaluations=tuple(evaluations),
+            )
             context_fields = context_backfill_heartbeat_fields(
                 completed_now,
                 shadow_conn,
@@ -792,8 +883,8 @@ def main() -> int:
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
-                    "ok", completed_now, **result.__dict__, **context_fields,
-                    **quality_fields
+                    "ok", completed_now, **result.__dict__, **lifecycle_fields,
+                    **context_fields, **quality_fields
                 ),
             )
         sleep_now = _utc_now()
