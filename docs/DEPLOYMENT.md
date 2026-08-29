@@ -344,24 +344,49 @@ true.
 
 ## Updating a deployed version
 
+Every source/image deployment goes through `scripts/deploy.sh`. The wrapper
+requires the full 40-character revision and refuses a dirty checkout, a stale
+or non-main revision, and an unreviewed rollback target.
+
+For the one-time rollout of the wrapper itself, update the checkout without
+touching the running containers, then invoke it:
+
 ```bash
 cd /opt/perch
-git pull
-GIT_SHA=$(git rev-parse --short HEAD) docker compose up -d --build
+git fetch origin main
+REVISION="$(git rev-parse origin/main)"
+git checkout --detach "$REVISION"
+scripts/deploy.sh "$REVISION"
 ```
-`GIT_SHA` is a plain shell variable for this one command, read by
-Compose's `${GIT_SHA:-unknown}` build-arg substitution (see
-`docker-compose.yml`) — it never touches the app's own `.env` file.
-Baked into the image so `journal.code_version()` (every detection row's
-"what code produced this" stamp) has a real value in-container instead
-of falling back to `"unknown"` every time, which is what actually
-happened in production before 2026-08-12 — the image never had `.git`
-to shell out to. Skipping the `GIT_SHA=...` prefix still works, it just
-silently reverts to that same `"unknown"`.
 
-`restart: unless-stopped` plus `depends_on` means `bot`/`runner` don't
-need to be stopped by hand — Compose recreates whichever service's
-image actually changed.
+For later releases the current deployed checkout already contains the wrapper:
+
+```bash
+cd /opt/perch
+git fetch origin main
+REVISION="$(git rev-parse origin/main)"
+scripts/deploy.sh "$REVISION"
+```
+
+The wrapper takes a verified predeploy backup, checks out exactly that commit,
+installs the repository's systemd units, binds the seven-character revision to
+Compose's `GIT_SHA` build argument, waits for the full stack, verifies the
+reported revision in every Python service, runs `PRAGMA quick_check` against
+all five production databases, checks the public API, and takes a verified
+postdeploy backup. Any failed gate exits nonzero and names the failed phase.
+
+An explicit rollback uses the same complete gate and accepts only an ancestor
+of current `origin/main`:
+
+```bash
+scripts/deploy.sh --rollback <full-40-character-ancestor-sha>
+```
+
+Do not run raw `docker compose up -d --build` for a source release. Compose's
+fallback remains `GIT_SHA=unknown`, so bypassing the wrapper destroys revision
+attribution. `systemd/perch.service` intentionally runs `docker compose up -d`
+without `--build`: boot supervision restarts the exact images produced by the
+last verified deployment and can never silently rebuild them as `unknown`.
 
 ## Running `scripts/` tools in-container
 

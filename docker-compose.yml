@@ -9,7 +9,7 @@
 # docs/DEPLOYMENT.md for the DNS record `api` needs.
 #
 # Usage:
-#   docker compose up -d --build
+#   scripts/deploy.sh <full-origin-main-sha>  # source/image deployment
 #   docker compose logs -f runner
 #   docker compose restart bot
 services:
