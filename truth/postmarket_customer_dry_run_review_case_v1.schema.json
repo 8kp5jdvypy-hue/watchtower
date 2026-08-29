@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_review_case_v1.schema.json",
+  "title": "Postmarket customer dry-run blinded review case v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "campaign_sha256", "exported_at_utc",
+    "blinded_to_future_outcomes", "excluded_evidence_classes", "evidence",
+    "case_evidence_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "campaign_sha256": {"$ref": "#/$defs/digest"},
+    "exported_at_utc": {"type": "string", "format": "date-time"},
+    "blinded_to_future_outcomes": {"const": true},
+    "excluded_evidence_classes": {
+      "type": "array",
+      "prefixItems": [
+        {"const": "outcome_marks"},
+        {"const": "later_bars"},
+        {"const": "later_headlines"}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "case_evidence_sha256": {"$ref": "#/$defs/digest"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "route_id", "session", "symbol", "direction", "decision",
+        "presentation", "evaluated_at_utc", "candidate_id", "transition_id",
+        "rank_run_id", "ordinal_rank", "evidence_score",
+        "evidence_coverage_pct", "rank_components", "rank_penalties",
+        "exclusion_reasons", "explanation", "lifecycle_state",
+        "actionability", "transition_at_utc", "evidence_bar_open_ts_utc",
+        "move_pct", "cumulative_notional", "data_age_seconds", "data_feed",
+        "market_data_provider", "policy_sha256", "authorization_sha256",
+        "runtime_router_revision"
+      ],
+      "properties": {
+        "route_id": {"type": "integer", "minimum": 1},
+        "session": {"type": "string", "format": "date"},
+        "symbol": {"type": "string", "minLength": 1},
+        "direction": {"enum": ["up", "down"]},
+        "decision": {"const": "ELIGIBLE_FOR_DRY_RUN"},
+        "presentation": {"const": "ACTIONABLE"},
+        "evaluated_at_utc": {"type": "string", "format": "date-time"},
+        "candidate_id": {"type": "integer", "minimum": 1},
+        "transition_id": {"type": "integer", "minimum": 1},
+        "rank_run_id": {"type": "integer", "minimum": 1},
+        "ordinal_rank": {"type": ["integer", "null"], "minimum": 1},
+        "evidence_score": {"type": "number"},
+        "evidence_coverage_pct": {"type": "number", "minimum": 0, "maximum": 100},
+        "rank_components": {"type": "object", "additionalProperties": {"type": "number"}},
+        "rank_penalties": {"type": "object", "additionalProperties": {"type": "number"}},
+        "exclusion_reasons": {"$ref": "#/$defs/strings"},
+        "explanation": {"$ref": "#/$defs/strings"},
+        "lifecycle_state": {"type": "string", "minLength": 1},
+        "actionability": {"type": "string", "minLength": 1},
+        "transition_at_utc": {"type": "string", "format": "date-time"},
+        "evidence_bar_open_ts_utc": {"type": "string", "format": "date-time"},
+        "move_pct": {"type": ["number", "null"]},
+        "cumulative_notional": {"type": ["number", "null"]},
+        "data_age_seconds": {"type": ["number", "null"], "minimum": 0},
+        "data_feed": {"type": "string", "minLength": 1},
+        "market_data_provider": {"type": "string", "minLength": 1},
+        "policy_sha256": {"$ref": "#/$defs/digest"},
+        "authorization_sha256": {"$ref": "#/$defs/digest"},
+        "runtime_router_revision": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "strings": {
+      "type": "array", "items": {"type": "string"}
+    }
+  }
+}

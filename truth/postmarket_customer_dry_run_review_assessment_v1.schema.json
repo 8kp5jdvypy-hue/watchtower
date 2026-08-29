@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_review_assessment_v1.schema.json",
+  "title": "Postmarket customer dry-run independent review assessment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "reviewer_id", "reviewer_role", "reviewed_at_utc",
+    "independent_of_implementation", "blinded_to_future_outcomes", "rubric",
+    "critical_finding", "notes", "attestation"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "reviewer_id": {"type": "string", "minLength": 1},
+    "reviewer_role": {"enum": ["owner", "owner_delegate", "independent_market_reviewer"]},
+    "reviewed_at_utc": {"type": "string", "format": "date-time"},
+    "independent_of_implementation": {"const": true},
+    "blinded_to_future_outcomes": {"const": true},
+    "rubric": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "signal_relevance", "timeliness", "evidence_sufficiency",
+        "explanation_clarity", "risk_disclosure"
+      ],
+      "properties": {
+        "signal_relevance": {"enum": ["PASS", "FAIL"]},
+        "timeliness": {"enum": ["PASS", "FAIL"]},
+        "evidence_sufficiency": {"enum": ["PASS", "FAIL"]},
+        "explanation_clarity": {"enum": ["PASS", "FAIL"]},
+        "risk_disclosure": {"enum": ["PASS", "FAIL"]}
+      }
+    },
+    "critical_finding": {"type": "boolean"},
+    "notes": {"type": "string"},
+    "attestation": {
+      "const": "I independently reviewed only the point-in-time evidence in this case, recorded every material concern, and did not use later outcomes."
+    }
+  }
+}

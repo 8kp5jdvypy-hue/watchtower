@@ -103,6 +103,19 @@ review approval, exact schedule coverage, and zero critical or ledger-control
 failures. Locking a campaign records requirements only; it does not create an
 authorization or enable the default-off supervisor.
 
+Eligible cases are exported with
+`tradebot.postmarket_customer_dry_run_review`. The immutable case contains the
+exact router, rank, lifecycle, provenance, and explanation evidence available
+at decision time and explicitly excludes later bars, outcome marks, and later
+headlines. A named owner, delegate, or independent market reviewer must attest
+both implementation independence and future-outcome blinding, then grade the
+exact relevance, timeliness, evidence, explanation, and risk rubric. Any failed
+item or critical finding derives `REJECT`; reviewers cannot override that
+verdict. Reviews are campaign/case/reviewer unique and append-only in
+`postmarket_customer_dry_run_reviews`. This is accountable review evidence,
+not cryptographic proof of a human identity; the final release review must
+still verify reviewer identity and independence outside the software.
+
 The two expected contract paths are
 `data/postmarket_customer_delivery_policy.json` and
 `data/postmarket_customer_delivery_authorization.json`; either can be changed
