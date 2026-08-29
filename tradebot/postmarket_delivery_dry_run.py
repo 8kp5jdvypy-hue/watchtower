@@ -239,7 +239,9 @@ def record_dry_run_tick(
         "policy_sha256": evidence.policy_sha256,
         "authorization_sha256": evidence.authorization_sha256,
         "runtime_router_revision": evidence.runtime_router_revision,
-        "route_ids": list(route_ids),
+        # Link rows are a set keyed by (tick_id, route_id).  Canonical sorting
+        # keeps this digest independently reproducible from persisted data.
+        "route_ids": sorted(route_ids),
     })
     with conn:
         cursor = conn.execute(
