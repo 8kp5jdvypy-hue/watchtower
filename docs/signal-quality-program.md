@@ -168,6 +168,14 @@ as immutable, digest-bound artifacts by
 unknown revisions, digest/identity drift, and sealed holdout results, and enters
 the same encrypted off-box audit archive used by the operational evidence.
 
+Market-wide control implementation:
+`tradebot/postmarket_discovery_controls.py` independently exercises the
+discovery service's failure containment, default-off kill switch, and absence
+of alert/order delivery dependencies. Its immutable artifacts have a separate
+schema and cannot be replaced by the scheduled-earnings observer's controls.
+See `docs/postmarket-discovery-control-evidence.md`. Aggregate discovery
+readiness and prospective live evidence remain unfinished gates.
+
 ## Anti-goals
 
 - Do not tune thresholds against one exciting session.

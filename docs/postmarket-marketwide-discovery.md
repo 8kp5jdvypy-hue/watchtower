@@ -54,3 +54,10 @@ separate approval after complete-session observation, replay calibration,
 false-positive/false-negative review, latency/error review, and a tested routing
 kill switch. The existing earnings evidence gate is not reused or reset by this
 separate discovery stream.
+
+Discovery-specific offline failure, kill-switch, and delivery-isolation
+exercises are documented in
+`docs/postmarket-discovery-control-evidence.md`. They certify only those named
+controls at an exact revision. They do not replace the market-wide census,
+independent-provider proof, empirical holdout, complete clean sessions, or the
+future aggregate discovery readiness gate.
