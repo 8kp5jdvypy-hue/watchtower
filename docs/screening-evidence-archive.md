@@ -65,6 +65,9 @@ docker compose exec -T runner python3 -m tradebot.screening_archive \
 off-box artifact set. `scripts/verify_backup.py` fully verifies every screening
 archive both when creating a backup and during isolated restore; a safe tar
 path and matching outer manifest are not sufficient on their own.
+`scripts/postmarket_signal_quality_preflight.py` also requires the verified
+screening-archive root in the recent campaign backup, so a database-only copy
+cannot satisfy shadow campaign readiness.
 
 ## Deliberate non-goal of this release
 
