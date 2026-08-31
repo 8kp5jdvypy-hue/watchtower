@@ -536,6 +536,11 @@ def audit_discovery_session(
     observation_errors = Counter(
         row["tick_id"] for row in observations if row["outcome"] == "FETCH_ERROR"
     )
+    observation_no_bars = Counter(
+        row["tick_id"]
+        for row in observations
+        if row["outcome"] == "NO_BARS_RETURNED"
+    )
     observations_by_symbol: dict[str, list[sqlite3.Row]] = defaultdict(list)
     source_observations: Counter[str] = Counter()
     scheduled_symbols: set[str] = set()
@@ -585,6 +590,16 @@ def audit_discovery_session(
                     issues,
                     "OBSERVATION_SOURCE_INVALID",
                     f"{row['symbol']} has invalid sources at tick {tick_id}",
+                )
+            if row["outcome"] == "NO_BARS_RETURNED" and (
+                attributable_sources != {FULL_UNIVERSE_SWEEP_SOURCE}
+                or row["reason"]
+                != "no bars returned for full-universe sweep window"
+            ):
+                _issue(
+                    issues,
+                    "NO_BARS_EVIDENCE_INVALID",
+                    f"{row['symbol']} has invalid no-bars evidence at tick {tick_id}",
                 )
             evidence = _json_list(
                 row["screen_evidence_json"], f"tick {tick_id} screen evidence"
@@ -743,11 +758,15 @@ def audit_discovery_session(
             _issue(issues, "CANDIDATE_COUNT_MISMATCH", f"tick {tick_id} candidate count drifted")
         if observation_errors[tick_id] != row["error_count"]:
             _issue(issues, "ERROR_COUNT_MISMATCH", f"tick {tick_id} error count drifted")
-        if row["error_count"] < row["discovered_symbols"] - row["fetched_symbols"]:
+        if (
+            observation_errors[tick_id] + observation_no_bars[tick_id]
+            < row["discovered_symbols"] - row["fetched_symbols"]
+        ):
             _issue(
                 issues,
                 "MISSING_FETCH_ERRORS",
-                f"tick {tick_id} did not explain every missing bulk response",
+                f"tick {tick_id} did not explain every missing bulk response as "
+                "NO_BARS_RETURNED or FETCH_ERROR",
             )
         if row["screen_unique_symbols"] > row["screen_rows"]:
             _issue(issues, "SCREEN_COUNT_INVALID", f"tick {tick_id} has impossible counts")

@@ -17,6 +17,7 @@ from tradebot.events import scheduled_after_hours_earnings_symbols
 from tradebot.journal import code_version, connect as connect_journal, new_run_id
 from tradebot.marketdata import MarketWideScreen, partition_intraday_bars
 from tradebot.postmarket import (
+    OUTCOME_NO_BARS_RETURNED,
     ReactionEvaluation,
     evaluate_postmarket_reaction,
     fetch_error_evaluation,
@@ -341,6 +342,7 @@ def run_discovery_tick(
         if FULL_UNIVERSE_SWEEP_SOURCE in row.sources
         and row.symbol not in bounded_symbol_set
     ]
+    sweep_only_symbol_set = set(sweep_only_symbols)
     bars_by_symbol = bars_fetch(bounded_symbols, session)
     sweep_failures: dict[str, Exception] = {}
     if sweep_only_symbols:
@@ -365,6 +367,16 @@ def run_discovery_tick(
     for symbol in symbols:
         bars = bars_by_symbol.get(symbol)
         if bars is None:
+            if symbol in sweep_only_symbol_set and symbol not in sweep_failures:
+                evaluations.append(
+                    ReactionEvaluation(
+                        symbol=symbol,
+                        event_date=session,
+                        outcome=OUTCOME_NO_BARS_RETURNED,
+                        reason="no bars returned for full-universe sweep window",
+                    )
+                )
+                continue
             failure = sweep_failures.get(
                 symbol,
                 RuntimeError("missing from bulk bar response"),
