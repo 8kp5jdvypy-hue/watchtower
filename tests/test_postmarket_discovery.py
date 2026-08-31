@@ -299,6 +299,51 @@ def test_sweep_fetch_outage_is_explicit_and_does_not_hide_bounded_candidate(tmp_
     assert "injected sweep provider outage" in sweep_error[1]
 
 
+def test_sweep_omitted_symbol_is_no_bars_not_fetch_error(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    active = {"BROKEN", "MOVER", "QUIET", "SWEEP", "UNSEEN"}
+    tick_now = CLOSE + timedelta(minutes=13)
+    screen_updated = tick_now - timedelta(minutes=1)
+    base_screen = _screen()
+    screen = replace(
+        base_screen,
+        entries=tuple(
+            replace(entry, source_updated_at=screen_updated)
+            for entry in base_screen.entries
+        ),
+        source_updates=tuple(
+            (source, screen_updated) for source, _ in base_screen.source_updates
+        ),
+    )
+
+    result, _, evaluations = run_discovery_tick(
+        conn,
+        active_universe=active,
+        scheduled_earnings=set(),
+        now=tick_now,
+        run_id="sweep-no-bars",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: screen,
+        bars_fetch=lambda symbols, session: {
+            symbol: _bars(symbol, [101, 102]) for symbol in symbols
+        },
+        sweep_bars_fetch=lambda symbols, start, end: {},
+        sweep_cycle_ticks=5,
+    )
+
+    outcomes = {row.symbol: row.outcome for row in evaluations}
+    assert outcomes["SWEEP"] == "NO_BARS_RETURNED"
+    assert result.discovered_symbols == result.evaluated_symbols == 4
+    assert result.fetched_symbols == 3
+    assert result.error_count == 0
+    assert conn.execute(
+        "SELECT reason FROM postmarket_discovery_observations "
+        "WHERE tick_id=? AND symbol='SWEEP'",
+        (result.tick_id,),
+    ).fetchone()[0] == "no bars returned for full-universe sweep window"
+
+
 def test_tick_bulk_fetches_bounded_union_and_conserves_missing_symbol(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     requested = []

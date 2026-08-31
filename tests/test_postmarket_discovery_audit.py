@@ -489,6 +489,57 @@ def test_v2_audit_accepts_one_exact_deterministic_full_universe_sweep_cycle(tmp_
     }
 
 
+def test_v2_audit_conserves_sweep_no_bars_without_fetch_error(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    active = {"A", "B", "C", "D", "E"}
+
+    for minute in range(5):
+        now = START + timedelta(minutes=minute)
+        screen = MarketWideScreen(
+            entries=(
+                MarketScreenEntry(
+                    symbol="A",
+                    source="market_gainer",
+                    rank=1,
+                    source_updated_at=now,
+                    move_pct=1.0,
+                    price=100.0,
+                ),
+            ),
+            requested_top_n=50,
+            provider="alpaca",
+            feed="sip",
+            endpoints=ENDPOINTS,
+            source_updates=tuple((endpoint, now) for endpoint in ENDPOINTS),
+        )
+        discovery_shadow.run_discovery_tick(
+            conn,
+            active_universe=active,
+            scheduled_earnings=set(),
+            now=now,
+            run_id=f"no-bars-{minute}",
+            version="sweep123",
+            data_feed="sip",
+            screen_fetch=lambda top, screen=screen: screen,
+            bars_fetch=lambda symbols, session: {
+                "A": [
+                    Bar("A", START - timedelta(minutes=5), 100, 100, 100, 100, 1_000)
+                ]
+            },
+            sweep_bars_fetch=lambda symbols, start, end: {},
+            sweep_cycle_ticks=5,
+        )
+
+    report = audit_discovery_session(conn, SESSION, audit_code_version="audit123")
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational.fetch_errors == 0
+    assert report.operational.outcome_counts["NO_BARS_RETURNED"] == 4
+    assert "MISSING_FETCH_ERRORS" not in codes
+    assert "FETCH_ERRORS" not in codes
+    assert "NO_BARS_EVIDENCE_INVALID" not in codes
+
+
 def test_session_window_uses_actual_early_close_and_est_postmarket_end():
     window = _session_window(date(2026, 11, 27))
 
