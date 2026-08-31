@@ -283,8 +283,15 @@ def run_discovery_tick(
     sweep_cycle_ticks: int | None = None,
     top_n: int = SCREEN_TOP_N,
     clock: Callable[[], float] | None = None,
+    validation_now_fn: Callable[[], datetime] | None = None,
 ) -> tuple[DiscoveryTickResult, DiscoverySelection, list[ReactionEvaluation]]:
-    """Union the bounded screen and one universe shard, then conserve every row."""
+    """Union the bounded screen and one universe shard, then conserve every row.
+
+    ``now`` anchors the exchange session and deterministic tick schedule. Live
+    callers additionally provide ``validation_now_fn`` so provider timestamps
+    are checked against the wall clock *after* the screen request completes.
+    Replay and tests may omit it to keep using their injected historical clock.
+    """
     window = postmarket_window(now)
     if window is None or not (window[1] <= now <= window[2]):
         raise ValueError("run_discovery_tick requires an active postmarket window")
@@ -310,7 +317,8 @@ def run_discovery_tick(
     started = timer()
     screen = screen_fetch(top_n)
     screen_done = timer()
-    _validate_screen(screen, now=now, data_feed=data_feed, top_n=top_n)
+    validation_now = validation_now_fn() if validation_now_fn is not None else now
+    _validate_screen(screen, now=validation_now, data_feed=data_feed, top_n=top_n)
     if active_universe and not screen.entries:
         raise ValueError("market-wide screen returned no rows for a non-empty universe")
     selection = select_discovery_symbols(
@@ -1081,6 +1089,7 @@ def main() -> int:
                 version=version,
                 data_feed=data_feed,
                 sweep_cycle_ticks=FULL_UNIVERSE_SWEEP_CYCLE_TICKS,
+                validation_now_fn=_utc_now,
             )
         except Exception as exc:
             shadow_conn.rollback()
