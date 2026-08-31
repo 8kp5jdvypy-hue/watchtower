@@ -690,6 +690,88 @@ def test_stale_or_future_screener_timestamp_fails_before_bar_fetch(
     assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 0
 
 
+def test_screener_timestamp_uses_clock_captured_after_fetch(tmp_path):
+    """A response produced during the request is not future-dated.
+
+    The tick/session clock is intentionally earlier than the provider's source
+    timestamp. The validation clock advances while ``screen_fetch`` runs, which
+    models the live request that exposed this race in production.
+    """
+    conn = connect(tmp_path / "shadow.db")
+    response_updated = NOW + timedelta(milliseconds=400)
+    screen = MarketWideScreen(
+        entries=(),
+        requested_top_n=50,
+        provider="alpaca",
+        feed="sip",
+        endpoints=("market_movers", "most_actives_volume", "most_actives_trades"),
+        source_updates=(
+            ("market_movers", response_updated),
+            ("most_actives_volume", response_updated),
+            ("most_actives_trades", response_updated),
+        ),
+    )
+    request_complete = False
+
+    def screen_fetch(top):
+        nonlocal request_complete
+        request_complete = True
+        return screen
+
+    def validation_now():
+        assert request_complete is True
+        return NOW + timedelta(milliseconds=500)
+
+    result, _, _ = run_discovery_tick(
+        conn,
+        active_universe=set(),
+        scheduled_earnings=set(),
+        now=NOW,
+        run_id="run-1",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=screen_fetch,
+        bars_fetch=lambda symbols, session: {},
+        validation_now_fn=validation_now,
+    )
+
+    assert result.error_count == 0
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 1
+
+
+def test_genuinely_future_screener_timestamp_still_fails_post_fetch(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    future = NOW + timedelta(seconds=2)
+    screen = MarketWideScreen(
+        entries=(),
+        requested_top_n=50,
+        provider="alpaca",
+        feed="sip",
+        endpoints=("market_movers", "most_actives_volume", "most_actives_trades"),
+        source_updates=(
+            ("market_movers", future),
+            ("most_actives_volume", UPDATED),
+            ("most_actives_trades", UPDATED),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="future"):
+        run_discovery_tick(
+            conn,
+            active_universe=set(),
+            scheduled_earnings=set(),
+            now=NOW,
+            run_id="run-1",
+            version="abc123",
+            data_feed="sip",
+            screen_fetch=lambda top: screen,
+            bars_fetch=lambda symbols, session: {},
+            validation_now_fn=lambda: NOW + timedelta(seconds=1),
+        )
+
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 0
+
+
 def test_screen_and_bar_feed_must_match(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     with pytest.raises(ValueError, match="feed mismatch"):
@@ -760,6 +842,30 @@ def test_service_has_no_delivery_or_order_dependency():
             imports.add(node.module)
     forbidden = ("tradebot.alerts", "tradebot.telegram_bot", "tradebot.order", "tradebot.broker")
     assert not any(module.startswith(forbidden) for module in imports)
+
+
+def test_live_service_injects_post_fetch_validation_clock():
+    source = (
+        Path(__file__).parents[1] / "tradebot" / "postmarket_discovery_shadow.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    main = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    tick_call = next(
+        node for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_discovery_tick"
+    )
+    validation_clock = next(
+        keyword.value
+        for keyword in tick_call.keywords
+        if keyword.arg == "validation_now_fn"
+    )
+    assert isinstance(validation_clock, ast.Name)
+    assert validation_clock.id == "_utc_now"
 
 
 def test_compose_wires_independent_default_off_discovery_service():
