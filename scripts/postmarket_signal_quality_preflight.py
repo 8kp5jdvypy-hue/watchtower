@@ -286,6 +286,14 @@ def _backup_checks(
                 f"artifact_files={len(artifact_files)} roots={sorted(roots)!r}",
             )
         )
+        checks.append(
+            _check(
+                "deployment",
+                "backup_contains_screening_archives",
+                "screening_archives" in roots,
+                f"artifact_files={len(artifact_files)} roots={sorted(roots)!r}",
+            )
+        )
     except (OSError, ValueError, sqlite3.DatabaseError, tarfile.TarError) as exc:
         checks.append(
             _check("deployment", "verified_backup_set", False, _safe_error(exc))

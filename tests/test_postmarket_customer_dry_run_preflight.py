@@ -24,6 +24,8 @@ from tradebot.postmarket_delivery_readiness import (
     ACKNOWLEDGEMENT,
     parse_delivery_policy,
 )
+from tradebot.screening_archive import archive_screening_session
+from tradebot.universe import connect as connect_universe
 
 
 NOW = datetime(2026, 8, 29, 1, tzinfo=timezone.utc)
@@ -70,12 +72,40 @@ def _backup(root, *, policy, authorization, campaign, controls):
             handle.write(name.encode())
         files.append(path)
     artifacts = root / f"postmarket_artifacts_{STAMP}.tar.gz"
+    screening_source = root.parent / "screening-source.db"
+    universe = connect_universe(screening_source)
+    universe.execute(
+        """
+        INSERT INTO screening_ticks
+          (session,tick_utc,run_id,run_mode,screen_version,code_version,
+           audit_mode,universe_count,thresholds_json,counts_json,invariant_ok,
+           promotion_limit,latency_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "2026-08-28", "2026-08-28T20:00:00+00:00", "customer-preflight",
+            "live", 2, "abcdef1", 0, 1, "{}", '{"quiet":1}', 1, 25, 10,
+        ),
+    )
+    universe.commit()
+    universe.close()
+    screening_report = archive_screening_session(
+        screening_source,
+        root.parent / "screening_archives",
+        session="2026-08-28",
+        now=NOW,
+    )
     with tarfile.open(artifacts, "w:gz") as archive:
         for name in ("postmarket_audits/audit.json", "postmarket_evidence/control.json"):
             raw = b"{}\n"
             member = tarfile.TarInfo(name)
             member.size = len(raw)
             archive.addfile(member, io.BytesIO(raw))
+        screening_path = Path(screening_report.path)
+        archive.add(
+            screening_path,
+            arcname=f"screening_archives/{screening_path.name}",
+        )
         for name, path in (
             ("postmarket_customer_delivery_policy.json", policy),
             ("postmarket_customer_delivery_authorization.json", authorization),

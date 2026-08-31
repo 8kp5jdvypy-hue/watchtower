@@ -17,6 +17,8 @@ from scripts.postmarket_signal_quality_preflight import (
     REQUIRED_CONTROL_KINDS,
     evaluate_signal_quality_preflight,
 )
+from tradebot.screening_archive import archive_screening_session
+from tradebot.universe import connect as connect_universe
 
 
 NOW = datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
@@ -88,16 +90,43 @@ def _env(path: Path, *, omit: str | None = None) -> None:
 
 def _databases(data_dir: Path) -> None:
     data_dir.mkdir()
-    for name in ("journal", "users", "evaluations", "postmarket_shadow", "universe"):
+    for name in ("journal", "users", "evaluations", "postmarket_shadow"):
         conn = sqlite3.connect(data_dir / f"{name}.db")
         try:
             conn.execute("CREATE TABLE fixture (value INTEGER)")
             conn.commit()
         finally:
             conn.close()
+    universe = connect_universe(data_dir / "universe.db")
+    universe.execute(
+        """
+        INSERT INTO screening_ticks
+          (session,tick_utc,run_id,run_mode,screen_version,code_version,
+           audit_mode,universe_count,thresholds_json,counts_json,invariant_ok,
+           promotion_limit,latency_ms)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "2026-08-28", "2026-08-28T20:00:00+00:00", "preflight-fixture",
+            "live", 2, "abcdef1", 0, 1, "{}", '{"quiet":1}', 1, 25, 10,
+        ),
+    )
+    universe.commit()
+    universe.close()
+    archive_screening_session(
+        data_dir / "universe.db",
+        data_dir / "screening_archives",
+        session="2026-08-28",
+        now=NOW,
+    )
 
 
-def _artifact_archive(path: Path) -> None:
+def _artifact_archive(
+    path: Path,
+    data_dir: Path,
+    *,
+    include_screening: bool = True,
+) -> None:
     with tarfile.open(path, "w:gz") as archive:
         for name in (
             "postmarket_audits/audit.json",
@@ -107,9 +136,14 @@ def _artifact_archive(path: Path) -> None:
             member = tarfile.TarInfo(name)
             member.size = len(raw)
             archive.addfile(member, io.BytesIO(raw))
+        if include_screening:
+            screening = next(
+                (data_dir / "screening_archives").glob("screening_*.jsonl.gz")
+            )
+            archive.add(screening, arcname=f"screening_archives/{screening.name}")
 
 
-def _backup(backup_dir: Path) -> Path:
+def _backup(backup_dir: Path, data_dir: Path) -> Path:
     backup_dir.mkdir()
     files = []
     for name in ("journal", "users", "evaluations", "postmarket_shadow", "universe"):
@@ -118,7 +152,7 @@ def _backup(backup_dir: Path) -> Path:
             handle.write(name.encode())
         files.append(path)
     artifacts = backup_dir / f"postmarket_artifacts_{STAMP}.tar.gz"
-    _artifact_archive(artifacts)
+    _artifact_archive(artifacts, data_dir)
     files.append(artifacts)
     manifest = backup_dir / f"manifest_{STAMP}.sha256"
     manifest.write_text(
@@ -198,7 +232,7 @@ def _fixture(tmp_path: Path) -> dict:
     )
     data_dir = tmp_path / "data"
     _databases(data_dir)
-    backup_manifest = _backup(tmp_path / "backups")
+    backup_manifest = _backup(tmp_path / "backups", data_dir)
     controls = _controls(tmp_path / "controls", revision)
     reference = tmp_path / "reference.json"
     _reference(reference)
@@ -291,6 +325,33 @@ def test_backup_without_universe_screening_evidence_blocks_shadow_deploy(tmp_pat
     check = next(item for item in report.checks if item.name == "verified_backup_set")
     assert check.passed is False
     assert "missing signal-quality databases: ['universe']" in check.evidence
+
+
+def test_backup_without_session_screening_archives_blocks_shadow_deploy(tmp_path):
+    args = _fixture(tmp_path)
+    manifest = args["backup_manifest"]
+    artifacts = manifest.parent / f"postmarket_artifacts_{STAMP}.tar.gz"
+    _artifact_archive(artifacts, args["data_dir"], include_screening=False)
+    digest = hashlib.sha256(artifacts.read_bytes()).hexdigest()
+    manifest.write_text(
+        "\n".join(
+            f"{digest}  {artifacts.name}" if artifacts.name in line else line
+            for line in manifest.read_text(encoding="utf-8").splitlines()
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = _evaluate(args)
+
+    assert report.safe_to_deploy_shadow is False
+    check = next(
+        item
+        for item in report.checks
+        if item.name == "backup_contains_screening_archives"
+    )
+    assert check.scope == "deployment"
+    assert check.passed is False
 
 
 def test_dirty_or_non_main_revision_blocks_shadow_deploy(tmp_path):
