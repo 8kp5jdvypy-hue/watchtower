@@ -422,8 +422,8 @@ def _intraday_request_window(session_date: date) -> tuple[datetime, datetime]:
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
-def fetch_marketwide_postmarket_screen(top: int = 50) -> MDMarketWideScreen:
-    """Top SIP movers plus volume/trade-count leaders across US stocks.
+def fetch_marketwide_screen(top: int = 50) -> MDMarketWideScreen:
+    """Current top SIP movers plus activity leaders across US stocks.
 
     Alpaca's screener performs the market-wide ranking. Perch records the
     returned rank, metric, source timestamp, endpoint, and requested bound;
@@ -501,6 +501,11 @@ def fetch_marketwide_postmarket_screen(top: int = 50) -> MDMarketWideScreen:
             ("most_actives_trades", trades.last_updated.astimezone(timezone.utc)),
         ),
     )
+
+
+def fetch_marketwide_postmarket_screen(top: int = 50) -> MDMarketWideScreen:
+    """Compatibility wrapper for the original postmarket-only caller name."""
+    return fetch_marketwide_screen(top)
 
 
 def fetch_latest_quote(symbol: str) -> MDQuote:

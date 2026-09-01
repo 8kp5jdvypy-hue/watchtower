@@ -23,6 +23,8 @@ SUBSYSTEM_STATUS_FIELDS = (
     "context_backfill_status",
     "lifecycle_status",
     "rank_status",
+    "rth_handoff_status",
+    "rth_audit_status",
 )
 
 

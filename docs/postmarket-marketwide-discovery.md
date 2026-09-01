@@ -10,7 +10,22 @@ the outbox, a broker, or an order path. Its only durable output is append-only
 evidence in `data/postmarket_shadow.db`, which is already included in local and
 encrypted off-box backups.
 
-## Two-lane discovery, one strict evaluator
+## Final-RTH admission and two-lane postmarket discovery
+
+The same supervisor also owns a final-RTH handoff shadow. During the last 30
+minutes of the real XNYS session it polls the bounded mover/activity screen once
+per minute, unions scheduled after-hours reporters, and evaluates completed
+five-minute RTH bars against a real prior close. A qualifying candidate is
+retained with an append-only identity and later linked to a same-direction
+postmarket candidate or explicitly closed as not postmarket-qualified.
+
+This pre-close path is deliberately bounded and fast. It does not claim a
+full-universe RTH scan. Its 8% move, two-bar persistence, $1 million cumulative
+RTH notional, and 420-second freshness thresholds are shadow baselines awaiting
+replay and live evidence. The complete contract and immutable 31-tick daily
+audit are documented in `docs/rth-postmarket-handoff.md`.
+
+After the close, postmarket discovery uses two lanes and one strict evaluator.
 
 The fast lane uses Alpaca's real-time SIP stock screeners at their maximum
 documented bound of 50 rows per side/list:
@@ -65,7 +80,8 @@ switch from `POSTMARKET_SHADOW_ENABLED`. Building or deploying the service does
 not start market-data polling unless an operator explicitly sets it to `1` and
 recreates that service.
 
-The initial release is shadow evidence only. Customer delivery requires a
+The initial release, including final-RTH handoff, is shadow evidence only.
+Customer delivery requires a
 separate approval after complete-session observation, replay calibration,
 false-positive/false-negative review, latency/error review, and a tested routing
 kill switch. The existing earnings evidence gate is not reused or reset by this

@@ -240,6 +240,18 @@ evidence.
   freshness, top-N scope, ranks, universe/fetch/evaluation/candidate counts,
   revision and threshold provenance; and preserves candidate plus near-miss
   lifecycles in the already-backed-up audit directory.
+- Final-RTH-to-postmarket handoff: implemented on a review branch, not yet
+  merged, deployed, or enabled. The discovery supervisor wakes 30 minutes
+  before the real XNYS close, admits bounded mover/activity symbols plus
+  scheduled after-hours reporters, evaluates strict completed RTH bars, and
+  persists an append-only `RTH_QUALIFIED` identity. Postmarket reconciliation
+  adds either a same-direction qualification link or an explicit terminal
+  non-qualification. Per-stage timing, schedule gaps, conservation, provenance,
+  and handoff integrity are covered by an immutable 31-tick daily audit whose
+  exceptions fail discovery health. This closes a clock-boundary visibility
+  hole; it does not prove full-market RTH recall. The daily missed-mover census,
+  holdout calibration, independent-provider evidence, and customer gate remain
+  open.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a

@@ -16,6 +16,7 @@ from typing import Callable
 from tradebot.events import scheduled_after_hours_earnings_symbols
 from tradebot.journal import code_version, connect as connect_journal, new_run_id
 from tradebot.marketdata import MarketWideScreen, partition_intraday_bars
+from tradebot.marketwide_screen import SOURCE_ENDPOINT, validate_marketwide_screen
 from tradebot.postmarket import (
     OUTCOME_NO_BARS_RETURNED,
     ReactionEvaluation,
@@ -60,6 +61,20 @@ from tradebot.postmarket_recall_provider import (
     write_provider_proof_report,
 )
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
+from tradebot.rth_momentum import (
+    ensure_rth_schema,
+    latest_rth_handoff_summary,
+    reconcile_rth_postmarket_handoffs,
+    rth_handoff_is_active,
+    rth_handoff_window,
+    rth_poll_sleep_seconds,
+    run_rth_momentum_tick,
+)
+from tradebot.rth_momentum_audit import (
+    latest_rth_audit_summary,
+    rth_audit_session_due,
+    write_completed_rth_audits,
+)
 from tradebot.universe import active_symbols, connect as connect_universe
 
 
@@ -73,18 +88,6 @@ POLL_SECONDS = 60
 IDLE_SECONDS = 300
 RUN_MODE = "postmarket-marketwide-shadow"
 SCREEN_TOP_N = 50
-MAX_SCREEN_AGE_SECONDS = 180
-EXPECTED_ENDPOINTS = {
-    "market_movers",
-    "most_actives_volume",
-    "most_actives_trades",
-}
-SOURCE_ENDPOINT = {
-    "market_gainer": "market_movers",
-    "market_loser": "market_movers",
-    "most_active_volume": "most_actives_volume",
-    "most_active_trades": "most_actives_trades",
-}
 
 logger = logging.getLogger("watchtower.postmarket_discovery_shadow")
 
@@ -137,6 +140,14 @@ def active_poll_sleep_seconds(
     return max(0.1, (next_tick - now).total_seconds())
 
 
+def discovery_idle_sleep_seconds(now: datetime) -> float:
+    """Wake at final-RTH coverage start, not merely at the exchange close."""
+    window = rth_handoff_window(now)
+    if window is not None and now < window[1]:
+        return max(0.1, min(float(IDLE_SECONDS), (window[1] - now).total_seconds()))
+    return idle_sleep_seconds(now)
+
+
 def discovery_enabled(raw: str | None = None) -> bool:
     value = os.environ.get("POSTMARKET_DISCOVERY_ENABLED", "0") if raw is None else raw
     normalized = value.strip().lower()
@@ -150,9 +161,9 @@ def discovery_enabled(raw: str | None = None) -> bool:
 
 
 def _screen_fetch(top: int) -> MarketWideScreen:
-    from tradebot.vendors.alpaca import fetch_marketwide_postmarket_screen
+    from tradebot.vendors.alpaca import fetch_marketwide_screen
 
-    return fetch_marketwide_postmarket_screen(top)
+    return fetch_marketwide_screen(top)
 
 
 def _bars_fetch(symbols: list[str], session: date):
@@ -193,6 +204,12 @@ def _daily_bars_fetch(symbols: list[str]):
     return fetch_daily_bars_bulk(symbols, lookback_days=45)
 
 
+def _rth_daily_bars_fetch(symbols: list[str]):
+    from tradebot.vendors.alpaca import fetch_daily_bars_bulk
+
+    return fetch_daily_bars_bulk(symbols, lookback_days=10)
+
+
 def _quotes_fetch(symbols: list[str]):
     from tradebot.vendors.alpaca import fetch_latest_quotes
 
@@ -203,70 +220,6 @@ def _data_feed() -> str:
     from tradebot.vendors.alpaca import DETECTOR_DATA_FEED
 
     return str(getattr(DETECTOR_DATA_FEED, "value", DETECTOR_DATA_FEED))
-
-
-def _validate_screen(
-    screen: MarketWideScreen, *, now: datetime, data_feed: str, top_n: int,
-) -> None:
-    if screen.provider != "alpaca":
-        raise ValueError(f"unexpected market-wide screen provider: {screen.provider!r}")
-    if screen.feed != "sip":
-        raise ValueError(f"market-wide screener must use SIP, got {screen.feed!r}")
-    if data_feed != screen.feed:
-        raise ValueError(
-            f"market-wide screen/bar feed mismatch: {screen.feed!r} vs {data_feed!r}"
-        )
-    if screen.requested_top_n != top_n or not 1 <= top_n <= 50:
-        raise ValueError("market-wide screen requested bound does not match the tick")
-    if len(screen.endpoints) != len(EXPECTED_ENDPOINTS) or set(screen.endpoints) != EXPECTED_ENDPOINTS:
-        raise ValueError("market-wide screen endpoint set is incomplete, duplicated, or unexpected")
-    updates = dict(screen.source_updates)
-    if len(screen.source_updates) != len(EXPECTED_ENDPOINTS) or set(updates) != EXPECTED_ENDPOINTS:
-        raise ValueError("market-wide screen source timestamps are incomplete or duplicated")
-    for source, updated in updates.items():
-        if updated.tzinfo is None or updated.utcoffset() is None:
-            raise ValueError(f"market-wide screen timestamp is naive for {source}")
-        age = (now - updated).total_seconds()
-        if age < 0:
-            raise ValueError(f"market-wide screen timestamp is in the future for {source}")
-        if age > MAX_SCREEN_AGE_SECONDS:
-            raise ValueError(f"market-wide screen timestamp is stale for {source}: {age:.0f}s")
-    by_source: dict[str, list] = {source: [] for source in SOURCE_ENDPOINT}
-    seen_symbol_source: set[tuple[str, str]] = set()
-    for entry in screen.entries:
-        if entry.source not in SOURCE_ENDPOINT:
-            raise ValueError(f"unknown market-wide screen row source: {entry.source!r}")
-        if entry.symbol != entry.symbol.strip().upper() or not entry.symbol:
-            raise ValueError("market-wide screen symbol is not canonical")
-        if not 1 <= entry.rank <= top_n:
-            raise ValueError("market-wide screen rank is outside the requested bound")
-        key = (entry.symbol, entry.source)
-        if key in seen_symbol_source:
-            raise ValueError("market-wide screen duplicated a symbol within one source")
-        seen_symbol_source.add(key)
-        endpoint = SOURCE_ENDPOINT[entry.source]
-        if entry.source_updated_at != updates[endpoint]:
-            raise ValueError("market-wide screen row/source timestamps disagree")
-        numeric = (
-            entry.move_pct, entry.price, entry.volume, entry.trade_count,
-        )
-        if any(value is not None and not math.isfinite(value) for value in numeric):
-            raise ValueError("market-wide screen row contains a non-finite metric")
-        if entry.source in {"market_gainer", "market_loser"}:
-            if entry.move_pct is None or entry.price is None or entry.price <= 0:
-                raise ValueError("market mover row is missing price/change provenance")
-            if entry.source == "market_gainer" and entry.move_pct <= 0:
-                raise ValueError("market gainer row has a non-positive move")
-            if entry.source == "market_loser" and entry.move_pct >= 0:
-                raise ValueError("market loser row has a non-negative move")
-        elif entry.volume is None or entry.trade_count is None:
-            raise ValueError("most-active row is missing activity provenance")
-        elif entry.volume < 0 or entry.trade_count < 0:
-            raise ValueError("most-active row contains a negative metric")
-        by_source[entry.source].append(entry.rank)
-    for ranks in by_source.values():
-        if ranks and sorted(ranks) != list(range(1, len(ranks) + 1)):
-            raise ValueError("market-wide screen ranks are duplicated or non-contiguous")
 
 
 def run_discovery_tick(
@@ -319,7 +272,9 @@ def run_discovery_tick(
     screen = screen_fetch(top_n)
     screen_done = timer()
     validation_now = validation_now_fn() if validation_now_fn is not None else now
-    _validate_screen(screen, now=validation_now, data_feed=data_feed, top_n=top_n)
+    validate_marketwide_screen(
+        screen, now=validation_now, data_feed=data_feed, top_n=top_n
+    )
     if active_universe and not screen.entries:
         raise ValueError("market-wide screen returned no rows for a non-empty universe")
     selection = select_discovery_symbols(
@@ -559,6 +514,42 @@ def discovery_audit_heartbeat_fields(now: datetime) -> dict:
         return {
             "audit_status": "error",
             "audit_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
+def rth_audit_heartbeat_fields(
+    now: datetime,
+    *,
+    expected_session: date | None = None,
+) -> dict:
+    """Write and surface immutable final-RTH coverage and handoff audits."""
+    try:
+        reports = write_completed_rth_audits(
+            SHADOW_PATH,
+            AUDIT_DIR,
+            now=now,
+            audit_code_version=code_version(),
+            expected_sessions=((expected_session,) if expected_session else ()),
+        )
+        for report in reports:
+            logger.info(
+                "rth_momentum_daily_audit session=%s operational_clean=%s "
+                "evidence_eligible=%s issues=%s",
+                report.session,
+                report.operational_clean,
+                report.session_evidence_eligible,
+                ",".join(issue.code for issue in report.issues) or "none",
+            )
+        return {
+            "rth_audit_status": "written" if reports else "current",
+            "rth_audits_written": len(reports),
+            "latest_rth_audit": latest_rth_audit_summary(AUDIT_DIR),
+        }
+    except Exception as exc:
+        logger.exception("final-RTH momentum daily audit failed")
+        return {
+            "rth_audit_status": "error",
+            "rth_audit_error": f"{type(exc).__name__}: {exc}"[:1000],
         }
 
 
@@ -993,6 +984,57 @@ def rank_heartbeat_fields(
         }
 
 
+def rth_handoff_reconcile_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    *,
+    version: str | None,
+    run_id: str,
+    session: date | None = None,
+    postmarket_end: datetime | None = None,
+) -> dict:
+    """Keep every final-RTH candidate linked or explicitly terminal."""
+    try:
+        ensure_rth_schema(shadow_conn)
+        if session is None:
+            row = shadow_conn.execute(
+                "SELECT MAX(session) FROM rth_momentum_candidates"
+            ).fetchone()
+            session = date.fromisoformat(row[0]) if row and row[0] else None
+        if session is None:
+            return {
+                "rth_handoff_status": "current",
+                "latest_rth_handoff": latest_rth_handoff_summary(shadow_conn),
+            }
+        if postmarket_end is None:
+            _, postmarket_end = lifecycle_window(session)
+        result = reconcile_rth_postmarket_handoffs(
+            shadow_conn,
+            session=session,
+            now=now,
+            postmarket_end=postmarket_end,
+            code_version=version,
+            run_id=run_id,
+        )
+        return {
+            "rth_handoff_status": "current",
+            "rth_handoff_session": result.session,
+            "rth_candidates": result.rth_candidates,
+            "rth_postmarket_links_written": result.postmarket_links_written,
+            "rth_terminal_not_qualified_written": (
+                result.terminal_not_qualified_written
+            ),
+            "latest_rth_handoff": latest_rth_handoff_summary(shadow_conn),
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("RTH-to-postmarket handoff reconciliation failed")
+        return {
+            "rth_handoff_status": "error",
+            "rth_handoff_error": f"{type(exc).__name__}: {exc}"[:1000],
+        }
+
+
 def main() -> int:
     configure_logging()
     try:
@@ -1011,6 +1053,7 @@ def main() -> int:
                     "status": "disabled",
                     "enabled": False,
                     **discovery_audit_heartbeat_fields(now),
+                    **rth_audit_heartbeat_fields(now),
                 },
             )
             time.sleep(IDLE_SECONDS)
@@ -1029,7 +1072,95 @@ def main() -> int:
     )
     while True:
         now = _utc_now()
+        if rth_handoff_is_active(now):
+            rth_window = rth_handoff_window(now)
+            assert rth_window is not None
+            rth_session, rth_window_start, _ = rth_window
+            write_heartbeat_atomic(
+                HEARTBEAT_PATH,
+                _heartbeat("ok", now, rth_handoff_status="running"),
+            )
+            try:
+                rth_result, _, _ = run_rth_momentum_tick(
+                    shadow_conn,
+                    active_universe=set(active_symbols(universe_conn)),
+                    scheduled_earnings=set(
+                        scheduled_after_hours_earnings_symbols(
+                            journal_conn, rth_session
+                        )
+                    ),
+                    now=now,
+                    run_id=run_id,
+                    code_version=version,
+                    data_feed=data_feed,
+                    screen_fetch=_screen_fetch,
+                    intraday_fetch=_bars_fetch,
+                    daily_fetch=_rth_daily_bars_fetch,
+                    validation_now_fn=_utc_now,
+                )
+            except Exception as exc:
+                shadow_conn.rollback()
+                logger.exception("final-RTH market-wide momentum tick failed")
+                write_heartbeat_atomic(
+                    HEARTBEAT_PATH,
+                    _heartbeat(
+                        "error",
+                        _utc_now(),
+                        rth_handoff_status="error",
+                        rth_handoff_error=f"{type(exc).__name__}: {exc}"[:1000],
+                    ),
+                )
+            else:
+                logger.info(
+                    "rth_momentum_tick tick=%s session=%s selected=%s "
+                    "intraday_fetched=%s daily_fetched=%s evaluated=%s "
+                    "candidates=%s new=%s invariant=%s errors=%s lag_ms=%s "
+                    "missed=%s screen_ms=%s selection_ms=%s fetch_ms=%s "
+                    "evaluation_ms=%s total_ms=%s",
+                    rth_result.tick_id,
+                    rth_result.session,
+                    rth_result.selected_symbols,
+                    rth_result.intraday_symbols_fetched,
+                    rth_result.daily_symbols_fetched,
+                    rth_result.evaluated_symbols,
+                    rth_result.candidate_observations,
+                    rth_result.new_candidates,
+                    rth_result.invariant_ok,
+                    rth_result.error_count,
+                    rth_result.scheduled_lag_ms,
+                    rth_result.missed_cycles,
+                    rth_result.screen_latency_ms,
+                    rth_result.selection_latency_ms,
+                    rth_result.bar_fetch_latency_ms,
+                    rth_result.evaluation_latency_ms,
+                    rth_result.latency_ms,
+                )
+                completed_now = _utc_now()
+                write_heartbeat_atomic(
+                    HEARTBEAT_PATH,
+                    _heartbeat(
+                        "ok",
+                        completed_now,
+                        rth_handoff_status=(
+                            "degraded" if rth_result.error_count else "current"
+                        ),
+                        latest_rth_handoff=latest_rth_handoff_summary(shadow_conn),
+                    ),
+                )
+            sleep_now = _utc_now()
+            time.sleep(
+                rth_poll_sleep_seconds(
+                    sleep_now, window_start=rth_window_start
+                )
+            )
+            continue
         if not postmarket_is_active(now):
+            rth_fields = rth_handoff_reconcile_heartbeat_fields(
+                now,
+                shadow_conn,
+                version=version,
+                run_id=run_id,
+            )
             lifecycle_fields = lifecycle_heartbeat_fields(
                 now,
                 shadow_conn,
@@ -1075,15 +1206,19 @@ def main() -> int:
                     "idle",
                     now,
                     **discovery_audit_heartbeat_fields(now),
+                    **rth_audit_heartbeat_fields(
+                        now, expected_session=rth_audit_session_due(now)
+                    ),
                     **lifecycle_fields,
                     **context_fields,
                     **rank_fields,
                     **quality_fields,
                     **census_fields,
                     **provider_fields,
+                    **rth_fields,
                 ),
             )
-            time.sleep(idle_sleep_seconds(now))
+            time.sleep(discovery_idle_sleep_seconds(now))
             continue
         write_heartbeat_atomic(HEARTBEAT_PATH, _heartbeat("running", now))
         try:
@@ -1106,9 +1241,17 @@ def main() -> int:
         except Exception as exc:
             shadow_conn.rollback()
             logger.exception("market-wide postmarket discovery tick failed")
+            failed_now = _utc_now()
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
-                _heartbeat("error", _utc_now(), error=f"{type(exc).__name__}: {exc}"[:1000]),
+                _heartbeat(
+                    "error",
+                    failed_now,
+                    error=f"{type(exc).__name__}: {exc}"[:1000],
+                    **rth_audit_heartbeat_fields(
+                        failed_now, expected_session=session
+                    ),
+                ),
             )
         else:
             logger.info(
@@ -1169,11 +1312,23 @@ def main() -> int:
                 version=version,
                 run_id=run_id,
             )
+            rth_fields = rth_handoff_reconcile_heartbeat_fields(
+                completed_now,
+                shadow_conn,
+                version=version,
+                run_id=run_id,
+                session=session,
+                postmarket_end=window[2],
+            )
+            rth_audit_fields = rth_audit_heartbeat_fields(
+                completed_now, expected_session=session
+            )
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
                     "ok", completed_now, **result.__dict__, **lifecycle_fields,
-                    **context_fields, **rank_fields, **quality_fields
+                    **context_fields, **rank_fields, **quality_fields,
+                    **rth_fields, **rth_audit_fields
                 ),
             )
         sleep_now = _utc_now()

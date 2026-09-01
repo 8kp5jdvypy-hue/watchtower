@@ -117,6 +117,44 @@ def test_delivery_artifact_fails_on_forbidden_import(tmp_path):
     ].evidence
 
 
+def test_delivery_artifact_covers_rth_handoff_module(tmp_path):
+    source = Path(controls_module.RTH_MOMENTUM_SOURCE_PATH).read_text(encoding="utf-8")
+    bad = tmp_path / "rth_momentum.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
+def test_delivery_artifact_covers_rth_audit_module(tmp_path):
+    source = Path(controls_module.RTH_AUDIT_SOURCE_PATH).read_text(encoding="utf-8")
+    bad = tmp_path / "rth_momentum_audit.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_audit_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
 def test_artifact_contract_and_schema_inventory_are_exact():
     artifact = _artifact(
         "discovery_kill_switch",
