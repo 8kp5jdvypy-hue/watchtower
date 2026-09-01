@@ -13,8 +13,8 @@ Before the first covered XNYS session opens, create one immutable campaign with
 
 - the exact XNYS date range;
 - the blinded empirical experiment ID, manifest SHA-256, and rank version;
-- minimum clean-session, label, precision, recall, provider-comparison,
-  coverage, and latency floors;
+- minimum clean-session, label, precision, recall, calibration sample/bin,
+  Brier/ECE, provider-comparison, coverage, and latency floors;
 - every allowed feed, provider, dataset, audit/discovery version, and code
   revision; and
 - fail-closed requirements for complete inventories, zero dirty sessions,
@@ -30,7 +30,7 @@ SHA-256 with the campaign record.
 
 After every covered session and its next-day independent proof are complete,
 create a locked evidence-set manifest conforming to
-`truth/postmarket_discovery_evidence_set_v1.schema.json`. Paths are relative to
+`truth/postmarket_discovery_evidence_set_v2.schema.json`. Paths are relative to
 the manifest and every artifact is SHA-256 pinned. The inventory must contain:
 
 - exactly one discovery audit for every expected XNYS session;
@@ -38,6 +38,8 @@ the manifest and every artifact is SHA-256 pinned. The inventory must contain:
 - exactly one independent-provider proof for every session;
 - one unblinded, passed empirical holdout artifact covering the exact campaign
   sessions; and
+- one unblinded, passed calibrated-quality holdout artifact for the same
+  experiment and exact campaign sessions; and
 - exactly four passing controls: discovery failure injection, discovery kill
   switch, discovery delivery isolation, and rollback runbook.
 
@@ -67,6 +69,7 @@ python -m tradebot.postmarket_discovery_evidence_set \
   --provider-proof \
     2026-09-01=data/postmarket_evidence/campaign-1/provider/provider-2026-09-01.json \
   --empirical-artifact data/postmarket_evidence/campaign-1/empirical/holdout.json \
+  --calibration-artifact data/postmarket_evidence/campaign-1/empirical/calibration.json \
   --control \
     discovery_failure_injection=data/postmarket_evidence/campaign-1/controls/failure.json \
   --control \
@@ -108,8 +111,9 @@ encrypted off-box backup before owner review.
 ## Fail-closed boundaries
 
 The evaluator recomputes count identities, recalls, provider coverage,
-eligible-pair agreement, bar overlap, empirical confusion-matrix totals, and
-per-session empirical aggregates. It also enforces provider object causality,
+eligible-pair agreement, bar overlap, empirical confusion-matrix totals,
+per-session empirical aggregates, calibration-bin conservation, Brier score,
+and expected calibration error. It also enforces provider object causality,
 exact session inventories, exact campaign policy equality, campaign and
 experiment digests, and revision allowlists. Missing data is never converted
 to a pass.

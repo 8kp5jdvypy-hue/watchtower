@@ -43,6 +43,7 @@ OBSERVER_CODE = "b" * 7
 CENSUS_CODE = "c" * 7
 PROVIDER_CODE = "d" * 7
 EMPIRICAL_CODE = "e" * 7
+CALIBRATION_CODE = "9" * 7
 CONTROL_CODE = "f" * 7
 
 
@@ -53,6 +54,10 @@ def _policy() -> dict:
         "min_positive_labels": 30,
         "min_empirical_recall": 0.95,
         "min_empirical_precision": 0.90,
+        "min_calibration_negative_labels": 70,
+        "min_calibration_bin_labels": 20,
+        "max_calibration_brier_score": 0.20,
+        "max_expected_calibration_error": 0.10,
         "min_primary_recall": 0.95,
         "max_primary_detection_latency_seconds": 330,
         "min_provider_comparable_coverage": 0.99,
@@ -75,6 +80,7 @@ def _policy() -> dict:
         "allowed_census_code_versions": [CENSUS_CODE],
         "allowed_provider_proof_code_versions": [PROVIDER_CODE],
         "allowed_empirical_code_versions": [EMPIRICAL_CODE],
+        "allowed_calibration_code_versions": [CALIBRATION_CODE],
         "allowed_control_code_versions": [CONTROL_CODE],
         "require_zero_dirty_sessions": True,
         "require_complete_session_inventory": True,
@@ -284,6 +290,83 @@ def _empirical() -> dict:
     }
 
 
+def _wilson(positives: int, labels: int) -> tuple[float, float]:
+    observed = positives / labels
+    center = (observed + 1.96**2 / (2 * labels)) / (1 + 1.96**2 / labels)
+    margin = 1.96 * (
+        (observed * (1 - observed) + 1.96**2 / (4 * labels)) / labels
+    ) ** 0.5 / (1 + 1.96**2 / labels)
+    return max(0.0, center - margin), min(1.0, center + margin)
+
+
+def _calibration() -> dict:
+    bins = []
+    for score, labels, positives, predicted in (
+        (20.0, 70, 0, 0.0),
+        (80.0, 30, 30, 1.0),
+    ):
+        lower, upper = _wilson(positives, labels)
+        observed = positives / labels
+        bins.append({
+            "minimum_score": score,
+            "maximum_score": score,
+            "predicted_quality": predicted,
+            "labels": labels,
+            "positives": positives,
+            "observed_quality": observed,
+            "absolute_error": abs(predicted - observed),
+            "wilson_lower_95": lower,
+            "wilson_upper_95": upper,
+        })
+    report = {
+        "calibration_version": 1,
+        "calibration_id": 1,
+        "experiment_id": EXPERIMENT_ID,
+        "split": "holdout",
+        "sessions": [session.isoformat() for session in SESSIONS],
+        "code_version": CALIBRATION_CODE,
+        "model_sha256": "4" * 64,
+        "development_input_sha256": "5" * 64,
+        "policy": {
+            "min_training_labels": 100,
+            "min_training_positive_labels": 30,
+            "min_training_negative_labels": 70,
+            "min_holdout_labels": 100,
+            "min_holdout_positive_labels": 30,
+            "min_holdout_negative_labels": 70,
+            "minimum_bin_labels": 20,
+            "max_brier_score": 0.20,
+            "max_expected_calibration_error": 0.10,
+        },
+        "definitive_labels": 100,
+        "positive_labels": 30,
+        "negative_labels": 70,
+        "ambiguous_labels": 0,
+        "unmatched_rank_labels": 0,
+        "brier_score": 0.0,
+        "expected_calibration_error": 0.0,
+        "reliability_bins": bins,
+        "holdout_unblinded": True,
+        "calibrated_quality_claim_valid": True,
+        "blocking_reasons": [],
+        "input_digest_sha256": "3" * 64,
+    }
+    canonical = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    return {
+        "schema_version": 1,
+        "artifact_type": "postmarket_rank_calibration",
+        "calibration_run_id": 1,
+        "experiment_id": EXPERIMENT_ID,
+        "split": "holdout",
+        "evaluated_at_utc": datetime(2026, 8, 31, 18, tzinfo=timezone.utc).isoformat(),
+        "code_version": CALIBRATION_CODE,
+        "input_digest_sha256": "3" * 64,
+        "report_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+        "model_sha256": "4" * 64,
+        "report": report,
+    }
+
+
 def _control(kind: str) -> dict:
     return {
         "schema_version": 1,
@@ -326,6 +409,7 @@ def _package(tmp_path: Path) -> tuple[Path, dict]:
         censuses.append({"session": session.isoformat(), **census})
         providers.append({"session": session.isoformat(), **provider})
     empirical = _write(root, "empirical/holdout.json", _empirical())
+    calibration = _write(root, "empirical/calibration.json", _calibration())
     controls = []
     for kind in sorted(REQUIRED_CONTROL_KINDS):
         reference = _write(root, f"controls/{kind}.json", _control(kind))
@@ -338,7 +422,7 @@ def _package(tmp_path: Path) -> tuple[Path, dict]:
             }
         )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "locked",
         "evidence_set_version": "marketwide-v1",
         "created_at_utc": CREATED_AT.isoformat(),
@@ -350,6 +434,7 @@ def _package(tmp_path: Path) -> tuple[Path, dict]:
         "recall_census_reports": censuses,
         "provider_proof_reports": providers,
         "empirical_artifact": empirical,
+        "calibration_artifact": calibration,
         "control_artifacts": controls,
     }
     manifest_path = root / "manifest.json"
@@ -393,6 +478,7 @@ def _sealer_inputs(manifest_path: Path, manifest: dict) -> dict:
             for item in manifest["provider_proof_reports"]
         ],
         "empirical_artifact": root / manifest["empirical_artifact"]["path"],
+        "calibration_artifact": root / manifest["calibration_artifact"]["path"],
         "control_artifacts": [
             (item["kind"], root / item["path"])
             for item in manifest["control_artifacts"]
@@ -466,8 +552,10 @@ def test_complete_reconciled_package_is_eligible_for_owner_review(tmp_path):
     assert report.metrics.minimum_provider_independent_recall == 1
     assert report.metrics.empirical_precision == 1
     assert report.metrics.empirical_recall == 1
+    assert report.metrics.calibration_brier_score == 0
+    assert report.metrics.calibration_expected_calibration_error == 0
     assert all(check.passed for check in report.checks)
-    assert len(report.artifact_digests) == 35
+    assert len(report.artifact_digests) == 36
 
 
 def test_explicit_sealer_publishes_only_a_passing_immutable_package(tmp_path):
@@ -486,7 +574,7 @@ def test_explicit_sealer_publishes_only_a_passing_immutable_package(tmp_path):
     assert [item["session"] for item in payload["discovery_audits"]] == [
         session.isoformat() for session in SESSIONS
     ]
-    assert len(sealed.report.artifact_digests) == 35
+    assert len(sealed.report.artifact_digests) == 36
     with pytest.raises(FileExistsError, match="refusing to replace"):
         seal_discovery_evidence_set(
             output,
@@ -673,6 +761,56 @@ def test_empirical_per_session_counts_must_reconcile_to_aggregate(tmp_path):
         )
 
 
+def test_calibration_is_mandatory_and_bad_holdout_is_not_ready(tmp_path):
+    missing_path, missing = _package(tmp_path / "missing-calibration")
+    missing.pop("calibration_artifact")
+    missing_path.write_text(json.dumps(missing, indent=2, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="calibration_artifact"):
+        load_discovery_evidence_manifest(missing_path)
+
+    manifest_path, _ = _package(tmp_path / "bad-calibration")
+
+    def degrade(payload):
+        for item in payload["report"]["reliability_bins"]:
+            item["predicted_quality"] = 0.5
+            item["absolute_error"] = abs(0.5 - item["observed_quality"])
+        payload["report"]["brier_score"] = 0.25
+        payload["report"]["expected_calibration_error"] = 0.5
+        payload["report"]["calibrated_quality_claim_valid"] = False
+        payload["report"]["blocking_reasons"] = [
+            "BRIER_SCORE_FLOOR_NOT_MET",
+            "EXPECTED_CALIBRATION_ERROR_FLOOR_NOT_MET",
+        ]
+        canonical = json.dumps(payload["report"], sort_keys=True, separators=(",", ":"))
+        payload["report_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+
+    _rewrite_artifact(manifest_path, "calibration_artifact", None, degrade)
+    report = evaluate_discovery_evidence_gate(
+        load_discovery_evidence_manifest(manifest_path)
+    )
+    checks = {check.code: check for check in report.checks}
+    assert report.verdict == VERDICT_NOT_READY
+    assert checks["CALIBRATED_QUALITY_HOLDOUT_PASSED"].passed is False
+    assert checks["MAX_CALIBRATION_BRIER_SCORE"].passed is False
+    assert checks["MAX_EXPECTED_CALIBRATION_ERROR"].passed is False
+
+
+def test_calibration_wilson_interval_is_independently_recomputed(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+
+    def tamper(payload):
+        payload["report"]["reliability_bins"][0]["wilson_lower_95"] = 0.0
+        payload["report"]["reliability_bins"][0]["wilson_upper_95"] = 1.0
+        canonical = json.dumps(payload["report"], sort_keys=True, separators=(",", ":"))
+        payload["report_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+
+    _rewrite_artifact(manifest_path, "calibration_artifact", None, tamper)
+    with pytest.raises(ValueError, match="Wilson interval does not match counts"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
+
+
 def test_missing_or_failed_control_keeps_package_not_ready(tmp_path):
     missing_path, missing = _package(tmp_path / "missing")
     missing["control_artifacts"].pop()
@@ -733,10 +871,10 @@ def test_cli_exit_codes_distinguish_ready_not_ready_and_invalid(tmp_path, capsys
 def test_schemas_and_runtime_policy_inventory_are_exact():
     root = Path(__file__).parents[1] / "truth"
     campaign = json.loads(
-        (root / "postmarket_discovery_evidence_campaign_v1.schema.json").read_text()
+        (root / "postmarket_discovery_evidence_campaign_v2.schema.json").read_text()
     )
     evidence = json.loads(
-        (root / "postmarket_discovery_evidence_set_v1.schema.json").read_text()
+        (root / "postmarket_discovery_evidence_set_v2.schema.json").read_text()
     )
     assert set(campaign["$defs"]["policy"]["required"]) == POLICY_FIELDS
     assert set(

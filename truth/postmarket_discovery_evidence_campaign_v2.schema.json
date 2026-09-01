@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_discovery_evidence_campaign_v2.schema.json",
+  "title": "Postmarket market-wide discovery evidence campaign v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "campaign_id", "locked_at_utc",
+    "coverage_start", "coverage_end", "experiment_id",
+    "experiment_manifest_sha256", "rank_version", "policy"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "status": {"const": "locked"},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "locked_at_utc": {"type": "string", "format": "date-time"},
+    "coverage_start": {"type": "string", "format": "date"},
+    "coverage_end": {"type": "string", "format": "date"},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "experiment_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rank_version": {"type": "integer", "minimum": 1},
+    "policy": {"$ref": "#/$defs/policy"}
+  },
+  "$defs": {
+    "nonemptyStrings": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "positiveIntegers": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_clean_sessions", "min_definitive_labels", "min_positive_labels",
+        "min_empirical_recall", "min_empirical_precision",
+        "min_calibration_negative_labels", "min_calibration_bin_labels",
+        "max_calibration_brier_score", "max_expected_calibration_error",
+        "min_primary_recall", "max_primary_detection_latency_seconds",
+        "min_provider_comparable_coverage", "min_provider_bar_overlap_coverage",
+        "min_provider_eligible_pair_agreement", "min_provider_independent_recall",
+        "max_provider_close_difference_bps", "min_window_coverage_pct",
+        "max_discovery_tick_gap_seconds", "max_discovery_processing_latency_seconds",
+        "max_discovery_scheduled_lag_seconds", "allowed_data_feeds",
+        "allowed_primary_market_data_providers",
+        "allowed_independent_market_data_providers", "allowed_independent_datasets",
+        "allowed_audit_versions", "allowed_discovery_versions",
+        "allowed_audit_code_versions", "allowed_observer_code_versions",
+        "allowed_census_code_versions", "allowed_provider_proof_code_versions",
+        "allowed_empirical_code_versions", "allowed_calibration_code_versions",
+        "allowed_control_code_versions", "require_zero_dirty_sessions",
+        "require_complete_session_inventory", "require_zero_unavailable_symbols",
+        "require_zero_provider_price_disagreements", "require_zero_ambiguous_labels",
+        "require_zero_direction_mismatches", "require_zero_duplicate_candidates"
+      ],
+      "properties": {
+        "min_clean_sessions": {"type": "integer", "minimum": 10},
+        "min_definitive_labels": {"type": "integer", "minimum": 1},
+        "min_positive_labels": {"type": "integer", "minimum": 1},
+        "min_empirical_recall": {"type": "number", "minimum": 0.95, "maximum": 1},
+        "min_empirical_precision": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "min_calibration_negative_labels": {"type": "integer", "minimum": 1},
+        "min_calibration_bin_labels": {"type": "integer", "minimum": 1},
+        "max_calibration_brier_score": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.25},
+        "max_expected_calibration_error": {"type": "number", "exclusiveMinimum": 0, "maximum": 0.25},
+        "min_primary_recall": {"type": "number", "minimum": 0.95, "maximum": 1},
+        "max_primary_detection_latency_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 330},
+        "min_provider_comparable_coverage": {"type": "number", "minimum": 0.99, "maximum": 1},
+        "min_provider_bar_overlap_coverage": {"type": "number", "minimum": 0.95, "maximum": 1},
+        "min_provider_eligible_pair_agreement": {"type": "number", "minimum": 0.95, "maximum": 1},
+        "min_provider_independent_recall": {"type": "number", "minimum": 0.95, "maximum": 1},
+        "max_provider_close_difference_bps": {"type": "number", "exclusiveMinimum": 0, "maximum": 50},
+        "min_window_coverage_pct": {"type": "number", "minimum": 99, "maximum": 100},
+        "max_discovery_tick_gap_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 150},
+        "max_discovery_processing_latency_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 30},
+        "max_discovery_scheduled_lag_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 30},
+        "allowed_data_feeds": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_primary_market_data_providers": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_independent_market_data_providers": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_independent_datasets": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_audit_versions": {"$ref": "#/$defs/positiveIntegers"},
+        "allowed_discovery_versions": {"$ref": "#/$defs/positiveIntegers"},
+        "allowed_audit_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_observer_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_census_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_provider_proof_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_empirical_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_calibration_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "allowed_control_code_versions": {"$ref": "#/$defs/nonemptyStrings"},
+        "require_zero_dirty_sessions": {"const": true},
+        "require_complete_session_inventory": {"const": true},
+        "require_zero_unavailable_symbols": {"const": true},
+        "require_zero_provider_price_disagreements": {"const": true},
+        "require_zero_ambiguous_labels": {"const": true},
+        "require_zero_direction_mismatches": {"const": true},
+        "require_zero_duplicate_candidates": {"const": true}
+      }
+    }
+  }
+}

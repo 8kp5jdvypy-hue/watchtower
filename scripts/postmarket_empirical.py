@@ -13,6 +13,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tradebot.journal import code_version, new_run_id
+from tradebot.postmarket_calibration import (
+    CalibrationPolicy,
+    evaluate_rank_calibration,
+    export_calibration_report,
+    fit_rank_calibrator,
+)
 from tradebot.postmarket_empirical import (
     EligibilityRule,
     ExperimentPolicy,
@@ -73,6 +79,35 @@ def parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--experiment-id", required=True)
     evaluate.add_argument("--split", choices=("development", "holdout"), required=True)
     evaluate.add_argument(
+        "--output-dir", type=Path, default=Path("data/postmarket_audits")
+    )
+
+    calibrate = commands.add_parser(
+        "fit-calibration",
+        help="freeze a development-only monotonic calibration before holdout opens",
+    )
+    calibrate.add_argument("--experiment-id", required=True)
+    calibrate.add_argument("--min-training-labels", type=int, required=True)
+    calibrate.add_argument("--min-training-positive-labels", type=int, required=True)
+    calibrate.add_argument("--min-training-negative-labels", type=int, required=True)
+    calibrate.add_argument("--min-holdout-labels", type=int, required=True)
+    calibrate.add_argument("--min-holdout-positive-labels", type=int, required=True)
+    calibrate.add_argument("--min-holdout-negative-labels", type=int, required=True)
+    calibrate.add_argument("--minimum-bin-labels", type=int, required=True)
+    calibrate.add_argument("--max-brier-score", type=float, required=True)
+    calibrate.add_argument(
+        "--max-expected-calibration-error", type=float, required=True
+    )
+
+    calibration_evaluate = commands.add_parser(
+        "evaluate-calibration",
+        help="evaluate one frozen calibration without tuning it",
+    )
+    calibration_evaluate.add_argument("--experiment-id", required=True)
+    calibration_evaluate.add_argument(
+        "--split", choices=("development", "holdout"), required=True
+    )
+    calibration_evaluate.add_argument(
         "--output-dir", type=Path, default=Path("data/postmarket_audits")
     )
     return root
@@ -145,6 +180,43 @@ def main(argv: list[str] | None = None) -> int:
                 evaluated_at=now, code_version=code_version(),
             )
             artifact = export_empirical_report(
+                conn,
+                experiment_id=args.experiment_id,
+                split=args.split,
+                input_digest_sha256=report.input_digest_sha256,
+                output_dir=args.output_dir,
+            )
+            payload = asdict(report)
+            payload["artifact"] = asdict(artifact)
+            _json(payload)
+        elif args.command == "fit-calibration":
+            calibrator = fit_rank_calibrator(
+                conn,
+                experiment_id=args.experiment_id,
+                fitted_at=now,
+                code_version=code_version(),
+                policy=CalibrationPolicy(
+                    args.min_training_labels,
+                    args.min_training_positive_labels,
+                    args.min_training_negative_labels,
+                    args.min_holdout_labels,
+                    args.min_holdout_positive_labels,
+                    args.min_holdout_negative_labels,
+                    args.minimum_bin_labels,
+                    args.max_brier_score,
+                    args.max_expected_calibration_error,
+                ),
+            )
+            _json(asdict(calibrator))
+        elif args.command == "evaluate-calibration":
+            report = evaluate_rank_calibration(
+                conn,
+                experiment_id=args.experiment_id,
+                split=args.split,
+                evaluated_at=now,
+                code_version=code_version(),
+            )
+            artifact = export_calibration_report(
                 conn,
                 experiment_id=args.experiment_id,
                 split=args.split,

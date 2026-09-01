@@ -145,6 +145,7 @@ def seal_discovery_evidence_set(
     recall_census_reports: Iterable[tuple[date, Path | str]],
     provider_proof_reports: Iterable[tuple[date, Path | str]],
     empirical_artifact: Path | str,
+    calibration_artifact: Path | str,
     control_artifacts: Iterable[tuple[str, Path | str]],
 ) -> SealedDiscoveryEvidenceSet:
     """Publish an immutable manifest only for an explicitly passing package."""
@@ -199,6 +200,9 @@ def seal_discovery_evidence_set(
         ),
         "empirical_artifact": _artifact_reference(
             root, Path(empirical_artifact), "empirical artifact"
+        ),
+        "calibration_artifact": _artifact_reference(
+            root, Path(calibration_artifact), "calibration artifact"
         ),
         "control_artifacts": _control_inventory(root, control_artifacts),
     }
@@ -288,6 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
     )
     parser.add_argument("--empirical-artifact", type=Path, required=True)
+    parser.add_argument("--calibration-artifact", type=Path, required=True)
     parser.add_argument("--control", action="append", type=_control_path, required=True)
     args = parser.parse_args(argv)
     try:
@@ -300,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             recall_census_reports=args.recall_census,
             provider_proof_reports=args.provider_proof,
             empirical_artifact=args.empirical_artifact,
+            calibration_artifact=args.calibration_artifact,
             control_artifacts=args.control,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
