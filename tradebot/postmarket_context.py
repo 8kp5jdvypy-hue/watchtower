@@ -19,9 +19,14 @@ from zoneinfo import ZoneInfo
 
 from tradebot.detectors import Bar, atr, bar_close_ts
 from tradebot.marketdata import Quote, partition_intraday_bars
+from tradebot.postmarket_reference_manifest import (
+    CandidateReference,
+    SECTOR_BENCHMARKS,
+    candidate_reference,
+)
 
 
-CONTEXT_VERSION = 1
+CONTEXT_VERSION = 2
 MAX_CONTEXT_ATTEMPTS = 3
 MAX_CONTEXT_BATCH = 100
 MAX_QUOTE_DISTANCE_SECONDS = 180
@@ -62,6 +67,9 @@ CREATE TABLE IF NOT EXISTS postmarket_candidate_context (
     sector_symbol TEXT,
     sector_move_pct REAL,
     sector_relative_move_pct REAL,
+    sector_reference_manifest_id INTEGER,
+    sector_reference_sha256 TEXT,
+    sector_reference_observed_at_utc TEXT,
     quote_status TEXT NOT NULL,
     quote_ts_utc TEXT,
     quote_distance_seconds REAL,
@@ -175,6 +183,9 @@ class ContextEvidence:
     sector_symbol: str | None
     sector_move_pct: float | None
     sector_relative_move_pct: float | None
+    sector_reference_manifest_id: int | None
+    sector_reference_sha256: str | None
+    sector_reference_observed_at_utc: str | None
     quote_status: str
     quote_ts_utc: str | None
     quote_distance_seconds: float | None
@@ -217,6 +228,20 @@ class ContextBackfillResult:
 
 def ensure_context_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(CONTEXT_SCHEMA)
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_candidate_context)")
+    }
+    additions = {
+        "sector_reference_manifest_id": "INTEGER",
+        "sector_reference_sha256": "TEXT",
+        "sector_reference_observed_at_utc": "TEXT",
+    }
+    for column, column_type in additions.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE postmarket_candidate_context ADD COLUMN {column} {column_type}"
+            )
+    conn.commit()
 
 
 def _aware_utc(value: datetime, name: str) -> datetime:
@@ -251,6 +276,77 @@ def _benchmark_move(
     if not postmarket or not _finite_positive(postmarket[-1].close):
         return "NO_COMPLETED_POSTMARKET_BAR", None
     return "AVAILABLE", (postmarket[-1].close / rth[-1].close - 1) * 100
+
+
+def _sector_relative_features(
+    candidate: CandidateFact,
+    *,
+    reference: CandidateReference | None,
+    benchmark_bars: Sequence[Bar],
+    knowable_at: datetime,
+) -> tuple[
+    str,
+    str | None,
+    float | None,
+    float | None,
+    int | None,
+    str | None,
+    str | None,
+]:
+    """Build a causal sector feature only from a locked licensed reference."""
+    if reference is None:
+        return (
+            "UNAVAILABLE_NO_LICENSED_REFERENCE",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    if reference.symbol != candidate.symbol:
+        raise ValueError("sector reference symbol does not match candidate")
+    if reference.benchmark_symbol not in SECTOR_BENCHMARKS:
+        raise ValueError("sector reference benchmark is unsupported")
+    if reference.reference_manifest_id <= 0:
+        raise ValueError("sector reference manifest ID is invalid")
+    detected = _aware_utc(candidate.detected_at, "candidate.detected_at")
+    published = _aware_utc(
+        datetime.fromisoformat(reference.published_at_utc),
+        "reference.published_at_utc",
+    )
+    source_observed = _aware_utc(
+        datetime.fromisoformat(reference.source_observed_at_utc),
+        "reference.source_observed_at_utc",
+    )
+    if date.fromisoformat(reference.effective_date) > candidate.session:
+        raise ValueError("sector reference effective date follows candidate session")
+    if max(published, source_observed) > detected:
+        raise ValueError("sector reference was not knowable at candidate detection")
+    if (
+        len(reference.manifest_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in reference.manifest_sha256)
+    ):
+        raise ValueError("sector reference manifest digest is invalid")
+    status, sector_move = _benchmark_move(
+        benchmark_bars,
+        session=candidate.session,
+        knowable_at=knowable_at,
+    )
+    relative_move = (
+        candidate.move_pct - sector_move
+        if sector_move is not None
+        else None
+    )
+    return (
+        status,
+        reference.benchmark_symbol,
+        sector_move,
+        relative_move,
+        reference.reference_manifest_id,
+        reference.manifest_sha256,
+        source_observed.isoformat(),
+    )
 
 
 def _quote_features(
@@ -318,6 +414,8 @@ def build_context_evidence(
     quote: Quote | None,
     asset: AssetFact,
     catalysts: Sequence[CatalystFact],
+    sector_reference: CandidateReference | None = None,
+    sector_benchmark_bars: Sequence[Bar] = (),
     operational_errors: Sequence[str] = (),
 ) -> ContextEvidence:
     observed = _aware_utc(observed_at, "observed_at")
@@ -338,6 +436,12 @@ def build_context_evidence(
     directional_excess = (
         market_relative * (1 if candidate.direction == "up" else -1)
         if market_relative is not None else None
+    )
+    sector = _sector_relative_features(
+        candidate,
+        reference=sector_reference,
+        benchmark_bars=sector_benchmark_bars,
+        knowable_at=knowable_at,
     )
     quote_status, quote_values, quote_issues = _quote_features(
         quote, detected_at=detected
@@ -399,15 +503,12 @@ def build_context_evidence(
         issues.append("ASSET_NOT_TRADABLE")
     if catalyst_status != "VERIFIED":
         issues.append("CATALYST_UNEXPLAINED")
-    issues.extend(
-        (
-            "SECTOR_RELATIVE_UNAVAILABLE",
-            "IMPLIED_EXPECTED_MOVE_UNAVAILABLE",
-            "FLOAT_UNAVAILABLE",
-            "MARKET_CAP_UNAVAILABLE",
-            "HALT_STATUS_UNAVAILABLE",
-        )
-    )
+    if sector[0] != "AVAILABLE":
+        issues.append(f"SECTOR_RELATIVE_{sector[0]}")
+    issues.append("IMPLIED_EXPECTED_MOVE_UNAVAILABLE")
+    if sector_reference is None or sector_reference.float_shares is None:
+        issues.append("FLOAT_UNAVAILABLE")
+    issues.extend(("MARKET_CAP_UNAVAILABLE", "HALT_STATUS_UNAVAILABLE"))
     unique_issues = tuple(dict.fromkeys(issues))
     status = "degraded" if operational_errors else "complete"
     return ContextEvidence(
@@ -435,10 +536,13 @@ def build_context_evidence(
         benchmark_move_pct=benchmark_move,
         market_relative_move_pct=market_relative,
         directional_market_excess_pct=directional_excess,
-        sector_relative_status="UNAVAILABLE_NO_SECTOR_CLASSIFICATION_SOURCE",
-        sector_symbol=None,
-        sector_move_pct=None,
-        sector_relative_move_pct=None,
+        sector_relative_status=sector[0],
+        sector_symbol=sector[1],
+        sector_move_pct=sector[2],
+        sector_relative_move_pct=sector[3],
+        sector_reference_manifest_id=sector[4],
+        sector_reference_sha256=sector[5],
+        sector_reference_observed_at_utc=sector[6],
         quote_status=quote_status,
         quote_ts_utc=quote_values.get("quote_ts_utc"),
         quote_distance_seconds=quote_values.get("quote_distance_seconds"),
@@ -458,7 +562,11 @@ def build_context_evidence(
         tradable=asset.tradable,
         options_enabled=asset.options_enabled,
         overnight_eligible=asset.overnight_eligible,
-        float_status="UNAVAILABLE_NO_SOURCE",
+        float_status=(
+            "AVAILABLE_LICENSED_REFERENCE"
+            if sector_reference is not None and sector_reference.float_shares is not None
+            else "UNAVAILABLE_NO_SOURCE"
+        ),
         market_cap_status="UNAVAILABLE_NO_SOURCE",
         halt_status="UNAVAILABLE_NO_POINT_IN_TIME_SOURCE",
         catalyst_status=catalyst_status,
@@ -608,6 +716,8 @@ def record_context(
         evidence.market_relative_move_pct, evidence.directional_market_excess_pct,
         evidence.sector_relative_status, evidence.sector_symbol,
         evidence.sector_move_pct, evidence.sector_relative_move_pct,
+        evidence.sector_reference_manifest_id, evidence.sector_reference_sha256,
+        evidence.sector_reference_observed_at_utc,
         evidence.quote_status, evidence.quote_ts_utc,
         evidence.quote_distance_seconds, evidence.bid, evidence.ask,
         evidence.bid_size, evidence.ask_size, evidence.spread_bps,
@@ -637,7 +747,9 @@ def record_context(
                  market_relative_status,benchmark_symbol,benchmark_move_pct,
                  market_relative_move_pct,directional_market_excess_pct,
                  sector_relative_status,sector_symbol,sector_move_pct,
-                 sector_relative_move_pct,quote_status,quote_ts_utc,
+                 sector_relative_move_pct,sector_reference_manifest_id,
+                 sector_reference_sha256,sector_reference_observed_at_utc,
+                 quote_status,quote_ts_utc,
                  quote_distance_seconds,bid,ask,bid_size,ask_size,spread_bps,
                  quoted_depth_notional,liquidity_status,rth_volume,
                  rth_dollar_volume,postmarket_notional,asset_status,
@@ -683,6 +795,7 @@ def latest_context_summary(conn: sqlite3.Connection) -> dict | None:
             SUM(status='degraded'),
             SUM(volatility_status='AVAILABLE'),
             SUM(market_relative_status='AVAILABLE'),
+            SUM(sector_relative_status='AVAILABLE'),
             SUM(quote_status='AVAILABLE'),
             SUM(liquidity_status='AVAILABLE'),
             SUM(catalyst_status='VERIFIED')
@@ -701,9 +814,10 @@ def latest_context_summary(conn: sqlite3.Connection) -> dict | None:
         "degraded": int(row[3] or 0),
         "volatility_available": int(row[4] or 0),
         "market_relative_available": int(row[5] or 0),
-        "quote_available": int(row[6] or 0),
-        "liquidity_available": int(row[7] or 0),
-        "verified_catalysts": int(row[8] or 0),
+        "sector_relative_available": int(row[6] or 0),
+        "quote_available": int(row[7] or 0),
+        "liquidity_available": int(row[8] or 0),
+        "verified_catalysts": int(row[9] or 0),
     }
 
 
@@ -729,6 +843,15 @@ def run_context_backfill(
         return ContextBackfillResult(0, 0, 0, 0, 0)
     symbols = sorted({candidate.symbol for candidate in candidates})
     assets = asset_facts(universe_conn, symbols)
+    references = {
+        candidate.candidate_id: candidate_reference(
+            shadow_conn,
+            symbol=candidate.symbol,
+            session=candidate.session,
+            detected_at=candidate.detected_at,
+        )
+        for candidate in candidates
+    }
     errors: list[str] = []
     try:
         daily = dict(daily_fetch(symbols))
@@ -743,9 +866,18 @@ def run_context_backfill(
     intraday_by_session: dict[date, dict[str, Sequence[Bar]]] = {}
     intraday_errors: dict[date, str] = {}
     for session in sorted({candidate.session for candidate in candidates}):
+        session_candidates = [
+            candidate for candidate in candidates if candidate.session == session
+        ]
+        sector_symbols = {
+            reference.benchmark_symbol
+            for candidate in session_candidates
+            if (reference := references[candidate.candidate_id]) is not None
+        }
         session_symbols = sorted(
-            {candidate.symbol for candidate in candidates if candidate.session == session}
+            {candidate.symbol for candidate in session_candidates}
             | {BENCHMARK_SYMBOL}
+            | sector_symbols
         )
         try:
             intraday_by_session[session] = dict(intraday_fetch(session_symbols, session))
@@ -758,6 +890,7 @@ def run_context_backfill(
     degraded = 0
     for candidate in candidates:
         session_bars = intraday_by_session[candidate.session]
+        reference = references[candidate.candidate_id]
         candidate_errors = list(errors)
         if candidate.session in intraday_errors:
             candidate_errors.append(intraday_errors[candidate.session])
@@ -767,6 +900,8 @@ def run_context_backfill(
             candidate_errors.append("INTRADAY_BARS_UNAVAILABLE")
         if BENCHMARK_SYMBOL not in session_bars:
             candidate_errors.append("BENCHMARK_BARS_UNAVAILABLE")
+        if reference is not None and reference.benchmark_symbol not in session_bars:
+            candidate_errors.append("SECTOR_BENCHMARK_BARS_UNAVAILABLE")
         if candidate.symbol not in quotes:
             candidate_errors.append("QUOTE_UNAVAILABLE")
         if candidate.symbol not in assets:
@@ -781,6 +916,11 @@ def run_context_backfill(
             quote=quotes.get(candidate.symbol),
             asset=assets.get(candidate.symbol, AssetFact("UNAVAILABLE")),
             catalysts=catalyst_facts(journal_conn, candidate),
+            sector_reference=reference,
+            sector_benchmark_bars=(
+                session_bars.get(reference.benchmark_symbol, ())
+                if reference is not None else ()
+            ),
             operational_errors=candidate_errors,
         )
         record_context(shadow_conn, evidence)
