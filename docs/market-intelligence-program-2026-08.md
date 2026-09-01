@@ -295,6 +295,15 @@ evidence.
   calibration error all fail closed. The raw evidence score remains a
   heuristic, and no calibrated probability exists until real holdout evidence
   passes every gate.
+- Customer-readiness upstream evidence binding: implemented on a stacked
+  review branch, not merged, deployed, or campaign-authorized. A passing
+  market-wide discovery package is now sealed into an immutable artifact that
+  reopens the exact manifest and reproduces the complete gate report. Dry-run
+  campaign lock, preflight, backup custody, and final aggregate review all
+  require those exact two files and their digests; matching strings alone can
+  no longer bridge discovery evidence into customer readiness. This creates no
+  alert path and does not waive the clean-session, holdout, provider, recall,
+  calibration, or independent-review floors.
 - Owner visibility bridge: implemented as a separate default-off service that
   reads the shadow ledger in SQLite read-only mode and can enqueue a fresh,
   already-qualified candidate to one explicit administrator chat. Discovery

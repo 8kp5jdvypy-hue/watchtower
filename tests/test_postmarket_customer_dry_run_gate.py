@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from tradebot import postmarket_customer_dry_run_gate as gate
+from tradebot import postmarket_customer_dry_run_campaign as campaign_module
 from tradebot.postmarket_customer_dry_run_campaign import (
     POLICY_FIELDS,
     lock_customer_dry_run_campaign,
@@ -120,6 +121,21 @@ def _review_payload(route_id, case_sha, reviewed_at, rubric):
 
 
 def _fixture(tmp_path, monkeypatch):
+    upstream_set = tmp_path / "upstream-evidence-set.json"
+    upstream_gate = tmp_path / "upstream-evidence-gate.json"
+    upstream_set.write_text("{}\n")
+    upstream_gate.write_text("{}\n")
+    upstream = SimpleNamespace(
+        evidence_set_sha256="1" * 64,
+        gate_artifact_sha256="2" * 64,
+        gate_code_version=REVISION,
+        evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+        report=SimpleNamespace(rank_version=1),
+    )
+    monkeypatch.setattr(
+        campaign_module, "verify_discovery_gate_artifact", lambda *args: upstream
+    )
+    monkeypatch.setattr(gate, "verify_discovery_gate_artifact", lambda *args: upstream)
     controls = []
     control_digests = []
     for index, kind in enumerate(sorted(gate.REQUIRED_CONTROL_KINDS)):
@@ -135,6 +151,8 @@ def _fixture(tmp_path, monkeypatch):
         coverage_end=END,
         delivery_policy_payload=_delivery_policy(),
         owner_authorization_payload=_authorization(),
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
         control_evidence_sha256s=tuple(control_digests),
         policy=_campaign_policy(),
     )
@@ -244,13 +262,18 @@ def _fixture(tmp_path, monkeypatch):
             "case_evidence_sha256": case_by_route[route_id]
         },
     )
-    return campaign_path, audit_dir, tuple(controls), database
+    return campaign_path, upstream_set, upstream_gate, audit_dir, tuple(controls), database
 
 
 def test_complete_locked_campaign_is_only_eligible_for_separate_review(tmp_path, monkeypatch):
-    campaign, audits, controls, database = _fixture(tmp_path, monkeypatch)
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
     report = evaluate_customer_dry_run_gate(
-        campaign_path=campaign, audit_dir=audits, control_paths=controls,
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits, control_paths=controls,
         db_path=database, now=NOW, gate_code_version=REVISION,
     )
     assert report.verdict == VERDICT_REVIEW
@@ -264,11 +287,16 @@ def test_complete_locked_campaign_is_only_eligible_for_separate_review(tmp_path,
 
 
 def test_missing_session_or_premature_campaign_fails_closed(tmp_path, monkeypatch):
-    campaign, audits, controls, database = _fixture(tmp_path, monkeypatch)
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
     for path in list(audits.glob("*.json"))[:5]:
         path.unlink()
     report = evaluate_customer_dry_run_gate(
-        campaign_path=campaign, audit_dir=audits, control_paths=controls,
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits, control_paths=controls,
         db_path=database,
         now=datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
         gate_code_version=REVISION,
@@ -280,9 +308,14 @@ def test_missing_session_or_premature_campaign_fails_closed(tmp_path, monkeypatc
 
 
 def test_gate_report_is_immutable_and_never_enables_delivery(tmp_path, monkeypatch):
-    campaign, audits, controls, database = _fixture(tmp_path, monkeypatch)
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
     report = evaluate_customer_dry_run_gate(
-        campaign_path=campaign, audit_dir=audits, control_paths=controls,
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits, control_paths=controls,
         db_path=database, now=NOW, gate_code_version=REVISION,
     )
     output = tmp_path / "gate.json"
@@ -291,7 +324,7 @@ def test_gate_report_is_immutable_and_never_enables_delivery(tmp_path, monkeypat
     assert stat.S_IMODE(output.stat().st_mode) == 0o444
     assert json.loads(output.read_text())["customer_delivery_enabled"] is False
     schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_gate_v1.schema.json"
+        "truth/postmarket_customer_dry_run_gate_v2.schema.json"
     ).read_text())
     assert set(json.loads(output.read_text())) == set(schema["required"])
     assert set(json.loads(output.read_text())["metrics"]) == set(
@@ -299,3 +332,36 @@ def test_gate_report_is_immutable_and_never_enables_delivery(tmp_path, monkeypat
     )
     with pytest.raises(FileExistsError):
         write_gate_report_atomic(output, report)
+
+
+def test_gate_rejects_upstream_artifact_that_no_longer_matches_campaign(
+    tmp_path, monkeypatch
+):
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        gate,
+        "verify_discovery_gate_artifact",
+        lambda *args: SimpleNamespace(
+            evidence_set_sha256="f" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    report = evaluate_customer_dry_run_gate(
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits,
+        control_paths=controls,
+        db_path=database,
+        now=NOW,
+        gate_code_version=REVISION,
+    )
+    assert report.verdict == VERDICT_NOT_READY
+    assert "UPSTREAM_DISCOVERY_EVIDENCE_EXACT" in {
+        check.code for check in report.checks if not check.passed
+    }

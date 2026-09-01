@@ -108,6 +108,30 @@ aggregate metric, revision/provider inventory, and artifact digest. Preserve
 the campaign, evidence set, gate output, and referenced artifacts in the
 encrypted off-box backup before owner review.
 
+## Freeze the passing gate decision
+
+A printed report is not itself an authorization input. After a clean
+re-evaluation, seal the exact passing manifest and reproduced report into one
+immutable gate artifact:
+
+```bash
+python -m tradebot.postmarket_discovery_gate_artifact \
+  data/postmarket_evidence/campaign-1/evidence-set.json \
+  data/postmarket_evidence/campaign-1/discovery-gate.json \
+  --gate-code-version "$(git rev-parse --short HEAD)"
+```
+
+The writer refuses a non-passing evidence set, backdated evaluation, symlink,
+or replacement. Verification reopens the exact manifest, checks both file
+digests, re-runs the complete gate, and requires the canonical report to
+reproduce exactly. The artifact conforms to
+`truth/postmarket_discovery_gate_artifact_v1.schema.json`.
+
+Any later customer-readiness policy, owner authorization, dry-run campaign,
+preflight, or aggregate gate must bind both the evidence-set digest and this
+gate-artifact digest. A matching string without both independently verifiable
+files is not evidence and cannot authorize a campaign.
+
 ## Fail-closed boundaries
 
 The evaluator recomputes count identities, recalls, provider coverage,

@@ -8,9 +8,11 @@ import tarfile
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from scripts import postmarket_customer_dry_run_preflight as preflight_module
 from scripts.postmarket_customer_dry_run_preflight import (
     evaluate_customer_dry_run_preflight,
     write_preflight_atomic,
@@ -19,6 +21,7 @@ from tradebot.postmarket_customer_dry_run_campaign import (
     POLICY_FIELDS,
     lock_customer_dry_run_campaign,
 )
+from tradebot import postmarket_customer_dry_run_campaign as campaign_module
 from tradebot.postmarket_customer_dry_run_gate import REQUIRED_CONTROL_KINDS
 from tradebot.postmarket_delivery_readiness import (
     ACKNOWLEDGEMENT,
@@ -63,7 +66,9 @@ def _control(path, kind, revision):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _backup(root, *, policy, authorization, campaign, controls):
+def _backup(
+    root, *, policy, authorization, campaign, controls, upstream_set, upstream_gate
+):
     root.mkdir()
     files = []
     for name in ("journal", "users", "evaluations", "postmarket_shadow", "universe"):
@@ -122,6 +127,14 @@ def _backup(root, *, policy, authorization, campaign, controls):
             )
             member.size = len(raw)
             archive.addfile(member, io.BytesIO(raw))
+        for name, path in (
+            ("postmarket_evidence/upstream/discovery_evidence_set.json", upstream_set),
+            ("postmarket_evidence/upstream/discovery_evidence_gate.json", upstream_gate),
+        ):
+            raw = path.read_bytes()
+            member = tarfile.TarInfo(name)
+            member.size = len(raw)
+            archive.addfile(member, io.BytesIO(raw))
     files.append(artifacts)
     manifest = root / f"manifest_{STAMP}.sha256"
     manifest.write_text("".join(
@@ -131,7 +144,7 @@ def _backup(root, *, policy, authorization, campaign, controls):
     return manifest
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, monkeypatch):
     repo, full_revision = _repo(tmp_path)
     revision = full_revision[:7]
     env = tmp_path / ".env"
@@ -166,6 +179,23 @@ services:
         "allowed_feeds": ["sip"],
     }
     policy = parse_delivery_policy(policy_payload)
+    upstream_set = tmp_path / "upstream-evidence-set.json"
+    upstream_gate = tmp_path / "upstream-evidence-gate.json"
+    upstream_set.write_text("{}\n")
+    upstream_gate.write_text("{}\n")
+    upstream = SimpleNamespace(
+        evidence_set_sha256=policy.evidence_set_sha256,
+        gate_artifact_sha256=policy.evidence_gate_sha256,
+        gate_code_version=revision,
+        evaluated_at_utc=datetime(2026, 8, 27, 12, tzinfo=timezone.utc),
+        report=SimpleNamespace(rank_version=1),
+    )
+    monkeypatch.setattr(
+        campaign_module, "verify_discovery_gate_artifact", lambda *args: upstream
+    )
+    monkeypatch.setattr(
+        preflight_module, "verify_discovery_gate_artifact", lambda *args: upstream
+    )
     auth_payload = {
         "schema_version": 1, "release_id": "release-1",
         "approved_by": "owner@example.com",
@@ -196,6 +226,8 @@ services:
         coverage_start=date(2026, 8, 31), coverage_end=date(2026, 9, 18),
         delivery_policy_payload=policy_payload,
         owner_authorization_payload=auth_payload,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
         control_evidence_sha256s=tuple(control_digests), policy=campaign_policy,
     )
     database = tmp_path / "postmarket_shadow.db"
@@ -210,25 +242,28 @@ services:
     return {
         "repo_root": repo, "expected_revision": full_revision,
         "env_file": env, "compose_file": compose, "campaign_path": campaign,
+        "upstream_discovery_evidence_set_path": upstream_set,
+        "upstream_discovery_evidence_gate_path": upstream_gate,
         "delivery_policy_path": policy_path, "owner_authorization_path": auth_path,
         "control_paths": tuple(controls), "database_path": database,
         "backup_manifest": _backup(
             tmp_path / "backups", policy=policy_path,
             authorization=auth_path, campaign=campaign, controls=controls,
+            upstream_set=upstream_set, upstream_gate=upstream_gate,
         ), "now": NOW,
         "max_backup_age_seconds": 7200, "min_free_bytes": 0,
     }
 
 
-def test_complete_preflight_is_safe_but_does_not_enable_anything(tmp_path):
-    report = evaluate_customer_dry_run_preflight(**_fixture(tmp_path))
+def test_complete_preflight_is_safe_but_does_not_enable_anything(tmp_path, monkeypatch):
+    report = evaluate_customer_dry_run_preflight(**_fixture(tmp_path, monkeypatch))
     assert report.safe_to_begin_customer_dry_run_campaign is True
     assert report.customer_delivery_enabled is False
     assert all(check.passed for check in report.checks)
 
 
-def test_enabled_switch_or_started_campaign_fails_closed(tmp_path):
-    args = _fixture(tmp_path)
+def test_enabled_switch_or_started_campaign_fails_closed(tmp_path, monkeypatch):
+    args = _fixture(tmp_path, monkeypatch)
     args["env_file"].write_text("POSTMARKET_CUSTOMER_DRY_RUN_ENABLED=1\n")
     args["now"] = datetime(2026, 8, 31, 15, tzinfo=timezone.utc)
     report = evaluate_customer_dry_run_preflight(**args)
@@ -237,8 +272,8 @@ def test_enabled_switch_or_started_campaign_fails_closed(tmp_path):
     assert {"customer_dry_run_switch_off", "campaign_not_started"} <= failed
 
 
-def test_partial_schema_or_dirty_revision_fails_closed(tmp_path):
-    args = _fixture(tmp_path)
+def test_partial_schema_or_dirty_revision_fails_closed(tmp_path, monkeypatch):
+    args = _fixture(tmp_path, monkeypatch)
     conn = sqlite3.connect(args["database_path"])
     conn.execute("CREATE TABLE postmarket_delivery_dry_runs (id INTEGER)")
     conn.commit()
@@ -249,8 +284,8 @@ def test_partial_schema_or_dirty_revision_fails_closed(tmp_path):
     assert {"dry_run_schema_absent_or_complete", "clean_worktree"} <= failed
 
 
-def test_preflight_artifact_is_immutable_and_false_activation(tmp_path):
-    report = evaluate_customer_dry_run_preflight(**_fixture(tmp_path))
+def test_preflight_artifact_is_immutable_and_false_activation(tmp_path, monkeypatch):
+    report = evaluate_customer_dry_run_preflight(**_fixture(tmp_path, monkeypatch))
     output = tmp_path / "preflight.json"
     digest = write_preflight_atomic(output, report)
     assert len(digest) == 64
@@ -261,3 +296,23 @@ def test_preflight_artifact_is_immutable_and_false_activation(tmp_path):
     assert set(asdict(report)) == set(schema["required"])
     with pytest.raises(FileExistsError):
         write_preflight_atomic(output, report)
+
+
+def test_preflight_fails_when_upstream_gate_binding_changes(tmp_path, monkeypatch):
+    args = _fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        preflight_module,
+        "verify_discovery_gate_artifact",
+        lambda *unused: SimpleNamespace(
+            evidence_set_sha256="f" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=args["expected_revision"][:7],
+            evaluated_at_utc=datetime(2026, 8, 27, 12, tzinfo=timezone.utc),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    report = evaluate_customer_dry_run_preflight(**args)
+    assert not report.safe_to_begin_customer_dry_run_campaign
+    assert "upstream_discovery_evidence_exact" in {
+        check.name for check in report.checks if not check.passed
+    }

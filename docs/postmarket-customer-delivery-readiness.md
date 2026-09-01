@@ -94,8 +94,13 @@ Before any session may count, an owner-approved dry-run campaign must be
 locked with `tradebot.postmarket_customer_dry_run_campaign`. The immutable
 contract names every expected XNYS session and binds the exact delivery
 policy, owner authorization, release, rank/router/audit versions, four control
-artifacts, operational limits, case-count floors, and independent-review
-requirements. It must be created before the first covered session opens, and
+artifacts, operational limits, case-count floors, independent-review
+requirements, and the exact upstream discovery evidence set plus its
+reproducible passing gate artifact. Campaign locking reopens both upstream
+files, re-runs the discovery gate, verifies the rank version and allowed gate
+revision, and rejects owner authorization that predates the gate decision.
+Digest strings alone cannot satisfy this boundary. It must be created before
+the first covered session opens, and
 the authorization must remain valid through the final session audit. The
 campaign requires at least ten clean sessions, twenty eligible decisions,
 twenty independently reviewed cases across at least ten symbols, at least 90%
@@ -142,8 +147,9 @@ mutation is the append-only review row.
 
 `tradebot.postmarket_customer_dry_run_gate` is the final aggregate dry-run
 check. It reopens the append-only database read-only, recomputes every covered
-daily audit, verifies the exact campaign and four control digests, reconciles
-unique actionable routes, reproduces every review payload and blinded case,
+daily audit, independently re-verifies the exact upstream discovery evidence
+set and passing gate artifact, verifies the exact campaign and four control
+digests, reconciles unique actionable routes, reproduces every review payload and blinded case,
 and applies the preregistered session, latency, case-count, approval, and
 zero-failure rules. Its strongest possible verdict is
 `ELIGIBLE_FOR_SEPARATE_CUSTOMER_DELIVERY_REVIEW`; the report always records
@@ -155,9 +161,10 @@ and cannot create or operate a customer-delivery path.
 Immediately before the first covered session—and while the observer switch is
 still off—run the read-only preflight from the exact clean `origin/main`
 revision. It verifies the locked campaign, policy, owner authorization, four
-control digests, Compose isolation/default, database integrity and upstream
-schema, free space, and a recent verified backup whose encrypted artifact set
-contains the exact three campaign contracts and all four controls.
+control digests, the exact reproducible upstream discovery evidence package,
+Compose isolation/default, database integrity and upstream schema, free space,
+and a recent verified backup whose encrypted artifact set contains the exact
+three campaign contracts, both upstream files, and all four controls.
 
 ```bash
 python scripts/postmarket_customer_dry_run_preflight.py \
@@ -166,6 +173,8 @@ python scripts/postmarket_customer_dry_run_preflight.py \
   --env-file /opt/perch/.env \
   --compose-file /opt/perch/docker-compose.yml \
   --campaign /opt/perch/data/postmarket_customer_dry_run_campaign.json \
+  --upstream-discovery-evidence-set /opt/perch/data/postmarket_evidence/CAMPAIGN/evidence-set.json \
+  --upstream-discovery-evidence-gate /opt/perch/data/postmarket_evidence/CAMPAIGN/discovery-gate.json \
   --delivery-policy /opt/perch/data/postmarket_customer_delivery_policy.json \
   --owner-authorization /opt/perch/data/postmarket_customer_delivery_authorization.json \
   --control CONTROL_1.json --control CONTROL_2.json \

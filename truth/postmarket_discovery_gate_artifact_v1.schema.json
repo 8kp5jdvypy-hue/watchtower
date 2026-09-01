@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_discovery_gate_artifact_v1.schema.json",
+  "title": "Postmarket discovery evidence gate artifact v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_type",
+    "evaluated_at_utc",
+    "gate_code_version",
+    "evidence_set_sha256",
+    "report_sha256",
+    "report"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "artifact_type": {"const": "postmarket_discovery_evidence_gate"},
+    "evaluated_at_utc": {"type": "string", "format": "date-time"},
+    "gate_code_version": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "evidence_set_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "report": {
+      "type": "object",
+      "required": ["verdict", "checks", "metrics", "artifact_digests"]
+    }
+  }
+}
