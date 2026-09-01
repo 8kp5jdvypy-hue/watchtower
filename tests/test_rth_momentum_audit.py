@@ -5,7 +5,12 @@ import sqlite3
 from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 
-from tradebot.rth_momentum import RTH_SCHEMA, ensure_rth_schema
+from tradebot.rth_momentum import (
+    FULL_UNIVERSE_RTH_SWEEP_SOURCE,
+    RTH_SCHEMA,
+    ensure_rth_schema,
+    plan_rth_universe_sweep,
+)
 from tradebot.rth_momentum_audit import (
     build_rth_momentum_audit,
     latest_rth_audit_summary,
@@ -29,29 +34,87 @@ def _insert_tick(
     invariant_ok: int = 1,
     errors: int = 0,
     missed: int = 0,
+    sweep_index_delta: int = 0,
+    omit_sweep_observation: bool = False,
 ) -> None:
-    conn.execute(
+    active = {f"SYM{index}" for index in range(5)}
+    sweep = plan_rth_universe_sweep(
+        active,
+        scheduled_tick_utc=scheduled,
+        window_start=WINDOW_START,
+    )
+    cursor = conn.execute(
         """
         INSERT INTO rth_momentum_ticks
           (session,scheduled_tick_utc,tick_utc,completed_utc,window_start_utc,
            session_close_utc,momentum_version,run_mode,run_id,code_version,
            data_feed,market_data_provider,universe_symbols,provider_screen_rows,
-           provider_screen_unique_symbols,scheduled_symbols,selected_symbols,
+           provider_screen_unique_symbols,scheduled_symbols,
+           sweep_universe_sha256,sweep_cycle_ticks,sweep_shard_index,
+           sweep_shard_count,sweep_shard_size,sweep_shard_symbols,
+           sweep_overlap_symbols,selected_symbols,
            intraday_symbols_fetched,daily_symbols_fetched,evaluated_symbols,
            candidate_observations,new_candidates,invariant_ok,error_count,
            missed_cycles,scheduled_lag_ms,screen_latency_ms,selection_latency_ms,
            bar_fetch_latency_ms,evaluation_latency_ms,total_latency_ms,thresholds_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             SESSION.isoformat(), scheduled.isoformat(), scheduled.isoformat(),
             (scheduled + timedelta(seconds=1)).isoformat(), WINDOW_START.isoformat(),
             CLOSE.isoformat(), 1, "test", f"run-{scheduled.minute}", "abc1234",
-            "sip", "alpaca", 13_000, 200, 170, 0, selected, selected, selected,
+            "sip", "alpaca", 5, 200, 170, 0, sweep.universe_sha256,
+            sweep.cycle_ticks, sweep.shard_index + sweep_index_delta,
+            sweep.shard_count,
+            sweep.shard_size, len(sweep.symbols), 0, selected, selected, selected,
             evaluated, 0, 0, invariant_ok, errors, missed, 0, 10, 5, 100, 20,
             135, "{}",
         ),
     )
+    tick_id = int(cursor.lastrowid)
+    sweep_symbol = sweep.symbols[0]
+    sweep_evidence = ({
+        "source": FULL_UNIVERSE_RTH_SWEEP_SOURCE,
+        "scheduled_tick_utc": scheduled.isoformat(),
+        "universe_sha256": sweep.universe_sha256,
+        "universe_position": sweep.shard_start,
+        "cycle_ticks": sweep.cycle_ticks,
+        "shard_index": sweep.shard_index + sweep_index_delta,
+        "shard_count": sweep.shard_count,
+        "shard_size": sweep.shard_size,
+    },)
+    rows = [] if omit_sweep_observation else [
+        (
+            sweep_symbol,
+            (FULL_UNIVERSE_RTH_SWEEP_SOURCE,),
+            sweep_evidence,
+        )
+    ]
+    rows.extend(
+        (f"BOUND{index}", ("market_gainer",), ())
+        for index in range(max(0, selected - 1))
+    )
+    for symbol, sources, evidence in rows:
+        conn.execute(
+            """
+            INSERT INTO rth_momentum_observations
+              (tick_id,session,symbol,sources_json,ranks_json,
+               screen_evidence_json,outcome,reason,prior_close,
+               bar_open_ts_utc,open,high,low,close,volume,
+               cumulative_volume,cumulative_notional,move_pct,direction,
+               persistence_bars,data_age_seconds,data_feed,
+               market_data_provider,bar_timeframe)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                tick_id, SESSION.isoformat(), symbol,
+                json.dumps(sources, separators=(",", ":")), "[]",
+                json.dumps(evidence, separators=(",", ":")),
+                "BELOW_MOVE", "fixture", 100.0, None, None, None, None,
+                None, None, None, None, 0.0, None, 0, None, "sip",
+                "alpaca", "5Min",
+            ),
+        )
 
 
 def _insert_full_window(conn: sqlite3.Connection) -> None:
@@ -80,6 +143,10 @@ def test_full_window_is_clean_and_restores_connection_row_factory():
     assert report.operational.expected_ticks == 31
     assert report.operational.ticks == 31
     assert report.operational.coverage_pct == 100.0
+    assert report.operational.sweep_ticks == 31
+    assert report.operational.sweep_cycle_ticks == 5
+    assert report.operational.complete_sweep_cycles == 6
+    assert report.operational.sweep_symbols_total == 31
     assert report.operational.average_stage_latency_ms == {
         "screen_latency_ms": 10.0,
         "selection_latency_ms": 5.0,
@@ -118,6 +185,36 @@ def test_gap_and_conservation_failure_block_evidence():
         "TICK_GAP",
         "FAILED_INVARIANT",
         "SELECTION_EVALUATION_MISMATCH",
+    } <= codes
+
+
+def test_sweep_sequence_and_observation_loss_block_evidence():
+    conn = sqlite3.connect(":memory:")
+    ensure_rth_schema(conn)
+    for minute in range(31):
+        _insert_tick(
+            conn,
+            scheduled=WINDOW_START + timedelta(minutes=minute),
+            sweep_index_delta=1 if minute == 0 else 0,
+            omit_sweep_observation=minute == 10,
+        )
+    conn.commit()
+
+    report = build_rth_momentum_audit(
+        conn,
+        session=SESSION,
+        database="shadow.db",
+        audit_code_version="abc1234",
+    )
+    codes = {issue.code for issue in report.issues}
+
+    assert report.operational_clean is False
+    assert report.session_evidence_eligible is False
+    assert {
+        "SWEEP_SHARD_SEQUENCE",
+        "OBSERVATION_CONSERVATION",
+        "SWEEP_OBSERVATION_MISMATCH",
+        "SWEEP_CYCLE_COVERAGE",
     } <= codes
 
 
@@ -233,7 +330,7 @@ def test_completed_audit_write_is_immutable_and_summarized(tmp_path):
         audit_code_version="abc1234",
     )
     assert len(written) == 1
-    path = audit_dir / "rth_momentum_audit_2026-08-31_v1.json"
+    path = audit_dir / "rth_momentum_audit_2026-08-31_v2.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["session_evidence_eligible"] is True
     assert path.stat().st_mode & 0o222 == 0

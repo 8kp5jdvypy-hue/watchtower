@@ -1,9 +1,9 @@
 # Daily full-market RTH missed-mover census
 
-The final-RTH fast lane is intentionally bounded. A healthy fast lane therefore
-cannot prove that every important regular-session mover entered it. This census
-runs after the full postmarket evidence window and measures that blind spot over
-the canonical active universe.
+The final-RTH observer combines bounded fast admission with a deterministic
+full-universe sweep. Neither lane may certify its own recall. This census runs
+after the full postmarket evidence window and measures the remaining blind spot
+over the canonical active universe.
 
 It is an audit, not a signal generator. It cannot create candidates, change
 thresholds, send notifications, or reach a broker/order path.
@@ -34,8 +34,10 @@ Every major-close symbol/direction is compared with the append-only final-RTH
 candidate ledger. A miss receives one deterministic reason:
 
 - `RTH_LANE_NOT_RUNNING`: the session has no final-RTH ticks;
-- `NOT_SELECTED_BY_BOUNDED_RTH_LANE`: the lane ran but never evaluated the
-  symbol; or
+- `NOT_SELECTED_BY_BOUNDED_RTH_LANE`: a historical bounded-only lane ran but
+  never evaluated the symbol;
+- `NOT_OBSERVED_BY_FULL_UNIVERSE_RTH_SWEEP`: the deterministic sweep was active
+  but no observation exists, which is a coverage/invariant failure; or
 - `SELECTED_NOT_QUALIFIED:<outcomes>`: the symbol was evaluated and the exact
   live rejection outcomes are retained.
 

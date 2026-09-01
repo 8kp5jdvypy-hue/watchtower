@@ -110,6 +110,24 @@ def test_gpro_shaped_major_close_is_an_explicit_bounded_lane_miss():
     assert row.miss_reasons == {"up": "NOT_SELECTED_BY_BOUNDED_RTH_LANE"}
 
 
+def test_full_universe_sweep_omission_is_named_as_an_invariant_failure():
+    row = evaluate_rth_missed_mover_symbol(
+        "GPRO",
+        SESSION,
+        _daily("GPRO"),
+        fast_lane_ticks=31,
+        full_universe_sweep_active=True,
+        fast_lane_seen=False,
+        fast_lane_directions=set(),
+        fast_lane_outcomes=(),
+    )
+
+    assert row.missed_directions == ("up",)
+    assert row.miss_reasons == {
+        "up": "NOT_OBSERVED_BY_FULL_UNIVERSE_RTH_SWEEP"
+    }
+
+
 def test_miss_reason_distinguishes_lane_outage_and_live_rejection():
     outage = evaluate_rth_missed_mover_symbol(
         "GPRO",
