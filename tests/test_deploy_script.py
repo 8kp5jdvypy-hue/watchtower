@@ -22,6 +22,7 @@ APP_SERVICES = (
     "postmarket-discovery",
     "postmarket-external-context",
     "postmarket-customer-dry-run",
+    "postmarket-operator",
     "api",
 )
 DATABASES = (

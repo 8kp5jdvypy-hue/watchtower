@@ -27,6 +27,7 @@ from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
 from tradebot.postmarket_discovery import connect as connect_discovery
 from tradebot.postmarket_discovery_health import evaluate_discovery_health
 from tradebot.postmarket_discovery_shadow import discovery_enabled, run_discovery_tick
+from tradebot.rth_momentum import run_rth_momentum_tick
 
 
 CONTROL_SCHEMA_VERSION = 1
@@ -41,6 +42,10 @@ COMPOSE_PATH = REPO_ROOT / "docker-compose.yml"
 DISCOVERY_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery_shadow.py"
 DISCOVERY_STORE_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery.py"
 DISCOVERY_HEALTH_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery_health.py"
+RTH_MOMENTUM_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum.py"
+RTH_AUDIT_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum_audit.py"
+RTH_CENSUS_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_missed_mover_census.py"
+RTH_REPLAY_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum_replay.py"
 SESSION_CLOSE = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
 NOW = SESSION_CLOSE + timedelta(minutes=10)
 UPDATED = NOW - timedelta(minutes=1)
@@ -164,6 +169,43 @@ def _qualifying_bars(symbol: str) -> list[Bar]:
             110,
             10_000,
         ),
+    ]
+
+
+def _rth_qualifying_bars(symbol: str) -> list[Bar]:
+    return [
+        Bar(
+            symbol,
+            SESSION_CLOSE - timedelta(minutes=15),
+            109,
+            109,
+            109,
+            109,
+            10_000,
+        ),
+        Bar(
+            symbol,
+            SESSION_CLOSE - timedelta(minutes=10),
+            110,
+            110,
+            110,
+            110,
+            10_000,
+        ),
+    ]
+
+
+def _rth_daily_baseline(symbol: str) -> list[Bar]:
+    return [
+        Bar(
+            symbol,
+            SESSION_CLOSE - timedelta(days=1),
+            100,
+            100,
+            100,
+            100,
+            1_000_000,
+        )
     ]
 
 
@@ -292,6 +334,76 @@ def run_discovery_failure_injection(
         finally:
             sweep_conn.close()
 
+        rth_conn = connect_discovery(Path(raw_dir) / "rth-sweep-discovery.db")
+        rth_now = SESSION_CLOSE - timedelta(minutes=5)
+        try:
+            def failed_rth_sweep_fetch(symbols, start, end):
+                raise RuntimeError("injected final-RTH universe sweep outage")
+
+            rth_result, _, rth_evaluations = run_rth_momentum_tick(
+                rth_conn,
+                active_universe={"BROKEN", "SWEEP"},
+                scheduled_earnings=set(),
+                now=rth_now,
+                run_id="rth-sweep-failure-injection",
+                code_version=revision,
+                data_feed="sip",
+                screen_fetch=lambda top: _screen(
+                    updated=rth_now - timedelta(seconds=20)
+                ),
+                intraday_fetch=lambda symbols, session: {
+                    "BROKEN": _rth_qualifying_bars("BROKEN")
+                },
+                sweep_intraday_fetch=failed_rth_sweep_fetch,
+                daily_fetch=lambda symbols: {
+                    symbol: _rth_daily_baseline(symbol) for symbol in symbols
+                },
+                sweep_cycle_ticks=2,
+            )
+            rth_outcomes = {row.symbol: row.outcome for row in rth_evaluations}
+            rth_candidates = rth_conn.execute(
+                "SELECT symbol FROM rth_momentum_candidates ORDER BY symbol"
+            ).fetchall()
+            rth_integrity = [
+                row[0] for row in rth_conn.execute("PRAGMA quick_check")
+            ]
+        finally:
+            rth_conn.close()
+
+        rth_screen_conn = connect_discovery(
+            Path(raw_dir) / "rth-screen-discovery.db"
+        )
+        try:
+            def failed_rth_screen_fetch(top):
+                raise RuntimeError("injected bounded screen outage")
+
+            rth_screen_result, _, rth_screen_evaluations = run_rth_momentum_tick(
+                rth_screen_conn,
+                active_universe={"BROKEN", "SWEEP"},
+                scheduled_earnings=set(),
+                now=rth_now,
+                run_id="rth-screen-failure-injection",
+                code_version=revision,
+                data_feed="sip",
+                screen_fetch=failed_rth_screen_fetch,
+                intraday_fetch=lambda symbols, session: {},
+                sweep_intraday_fetch=lambda symbols, start, end: {
+                    "SWEEP": _rth_qualifying_bars("SWEEP")
+                },
+                daily_fetch=lambda symbols: {
+                    symbol: _rth_daily_baseline(symbol) for symbol in symbols
+                },
+                sweep_cycle_ticks=2,
+            )
+            rth_screen_tick = rth_screen_conn.execute(
+                "SELECT screen_error,error_count FROM rth_momentum_ticks"
+            ).fetchone()
+            rth_screen_integrity = [
+                row[0] for row in rth_screen_conn.execute("PRAGMA quick_check")
+            ]
+        finally:
+            rth_screen_conn.close()
+
     checks = (
         DiscoveryControlCheck(
             "missing_bulk_bar_is_conserved_as_fetch_error",
@@ -351,14 +463,50 @@ def run_discovery_failure_injection(
             f"candidates={sweep_candidates!r}",
         ),
         DiscoveryControlCheck(
+            "final_rth_universe_sweep_outage_is_explicit_and_conserved",
+            rth_result.selected_symbols == rth_result.evaluated_symbols == 2
+            and rth_result.intraday_symbols_fetched == 1
+            and rth_result.error_count == 1
+            and rth_outcomes == {"BROKEN": "CANDIDATE", "SWEEP": "FETCH_ERROR"},
+            f"result={asdict(rth_result)!r}; outcomes={rth_outcomes!r}",
+        ),
+        DiscoveryControlCheck(
+            "final_rth_universe_sweep_outage_cannot_leak_or_hide_candidate",
+            rth_result.candidate_observations == 1
+            and rth_result.new_candidates == 1
+            and rth_candidates == [("BROKEN",)],
+            "candidate_counts="
+            f"{(rth_result.candidate_observations, rth_result.new_candidates)!r}; "
+            f"candidates={rth_candidates!r}",
+        ),
+        DiscoveryControlCheck(
+            "final_rth_sweep_survives_bounded_screen_outage_loudly",
+            rth_screen_result.selected_symbols
+            == rth_screen_result.evaluated_symbols
+            == 1
+            and rth_screen_result.candidate_observations == 1
+            and rth_screen_result.new_candidates == 1
+            and rth_screen_result.error_count == 1
+            and [row.outcome for row in rth_screen_evaluations] == ["CANDIDATE"]
+            and rth_screen_tick
+            == ("RuntimeError: injected bounded screen outage", 1),
+            f"result={asdict(rth_screen_result)!r}; "
+            f"tick={rth_screen_tick!r}",
+        ),
+        DiscoveryControlCheck(
             "persisted_failure_retains_sip_alpaca_provenance",
             observation is not None and observation[3:] == ("sip", "alpaca"),
             f"observation={observation!r}",
         ),
         DiscoveryControlCheck(
             "exercise_database_is_consistent",
-            integrity == ["ok"] and sweep_integrity == ["ok"],
-            f"PRAGMA quick_check bounded={integrity!r}; sweep={sweep_integrity!r}",
+            integrity == ["ok"]
+            and sweep_integrity == ["ok"]
+            and rth_integrity == ["ok"]
+            and rth_screen_integrity == ["ok"],
+            f"PRAGMA quick_check bounded={integrity!r}; "
+            f"sweep={sweep_integrity!r}; rth={rth_integrity!r}; "
+            f"rth_screen={rth_screen_integrity!r}",
         ),
     )
     return _artifact(
@@ -496,17 +644,36 @@ def run_discovery_delivery_isolation(
     compose_path: Path = COMPOSE_PATH,
     discovery_source_path: Path = DISCOVERY_SOURCE_PATH,
     store_source_path: Path = DISCOVERY_STORE_SOURCE_PATH,
+    rth_source_path: Path = RTH_MOMENTUM_SOURCE_PATH,
+    rth_audit_source_path: Path = RTH_AUDIT_SOURCE_PATH,
+    rth_census_source_path: Path = RTH_CENSUS_SOURCE_PATH,
+    rth_replay_source_path: Path = RTH_REPLAY_SOURCE_PATH,
 ) -> DiscoveryControlEvidence:
     """Prove the discovery service has no alert, broker, or order dependency."""
     revision = _revision(revision, "revision")
     compose_raw = compose_path.read_bytes()
     source_raw = discovery_source_path.read_bytes()
     store_raw = store_source_path.read_bytes()
+    rth_raw = rth_source_path.read_bytes()
+    rth_audit_raw = rth_audit_source_path.read_bytes()
+    rth_census_raw = rth_census_source_path.read_bytes()
+    rth_replay_raw = rth_replay_source_path.read_bytes()
     compose = compose_raw.decode("utf-8")
     source = source_raw.decode("utf-8")
     store = store_raw.decode("utf-8")
+    rth_source = rth_raw.decode("utf-8")
+    rth_audit_source = rth_audit_raw.decode("utf-8")
+    rth_census_source = rth_census_raw.decode("utf-8")
+    rth_replay_source = rth_replay_raw.decode("utf-8")
     service = _compose_service_block(compose, "postmarket-discovery")
-    imports = _imported_modules(source) | _imported_modules(store)
+    imports = (
+        _imported_modules(source)
+        | _imported_modules(store)
+        | _imported_modules(rth_source)
+        | _imported_modules(rth_audit_source)
+        | _imported_modules(rth_census_source)
+        | _imported_modules(rth_replay_source)
+    )
     delivery_imports = sorted(
         module
         for module in imports
@@ -515,7 +682,10 @@ def run_discovery_delivery_isolation(
     forbidden_tokens = sorted(
         token
         for token in ("send_alert(", "enqueue_alert(", "place_order(", "submit_order(")
-        if token in source or token in store
+        if token in source or token in store or token in rth_source
+        or token in rth_audit_source
+        or token in rth_census_source
+        or token in rth_replay_source
     )
     checks = (
         DiscoveryControlCheck(
@@ -523,7 +693,11 @@ def run_discovery_delivery_isolation(
             not delivery_imports,
             f"forbidden imports={delivery_imports!r}; "
             f"observer_sha256={hashlib.sha256(source_raw).hexdigest()}; "
-            f"store_sha256={hashlib.sha256(store_raw).hexdigest()}",
+            f"store_sha256={hashlib.sha256(store_raw).hexdigest()}; "
+            f"rth_sha256={hashlib.sha256(rth_raw).hexdigest()}; "
+            f"rth_audit_sha256={hashlib.sha256(rth_audit_raw).hexdigest()}; "
+            f"rth_census_sha256={hashlib.sha256(rth_census_raw).hexdigest()}; "
+            f"rth_replay_sha256={hashlib.sha256(rth_replay_raw).hexdigest()}",
         ),
         DiscoveryControlCheck(
             "discovery_modules_have_no_delivery_or_order_callsite",

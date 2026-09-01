@@ -240,6 +240,58 @@ evidence.
   freshness, top-N scope, ranks, universe/fetch/evaluation/candidate counts,
   revision and threshold provenance; and preserves candidate plus near-miss
   lifecycles in the already-backed-up audit directory.
+- Final-RTH-to-postmarket handoff: implemented on stacked review branches, not
+  yet merged, deployed, or enabled. The discovery supervisor wakes 30 minutes
+  before the real XNYS close, admits bounded mover/activity symbols, scheduled
+  after-hours reporters, and one attributable deterministic active-universe
+  shard per minute. Five shards cover the market at the five-minute cadence.
+  It evaluates strict completed RTH bars and
+  persists an append-only `RTH_QUALIFIED` identity. Postmarket reconciliation
+  adds either a same-direction qualification link or an explicit terminal
+  non-qualification. Per-stage timing, schedule gaps, conservation, provenance,
+  and handoff integrity are covered by an immutable 31-tick daily audit whose
+  exceptions fail discovery health. Audit v2 additionally reconciles sweep
+  digest, shard order, source evidence, universe positions, and complete cycles.
+  This closes clock-boundary and bounded-admission visibility holes, but the
+  retrospective census, empirical holdout, independent-provider evidence, and
+  customer gate remain mandatory.
+- Daily RTH missed-mover census: implemented on the stacked review branch, not
+  merged, deployed, or enabled. After the 20:05 ET finalization point it scans
+  finalized daily OHLCV for the full active universe in bounded chunks,
+  identifies liquid closes at least 8% from the prior close, preserves high/low
+  excursion-only review cases, and attributes every uncaught direction to lane
+  outage, legacy bounded-selection omission, full-sweep invariant failure, or
+  exact live rejection outcomes. Runs,
+  per-symbol events, universe identity, failures, and reports are append-only.
+  Because the live lane and census both use Alpaca, the report explicitly
+  remains ineligible as independent quality evidence. Independently labeled
+  empirical holdout cases and second-provider proof remain open.
+- Final-RTH truth replay: implemented on the stacked review branch, not merged,
+  deployed, or enabled. A versioned offline suite keeps the named GPRO incident
+  in a tuning-only cohort and scores 16 symbol-disjoint synthetic holdout cases
+  spanning upside/downside persistence, exact thresholds, early closes,
+  liquidity, freshness, gaps, missing evidence, malformed OHLC, and duplicate,
+  naive, or out-of-order timestamps. Threshold drift is explicit. The empirical
+  holdout remains intentionally empty and fails closed; synthetic success does
+  not count as live precision, recall, profitability, or customer readiness.
+- Symbol incident reconstruction: implemented on the stacked review branch,
+  not merged or deployed. A read-only utility traces one symbol/session across
+  asset identity, digest-verified Stage-1 evidence, evaluations, detections,
+  decision and mark ledgers, catalysts, final-RTH observations/census/handoff,
+  postmarket qualification, lifecycle, context, rank, outcome marks, and the
+  owner-only outbox. Missing databases/tables, schema drift, corrupt archives,
+  malformed or non-UTC timestamps, invalid JSON, duplicates, and stored-order
+  regressions remain visible. The report separates observed, qualified, queued,
+  and delivered facts and refuses to translate absent evidence into a broad
+  caught/missed claim. It performs no vendor call, alert, broker, or order
+  action.
+- Owner visibility bridge: implemented as a separate default-off service that
+  reads the shadow ledger in SQLite read-only mode and can enqueue a fresh,
+  already-qualified candidate to one explicit administrator chat. Discovery
+  retains its no-delivery boundary. Deterministic identities, age/provenance
+  guards, bounded cycles, a health probe, and revision-bound failure/kill-
+  switch/owner-isolation exercises protect this path. It is not customer
+  routing and does not alter the empirical customer-readiness gate.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a

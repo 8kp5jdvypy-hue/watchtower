@@ -155,6 +155,36 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  postmarket-operator:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    command: python -m tradebot.postmarket_operator_shadow
+    env_file: .env
+    environment:
+      # Owner-only shadow visibility. This bridge is separate from discovery,
+      # has no customer fan-out, and remains disabled until the operator
+      # explicitly supplies both the switch and an administrator chat id.
+      POSTMARKET_OPERATOR_ALERTS_ENABLED: ${POSTMARKET_OPERATOR_ALERTS_ENABLED:-0}
+      POSTMARKET_OPERATOR_CHAT_ID: ${POSTMARKET_OPERATOR_CHAT_ID:-}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    depends_on:
+      - worker
+    healthcheck:
+      test: ["CMD", "python", "-m", "tradebot.postmarket_operator_health", "--heartbeat", "data/postmarket_operator_heartbeat.json", "--max-age", "600"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   postmarket-customer-dry-run:
     build:
       context: .

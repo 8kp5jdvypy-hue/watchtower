@@ -93,6 +93,9 @@ def test_identity_and_top_level_failures_are_unhealthy(tmp_path, override, detai
         "context_backfill_status",
         "lifecycle_status",
         "rank_status",
+        "rth_handoff_status",
+        "rth_audit_status",
+        "rth_missed_mover_census_status",
     ],
 )
 def test_explicit_subsystem_errors_are_unhealthy(tmp_path, field):

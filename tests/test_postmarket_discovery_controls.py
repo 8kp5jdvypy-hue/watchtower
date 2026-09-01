@@ -46,7 +46,7 @@ def test_failure_injection_proves_conservation_and_zero_candidate_leakage():
     assert artifact.status == "passed"
     assert artifact.revision == REVISION
     assert artifact.completed_at_utc == COMPLETED.isoformat()
-    assert len(artifact.checks) == 9
+    assert len(artifact.checks) == 12
     assert all(check.passed for check in artifact.checks)
     assert {check.name for check in artifact.checks} >= {
         "missing_bulk_bar_is_conserved_as_fetch_error",
@@ -55,6 +55,9 @@ def test_failure_injection_proves_conservation_and_zero_candidate_leakage():
         "screener_outage_fails_before_persistence",
         "full_universe_sweep_outage_is_explicit_and_conserved",
         "full_universe_sweep_outage_cannot_fabricate_or_suppress_candidate",
+        "final_rth_universe_sweep_outage_is_explicit_and_conserved",
+        "final_rth_universe_sweep_outage_cannot_leak_or_hide_candidate",
+        "final_rth_sweep_survives_bounded_screen_outage_loudly",
     }
 
 
@@ -112,6 +115,86 @@ def test_delivery_artifact_fails_on_forbidden_import(tmp_path):
     assert artifact.status == "failed"
     checks = {check.name: check for check in artifact.checks}
     assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
+def test_delivery_artifact_covers_rth_handoff_module(tmp_path):
+    source = Path(controls_module.RTH_MOMENTUM_SOURCE_PATH).read_text(encoding="utf-8")
+    bad = tmp_path / "rth_momentum.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
+def test_delivery_artifact_covers_rth_audit_module(tmp_path):
+    source = Path(controls_module.RTH_AUDIT_SOURCE_PATH).read_text(encoding="utf-8")
+    bad = tmp_path / "rth_momentum_audit.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_audit_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
+def test_delivery_artifact_covers_rth_census_module(tmp_path):
+    source = Path(controls_module.RTH_CENSUS_SOURCE_PATH).read_text(encoding="utf-8")
+    bad = tmp_path / "rth_missed_mover_census.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_census_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks["discovery_modules_have_no_delivery_or_order_import"].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
+def test_delivery_artifact_covers_rth_replay_module(tmp_path):
+    source = Path(controls_module.RTH_REPLAY_SOURCE_PATH).read_text(
+        encoding="utf-8"
+    )
+    bad = tmp_path / "rth_momentum_replay.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_replay_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].passed is False
     assert "tradebot.telegram_bot" in checks[
         "discovery_modules_have_no_delivery_or_order_import"
     ].evidence
