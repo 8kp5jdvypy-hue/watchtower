@@ -25,6 +25,13 @@ RTH notional, and 420-second freshness thresholds are shadow baselines awaiting
 replay and live evidence. The complete contract and immutable 31-tick daily
 audit are documented in `docs/rth-postmarket-handoff.md`.
 
+After the 20:05 ET evidence finalization point, a separate full-market daily
+OHLCV census measures major closing movers that the bounded final-RTH lane did
+not catch and records whether the lane was absent, never selected the symbol,
+or rejected it for a specific live outcome. Intraday high/low excursions are
+retained for review without being mislabeled as persistent candidates. See
+`docs/rth-missed-mover-census.md`.
+
 After the close, postmarket discovery uses two lanes and one strict evaluator.
 
 The fast lane uses Alpaca's real-time SIP stock screeners at their maximum

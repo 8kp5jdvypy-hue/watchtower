@@ -249,9 +249,18 @@ evidence.
   non-qualification. Per-stage timing, schedule gaps, conservation, provenance,
   and handoff integrity are covered by an immutable 31-tick daily audit whose
   exceptions fail discovery health. This closes a clock-boundary visibility
-  hole; it does not prove full-market RTH recall. The daily missed-mover census,
-  holdout calibration, independent-provider evidence, and customer gate remain
-  open.
+  hole; it does not by itself prove full-market RTH recall. Holdout calibration,
+  independent-provider evidence, and the customer gate remain open.
+- Daily RTH missed-mover census: implemented on the stacked review branch, not
+  merged, deployed, or enabled. After the 20:05 ET finalization point it scans
+  finalized daily OHLCV for the full active universe in bounded chunks,
+  identifies liquid closes at least 8% from the prior close, preserves high/low
+  excursion-only review cases, and attributes every uncaught direction to lane
+  outage, bounded-selection omission, or exact live rejection outcomes. Runs,
+  per-symbol events, universe identity, failures, and reports are append-only.
+  Because the live lane and census both use Alpaca, the report explicitly
+  remains ineligible as independent quality evidence. Five-minute replay,
+  holdout labels, and second-provider proof remain open.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a

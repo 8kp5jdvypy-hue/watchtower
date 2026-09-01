@@ -21,8 +21,8 @@ unions:
 
 This is a low-latency admission lane, not a full-universe RTH census. The
 existing Stage-1 archive and the separate postmarket full-universe sweep remain
-the coverage truth surfaces. A daily missed-mover census is still required to
-measure what the bounded RTH lane did not admit.
+the coverage truth surfaces. The after-the-fact full-market close census in
+`docs/rth-missed-mover-census.md` measures what this bounded lane did not admit.
 
 The shared market-wide screen validator requires the exact endpoint set,
 provider/feed agreement, bounded ranks, finite metrics, canonical symbol
