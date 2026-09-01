@@ -62,6 +62,7 @@ from tradebot.postmarket_recall_provider import (
 )
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.rth_momentum import (
+    FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
     ensure_rth_schema,
     latest_rth_handoff_summary,
     reconcile_rth_postmarket_handoffs,
@@ -1209,6 +1210,8 @@ def main() -> int:
                     screen_fetch=_screen_fetch,
                     intraday_fetch=_bars_fetch,
                     daily_fetch=_rth_daily_bars_fetch,
+                    sweep_intraday_fetch=_sweep_bars_fetch,
+                    sweep_cycle_ticks=FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
                     validation_now_fn=_utc_now,
                 )
             except Exception as exc:
@@ -1225,13 +1228,18 @@ def main() -> int:
                 )
             else:
                 logger.info(
-                    "rth_momentum_tick tick=%s session=%s selected=%s "
+                    "rth_momentum_tick tick=%s session=%s sweep_shard=%s/%s "
+                    "sweep_symbols=%s sweep_overlap=%s selected=%s "
                     "intraday_fetched=%s daily_fetched=%s evaluated=%s "
                     "candidates=%s new=%s invariant=%s errors=%s lag_ms=%s "
                     "missed=%s screen_ms=%s selection_ms=%s fetch_ms=%s "
                     "evaluation_ms=%s total_ms=%s",
                     rth_result.tick_id,
                     rth_result.session,
+                    rth_result.sweep_shard_index,
+                    rth_result.sweep_shard_count,
+                    rth_result.sweep_shard_symbols,
+                    rth_result.sweep_overlap_symbols,
                     rth_result.selected_symbols,
                     rth_result.intraday_symbols_fetched,
                     rth_result.daily_symbols_fetched,
@@ -1257,6 +1265,16 @@ def main() -> int:
                         rth_handoff_status=(
                             "degraded" if rth_result.error_count else "current"
                         ),
+                        rth_sweep_shard_index=rth_result.sweep_shard_index,
+                        rth_sweep_shard_count=rth_result.sweep_shard_count,
+                        rth_sweep_shard_symbols=rth_result.sweep_shard_symbols,
+                        rth_sweep_overlap_symbols=(
+                            rth_result.sweep_overlap_symbols
+                        ),
+                        rth_selected_symbols=rth_result.selected_symbols,
+                        rth_evaluated_symbols=rth_result.evaluated_symbols,
+                        rth_error_count=rth_result.error_count,
+                        rth_total_latency_ms=rth_result.latency_ms,
                         latest_rth_handoff=latest_rth_handoff_summary(shadow_conn),
                     ),
                 )

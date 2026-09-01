@@ -10,6 +10,7 @@ It has no alert, Telegram, customer, broker, or order dependency.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -36,6 +37,9 @@ BAR_TIMEFRAME = "5Min"
 MARKET_DATA_PROVIDER = "alpaca"
 SCREEN_TOP_N = 50
 POLL_SECONDS = 60
+FULL_UNIVERSE_RTH_SWEEP_SOURCE = "full_universe_rth_sweep"
+FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS = 5
+MAX_FULL_UNIVERSE_RTH_SWEEP_SHARD_SIZE = 4_000
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 
@@ -75,7 +79,15 @@ CREATE TABLE IF NOT EXISTS rth_momentum_ticks (
     universe_symbols INTEGER NOT NULL,
     provider_screen_rows INTEGER NOT NULL,
     provider_screen_unique_symbols INTEGER NOT NULL,
+    screen_error TEXT,
     scheduled_symbols INTEGER NOT NULL,
+    sweep_universe_sha256 TEXT,
+    sweep_cycle_ticks INTEGER,
+    sweep_shard_index INTEGER,
+    sweep_shard_count INTEGER,
+    sweep_shard_size INTEGER,
+    sweep_shard_symbols INTEGER,
+    sweep_overlap_symbols INTEGER,
     selected_symbols INTEGER NOT NULL,
     intraday_symbols_fetched INTEGER NOT NULL,
     daily_symbols_fetched INTEGER NOT NULL,
@@ -223,8 +235,24 @@ class RthSelection:
     universe_symbols: int
     provider_screen_rows: int
     provider_screen_unique_symbols: int
+    screen_error: str | None
     scheduled_symbols: int
     excluded_symbols: int
+    sweep: RthUniverseSweep | None
+    sweep_overlap_symbols: int
+
+
+@dataclass(frozen=True)
+class RthUniverseSweep:
+    symbols: tuple[str, ...]
+    universe_symbols: int
+    universe_sha256: str
+    scheduled_tick_utc: datetime
+    cycle_ticks: int
+    shard_index: int
+    shard_count: int
+    shard_size: int
+    shard_start: int
 
 
 @dataclass(frozen=True)
@@ -255,6 +283,10 @@ class RthTickResult:
     tick_id: int
     session: str
     selected_symbols: int
+    sweep_shard_index: int | None
+    sweep_shard_count: int | None
+    sweep_shard_symbols: int
+    sweep_overlap_symbols: int
     intraday_symbols_fetched: int
     daily_symbols_fetched: int
     evaluated_symbols: int
@@ -302,6 +334,24 @@ def rth_poll_sleep_seconds(
 
 def ensure_rth_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(RTH_SCHEMA)
+    existing = {
+        row[1] for row in conn.execute("PRAGMA table_info(rth_momentum_ticks)")
+    }
+    additions = {
+        "sweep_universe_sha256": "TEXT",
+        "sweep_cycle_ticks": "INTEGER",
+        "sweep_shard_index": "INTEGER",
+        "sweep_shard_count": "INTEGER",
+        "sweep_shard_size": "INTEGER",
+        "sweep_shard_symbols": "INTEGER",
+        "sweep_overlap_symbols": "INTEGER",
+        "screen_error": "TEXT",
+    }
+    for column, column_type in additions.items():
+        if column not in existing:
+            conn.execute(
+                f"ALTER TABLE rth_momentum_ticks ADD COLUMN {column} {column_type}"
+            )
 
 
 def rth_handoff_window(
@@ -339,38 +389,82 @@ def select_rth_symbols(
     screen: MarketWideScreen,
     active_universe: set[str],
     scheduled_earnings: set[str],
+    universe_sweep: RthUniverseSweep | None = None,
+    screen_error: str | None = None,
 ) -> RthSelection:
     canonical = {symbol.strip().upper() for symbol in active_universe}
     if canonical != active_universe or any(not symbol for symbol in active_universe):
         raise ValueError("active universe symbols must be canonical non-empty strings")
+    if universe_sweep is not None:
+        expected_digest = hashlib.sha256(
+            "\n".join(sorted(active_universe)).encode("utf-8")
+        ).hexdigest()
+        if (
+            universe_sweep.universe_symbols != len(active_universe)
+            or universe_sweep.universe_sha256 != expected_digest
+            or len(set(universe_sweep.symbols)) != len(universe_sweep.symbols)
+            or not set(universe_sweep.symbols) <= active_universe
+        ):
+            raise ValueError("RTH full-universe sweep does not match active universe")
     scheduled = {symbol for symbol in scheduled_earnings if symbol in active_universe}
     grouped: dict[str, list] = {}
     for entry in screen.entries:
         grouped.setdefault(entry.symbol, []).append(entry)
     provider_symbols = set(grouped)
+    sweep_symbols = (
+        set(universe_sweep.symbols) if universe_sweep is not None else set()
+    )
+    sweep_positions = (
+        {
+            symbol: universe_sweep.shard_start + offset
+            for offset, symbol in enumerate(universe_sweep.symbols)
+        }
+        if universe_sweep is not None
+        else {}
+    )
     selected = []
-    for symbol in sorted((provider_symbols & active_universe) | scheduled):
+    for symbol in sorted(
+        (provider_symbols & active_universe) | scheduled | sweep_symbols
+    ):
         entries = grouped.get(symbol, [])
         sources = {entry.source for entry in entries}
         if symbol in scheduled:
             sources.add("scheduled_earnings")
+        if symbol in sweep_symbols:
+            sources.add(FULL_UNIVERSE_RTH_SWEEP_SOURCE)
+        evidence = [
+            {
+                "source": entry.source,
+                "rank": entry.rank,
+                "source_updated_at": entry.source_updated_at.isoformat(),
+                "move_pct": entry.move_pct,
+                "price": entry.price,
+                "volume": entry.volume,
+                "trade_count": entry.trade_count,
+            }
+            for entry in sorted(entries, key=lambda row: (row.source, row.rank))
+        ]
+        if universe_sweep is not None and symbol in sweep_symbols:
+            evidence.append(
+                {
+                    "source": FULL_UNIVERSE_RTH_SWEEP_SOURCE,
+                    "scheduled_tick_utc": (
+                        universe_sweep.scheduled_tick_utc.isoformat()
+                    ),
+                    "universe_sha256": universe_sweep.universe_sha256,
+                    "universe_position": sweep_positions[symbol],
+                    "cycle_ticks": universe_sweep.cycle_ticks,
+                    "shard_index": universe_sweep.shard_index,
+                    "shard_count": universe_sweep.shard_count,
+                    "shard_size": universe_sweep.shard_size,
+                }
+            )
         selected.append(
             RthSelectedSymbol(
                 symbol=symbol,
                 sources=tuple(sorted(sources)),
                 ranks=tuple(sorted((entry.source, entry.rank) for entry in entries)),
-                screen_evidence=tuple(
-                    {
-                        "source": entry.source,
-                        "rank": entry.rank,
-                        "source_updated_at": entry.source_updated_at.isoformat(),
-                        "move_pct": entry.move_pct,
-                        "price": entry.price,
-                        "volume": entry.volume,
-                        "trade_count": entry.trade_count,
-                    }
-                    for entry in sorted(entries, key=lambda row: (row.source, row.rank))
-                ),
+                screen_evidence=tuple(evidence),
             )
         )
     return RthSelection(
@@ -378,8 +472,67 @@ def select_rth_symbols(
         universe_symbols=len(active_universe),
         provider_screen_rows=len(screen.entries),
         provider_screen_unique_symbols=len(provider_symbols),
+        screen_error=screen_error,
         scheduled_symbols=len(scheduled),
-        excluded_symbols=len(provider_symbols - active_universe),
+        excluded_symbols=len((provider_symbols | sweep_symbols) - active_universe),
+        sweep=universe_sweep,
+        sweep_overlap_symbols=len(
+            sweep_symbols & ((provider_symbols & active_universe) | scheduled)
+        ),
+    )
+
+
+def plan_rth_universe_sweep(
+    active_symbols: set[str],
+    *,
+    scheduled_tick_utc: datetime,
+    window_start: datetime,
+    cycle_ticks: int = FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
+    max_shard_size: int = MAX_FULL_UNIVERSE_RTH_SWEEP_SHARD_SIZE,
+) -> RthUniverseSweep:
+    """Plan one deterministic shard covering the active universe every cycle."""
+    if cycle_ticks <= 0 or max_shard_size <= 0:
+        raise ValueError("RTH sweep cycle and maximum shard size must be positive")
+    for label, value in (
+        ("scheduled_tick_utc", scheduled_tick_utc),
+        ("window_start", window_start),
+    ):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{label} must be timezone-aware")
+    scheduled = scheduled_tick_utc.astimezone(timezone.utc)
+    start = window_start.astimezone(timezone.utc)
+    elapsed = (scheduled - start).total_seconds()
+    if elapsed < 0 or elapsed % POLL_SECONDS:
+        raise ValueError("RTH sweep tick must use the handoff-window minute grid")
+    ordered = tuple(sorted(active_symbols))
+    if any(not symbol or symbol != symbol.strip().upper() for symbol in ordered):
+        raise ValueError("active universe symbols must be canonical and non-empty")
+    digest = hashlib.sha256("\n".join(ordered).encode("utf-8")).hexdigest()
+    if not ordered:
+        return RthUniverseSweep((), 0, digest, scheduled, cycle_ticks, 0, 0, 0, 0)
+    shard_count = min(cycle_ticks, len(ordered))
+    shard_size = math.ceil(len(ordered) / shard_count)
+    if shard_size > max_shard_size:
+        raise ValueError(
+            f"RTH full-universe sweep shard {shard_size} exceeds safety bound "
+            f"{max_shard_size}"
+        )
+    slot = int(elapsed // POLL_SECONDS)
+    shard_index = slot % shard_count
+    shard_start = shard_index * shard_size
+    symbols = ordered[
+        shard_start : min(len(ordered), shard_start + shard_size)
+    ]
+    return RthUniverseSweep(
+        symbols=symbols,
+        universe_symbols=len(ordered),
+        universe_sha256=digest,
+        scheduled_tick_utc=scheduled,
+        cycle_ticks=cycle_ticks,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        shard_size=shard_size,
+        shard_start=shard_start,
     )
 
 
@@ -683,12 +836,15 @@ def _record_tick(
           (session,scheduled_tick_utc,tick_utc,completed_utc,window_start_utc,
            session_close_utc,momentum_version,run_mode,run_id,code_version,
            data_feed,market_data_provider,universe_symbols,provider_screen_rows,
-           provider_screen_unique_symbols,scheduled_symbols,selected_symbols,
+           provider_screen_unique_symbols,screen_error,scheduled_symbols,
+           sweep_universe_sha256,sweep_cycle_ticks,sweep_shard_index,
+           sweep_shard_count,sweep_shard_size,sweep_shard_symbols,
+           sweep_overlap_symbols,selected_symbols,
            intraday_symbols_fetched,daily_symbols_fetched,evaluated_symbols,
            candidate_observations,new_candidates,invariant_ok,error_count,
            missed_cycles,scheduled_lag_ms,screen_latency_ms,selection_latency_ms,
            bar_fetch_latency_ms,evaluation_latency_ms,total_latency_ms,thresholds_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             session.isoformat(), schedule.scheduled_tick_utc.isoformat(),
@@ -696,11 +852,20 @@ def _record_tick(
             session_close.isoformat(), RTH_MOMENTUM_VERSION, run_mode, run_id,
             code_version, data_feed, screen.provider, selection.universe_symbols,
             selection.provider_screen_rows, selection.provider_screen_unique_symbols,
-            selection.scheduled_symbols, len(symbols), intraday_symbols_fetched,
+            selection.screen_error, selection.scheduled_symbols,
+            selection.sweep.universe_sha256 if selection.sweep else None,
+            selection.sweep.cycle_ticks if selection.sweep else None,
+            selection.sweep.shard_index if selection.sweep else None,
+            selection.sweep.shard_count if selection.sweep else None,
+            selection.sweep.shard_size if selection.sweep else None,
+            len(selection.sweep.symbols) if selection.sweep else 0,
+            selection.sweep_overlap_symbols,
+            len(symbols), intraday_symbols_fetched,
             daily_symbols_fetched, len(evaluations),
             sum(row.outcome == OUTCOME_CANDIDATE for row in evaluations),
             new_candidates, 1,
-            sum(row.outcome == OUTCOME_FETCH_ERROR for row in evaluations),
+            int(selection.screen_error is not None)
+            + sum(row.outcome == OUTCOME_FETCH_ERROR for row in evaluations),
             schedule.missed_cycles, schedule.scheduled_lag_ms, screen_ms,
             selection_ms, fetch_ms, evaluation_ms, total_ms,
             json.dumps(rth_thresholds(), separators=(",", ":"), sort_keys=True),
@@ -750,9 +915,13 @@ def run_rth_momentum_tick(
     screen_fetch: Callable[[int], MarketWideScreen],
     intraday_fetch: Callable[[list[str], date], dict[str, list[Bar]]],
     daily_fetch: Callable[[list[str]], dict[str, list[Bar]]],
+    sweep_intraday_fetch: (
+        Callable[[list[str], datetime, datetime], dict[str, list[Bar]]] | None
+    ) = None,
     validation_now_fn: Callable[[], datetime] | None = None,
     clock: Callable[[], float] | None = None,
     top_n: int = SCREEN_TOP_N,
+    sweep_cycle_ticks: int | None = None,
     run_mode: str = "rth-marketwide-handoff-shadow",
 ) -> tuple[RthTickResult, RthSelection, tuple[RthEvaluation, ...]]:
     window = rth_handoff_window(now)
@@ -763,31 +932,118 @@ def run_rth_momentum_tick(
     schedule = plan_rth_tick_schedule(
         conn, session=session, window_start=window_start, actual_start=now
     )
+    universe_sweep = (
+        plan_rth_universe_sweep(
+            active_universe,
+            scheduled_tick_utc=schedule.scheduled_tick_utc,
+            window_start=window_start,
+            cycle_ticks=sweep_cycle_ticks,
+        )
+        if sweep_cycle_ticks is not None
+        else None
+    )
     timer = clock or time.perf_counter
     started = timer()
-    screen = screen_fetch(top_n)
-    screen_done = timer()
-    validate_marketwide_screen(
+    screen_error = None
+    try:
+        screen = screen_fetch(top_n)
+        screen_done = timer()
+        validate_marketwide_screen(
+            screen,
+            now=validation_now_fn() if validation_now_fn else now,
+            data_feed=data_feed,
+            top_n=top_n,
+        )
+        if active_universe and not screen.entries:
+            raise ValueError(
+                "market-wide screen returned no rows for a non-empty universe"
+            )
+    except Exception as exc:
+        screen_done = timer()
+        if universe_sweep is None:
+            raise
+        screen_error = f"{type(exc).__name__}: {exc}"[:1000]
+        screen = MarketWideScreen(
+            entries=(),
+            requested_top_n=top_n,
+            provider=MARKET_DATA_PROVIDER,
+            feed=data_feed,
+            endpoints=(),
+            source_updates=(),
+        )
+    selection = select_rth_symbols(
         screen,
-        now=validation_now_fn() if validation_now_fn else now,
-        data_feed=data_feed,
-        top_n=top_n,
+        active_universe,
+        scheduled_earnings,
+        universe_sweep,
+        screen_error,
     )
-    if active_universe and not screen.entries:
-        raise ValueError("market-wide screen returned no rows for a non-empty universe")
-    selection = select_rth_symbols(screen, active_universe, scheduled_earnings)
     selection_done = timer()
     symbols = [row.symbol for row in selection.symbols]
-    intraday = intraday_fetch(symbols, session)
+    bounded_symbols = [
+        row.symbol
+        for row in selection.symbols
+        if any(source != FULL_UNIVERSE_RTH_SWEEP_SOURCE for source in row.sources)
+    ]
+    bounded_symbol_set = set(bounded_symbols)
+    sweep_only_symbols = [
+        row.symbol
+        for row in selection.symbols
+        if FULL_UNIVERSE_RTH_SWEEP_SOURCE in row.sources
+        and row.symbol not in bounded_symbol_set
+    ]
+    sweep_only_symbol_set = set(sweep_only_symbols)
+    intraday = intraday_fetch(bounded_symbols, session)
+    sweep_failures: dict[str, Exception] = {}
+    if sweep_only_symbols:
+        if sweep_intraday_fetch is None:
+            raise ValueError(
+                "RTH full-universe sweep requires a bounded-window bar fetch"
+            )
+        try:
+            sweep_bars = sweep_intraday_fetch(
+                sweep_only_symbols,
+                max(session_open, window_start - timedelta(minutes=10)),
+                now,
+            )
+        except Exception as exc:
+            sweep_failures = {symbol: exc for symbol in sweep_only_symbols}
+        else:
+            duplicate = set(intraday) & set(sweep_bars)
+            if duplicate:
+                raise ValueError(
+                    "bounded and RTH sweep bar responses overlap unexpectedly: "
+                    f"{sorted(duplicate)[:5]}"
+                )
+            intraday.update(sweep_bars)
     daily = daily_fetch(symbols)
     fetch_done = timer()
     evaluations = []
     for symbol in symbols:
+        if symbol in sweep_failures:
+            failure = sweep_failures[symbol]
+            evaluations.append(
+                _base_evaluation(
+                    symbol,
+                    session,
+                    OUTCOME_FETCH_ERROR,
+                    (
+                        f"RTH sweep fetch failed: {type(failure).__name__}: "
+                        f"{failure}"
+                    )[:1000],
+                )
+            )
+            continue
         if not intraday.get(symbol):
+            reason = (
+                "provider returned no bars for RTH full-universe sweep window"
+                if symbol in sweep_only_symbol_set
+                else "provider returned no intraday bars for selected symbol"
+            )
             evaluations.append(
                 _base_evaluation(
                     symbol, session, OUTCOME_NO_INTRADAY_BARS_RETURNED,
-                    "provider returned no intraday bars for selected symbol",
+                    reason,
                 )
             )
             continue
@@ -853,6 +1109,10 @@ def run_rth_momentum_tick(
         tick_id=tick_id,
         session=session.isoformat(),
         selected_symbols=len(symbols),
+        sweep_shard_index=(universe_sweep.shard_index if universe_sweep else None),
+        sweep_shard_count=(universe_sweep.shard_count if universe_sweep else None),
+        sweep_shard_symbols=(len(universe_sweep.symbols) if universe_sweep else 0),
+        sweep_overlap_symbols=selection.sweep_overlap_symbols,
         intraday_symbols_fetched=sum(symbol in intraday for symbol in symbols),
         daily_symbols_fetched=sum(symbol in daily for symbol in symbols),
         evaluated_symbols=len(evaluations),
@@ -861,7 +1121,10 @@ def run_rth_momentum_tick(
         ),
         new_candidates=new_candidates,
         invariant_ok=invariant_ok,
-        error_count=sum(row.outcome == OUTCOME_FETCH_ERROR for row in evaluations),
+        error_count=(
+            int(selection.screen_error is not None)
+            + sum(row.outcome == OUTCOME_FETCH_ERROR for row in evaluations)
+        ),
         missed_cycles=schedule.missed_cycles,
         scheduled_lag_ms=schedule.scheduled_lag_ms,
         screen_latency_ms=stage_latencies[0],

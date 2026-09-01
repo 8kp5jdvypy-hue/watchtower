@@ -272,16 +272,35 @@ def next_due_rth_missed_mover_census_session(
 def _fast_lane_evidence(
     conn: sqlite3.Connection,
     session: date,
-) -> tuple[int, set[str], dict[str, set[str]], dict[str, tuple[str, ...]]]:
+) -> tuple[
+    int,
+    bool,
+    set[str],
+    dict[str, set[str]],
+    dict[str, tuple[str, ...]],
+]:
     has_ticks = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='rth_momentum_ticks'"
     ).fetchone()
     if not has_ticks:
-        return 0, set(), {}, {}
+        return 0, False, set(), {}, {}
     tick_count = int(conn.execute(
         "SELECT COUNT(*) FROM rth_momentum_ticks WHERE session=?",
         (session.isoformat(),),
     ).fetchone()[0])
+    tick_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(rth_momentum_ticks)")
+    }
+    full_universe_sweep_active = False
+    if "sweep_universe_sha256" in tick_columns:
+        full_universe_sweep_active = bool(conn.execute(
+            """
+            SELECT COUNT(*) FROM rth_momentum_ticks
+            WHERE session=? AND sweep_universe_sha256 IS NOT NULL
+              AND COALESCE(sweep_shard_symbols,0)>0
+            """,
+            (session.isoformat(),),
+        ).fetchone()[0])
     seen: set[str] = set()
     outcomes: dict[str, set[str]] = {}
     if conn.execute(
@@ -312,6 +331,7 @@ def _fast_lane_evidence(
             candidates.setdefault(symbol, set()).add(direction)
     return (
         tick_count,
+        full_universe_sweep_active,
         seen,
         candidates,
         {symbol: tuple(sorted(values)) for symbol, values in outcomes.items()},
@@ -369,6 +389,7 @@ def evaluate_rth_missed_mover_symbol(
     daily_bars: Sequence[Bar],
     *,
     fast_lane_ticks: int,
+    full_universe_sweep_active: bool = False,
     fast_lane_seen: bool,
     fast_lane_directions: set[str],
     fast_lane_outcomes: tuple[str, ...],
@@ -474,7 +495,11 @@ def evaluate_rth_missed_mover_symbol(
         if fast_lane_ticks == 0:
             reason = "RTH_LANE_NOT_RUNNING"
         elif not fast_lane_seen:
-            reason = "NOT_SELECTED_BY_BOUNDED_RTH_LANE"
+            reason = (
+                "NOT_OBSERVED_BY_FULL_UNIVERSE_RTH_SWEEP"
+                if full_universe_sweep_active
+                else "NOT_SELECTED_BY_BOUNDED_RTH_LANE"
+            )
         else:
             suffix = ",".join(fast_lane_outcomes) or "UNKNOWN"
             reason = f"SELECTED_NOT_QUALIFIED:{suffix}"
@@ -560,9 +585,13 @@ def run_rth_missed_mover_census(
     if attempt > MAX_CENSUS_ATTEMPTS:
         raise ValueError("maximum RTH missed-mover census attempts reached")
     started = time.perf_counter()
-    fast_ticks, fast_seen, fast_candidates, fast_outcomes = _fast_lane_evidence(
-        conn, session
-    )
+    (
+        fast_ticks,
+        full_universe_sweep_active,
+        fast_seen,
+        fast_candidates,
+        fast_outcomes,
+    ) = _fast_lane_evidence(conn, session)
     universe_set = set(symbols)
     fast_seen &= universe_set
     fast_candidates = {
@@ -632,6 +661,7 @@ def run_rth_missed_mover_census(
                     session,
                     response[symbol],
                     fast_lane_ticks=fast_ticks,
+                    full_universe_sweep_active=full_universe_sweep_active,
                     fast_lane_seen=symbol in fast_seen,
                     fast_lane_directions=directions,
                     fast_lane_outcomes=outcomes,
@@ -683,6 +713,7 @@ def run_rth_missed_mover_census(
         "evaluation_errors": evaluation_errors,
         "unexpected_response_symbols": unexpected_response_symbols,
         "postmarket_end_utc": end_utc.isoformat(),
+        "full_universe_sweep_active": full_universe_sweep_active,
         "limitation": (
             "daily OHLCV cannot establish intraday persistence or exact eligibility time; "
             "high/low excursions are review-only"

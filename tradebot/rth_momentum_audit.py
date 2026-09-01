@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import tempfile
@@ -11,10 +12,15 @@ from pathlib import Path
 
 import exchange_calendars as ecals
 
-from tradebot.rth_momentum import POLL_SECONDS, RTH_HANDOFF_LEAD
+from tradebot.rth_momentum import (
+    FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
+    FULL_UNIVERSE_RTH_SWEEP_SOURCE,
+    POLL_SECONDS,
+    RTH_HANDOFF_LEAD,
+)
 
 
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
 CALENDAR = ecals.get_calendar("XNYS")
 FINALIZATION_GRACE = timedelta(minutes=5)
 MAX_SCHEDULED_LAG_MS = 30_000
@@ -36,6 +42,12 @@ class RthOperationalMetrics:
     first_scheduled_tick_utc: str | None
     final_scheduled_tick_utc: str | None
     missing_scheduled_ticks: tuple[str, ...]
+    sweep_ticks: int
+    sweep_cycle_ticks: int | None
+    sweep_universe_sha256: tuple[str, ...]
+    complete_sweep_cycles: int
+    sweep_symbols_total: int
+    sweep_overlap_symbols_total: int
     selected_symbols_total: int
     evaluated_symbols_total: int
     candidate_observations: int
@@ -108,6 +120,234 @@ def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
     ).fetchone() is not None
+
+
+def _audit_universe_sweep(
+    conn: sqlite3.Connection,
+    ticks: list[sqlite3.Row],
+    *,
+    window_start: datetime,
+    issues: list[RthAuditIssue],
+) -> tuple[int, int | None, tuple[str, ...], int, int, int]:
+    """Reconcile each attributable shard and every complete sweep cycle."""
+    if not ticks:
+        return 0, None, (), 0, 0, 0
+    required_columns = {
+        "sweep_universe_sha256",
+        "sweep_cycle_ticks",
+        "sweep_shard_index",
+        "sweep_shard_count",
+        "sweep_shard_size",
+        "sweep_shard_symbols",
+        "sweep_overlap_symbols",
+    }
+    if not required_columns <= set(ticks[0].keys()):
+        _issue(
+            issues,
+            "SWEEP_SCHEMA_MISSING",
+            "RTH tick schema predates attributable full-universe sweep evidence",
+        )
+        return 0, None, (), 0, 0, 0
+    digests: set[str] = set()
+    cycle_values: set[int] = set()
+    cycle_positions: dict[int, dict[int, str]] = {}
+    sweep_ticks = sweep_symbols_total = overlap_total = 0
+    for row in ticks:
+        tick_id = int(row["tick_id"])
+        required = {
+            name: row[name]
+            for name in (
+                "sweep_universe_sha256",
+                "sweep_cycle_ticks",
+                "sweep_shard_index",
+                "sweep_shard_count",
+                "sweep_shard_size",
+                "sweep_shard_symbols",
+                "sweep_overlap_symbols",
+            )
+        }
+        if any(value is None for value in required.values()):
+            _issue(
+                issues,
+                "SWEEP_EVIDENCE_MISSING",
+                f"tick {tick_id} lacks full-universe sweep identity",
+            )
+            continue
+        sweep_ticks += 1
+        digest = str(required["sweep_universe_sha256"])
+        cycle_ticks = int(required["sweep_cycle_ticks"])
+        shard_index = int(required["sweep_shard_index"])
+        shard_count = int(required["sweep_shard_count"])
+        shard_size = int(required["sweep_shard_size"])
+        shard_symbols = int(required["sweep_shard_symbols"])
+        overlap = int(required["sweep_overlap_symbols"])
+        universe_symbols = int(row["universe_symbols"])
+        digests.add(digest)
+        cycle_values.add(cycle_ticks)
+        sweep_symbols_total += shard_symbols
+        overlap_total += overlap
+        if (
+            cycle_ticks != FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS
+            or universe_symbols <= 0
+            or shard_count != min(cycle_ticks, universe_symbols)
+            or shard_size != math.ceil(universe_symbols / shard_count)
+            or not 0 <= shard_index < shard_count
+            or not 0 <= overlap <= shard_symbols
+            or not 0 < shard_symbols <= shard_size
+        ):
+            _issue(
+                issues,
+                "SWEEP_IDENTITY_INVALID",
+                f"tick {tick_id} has invalid shard identity {required!r}",
+            )
+            continue
+        scheduled = datetime.fromisoformat(row["scheduled_tick_utc"])
+        if scheduled.tzinfo is None or scheduled.utcoffset() is None:
+            continue
+        slot_seconds = (
+            scheduled.astimezone(timezone.utc) - window_start
+        ).total_seconds()
+        if slot_seconds < 0 or slot_seconds % POLL_SECONDS:
+            _issue(
+                issues,
+                "SWEEP_SCHEDULE_INVALID",
+                f"tick {tick_id} is not on the RTH sweep minute grid",
+            )
+            continue
+        slot = int(slot_seconds // POLL_SECONDS)
+        if shard_index != slot % shard_count:
+            _issue(
+                issues,
+                "SWEEP_SHARD_SEQUENCE",
+                f"tick {tick_id} shard={shard_index}; expected={slot % shard_count}",
+            )
+        observations = conn.execute(
+            """
+            SELECT symbol,sources_json,screen_evidence_json
+            FROM rth_momentum_observations WHERE tick_id=? ORDER BY symbol
+            """,
+            (tick_id,),
+        ).fetchall()
+        if len(observations) != int(row["selected_symbols"]):
+            _issue(
+                issues,
+                "OBSERVATION_CONSERVATION",
+                f"tick {tick_id} selected {row['selected_symbols']} but stored "
+                f"{len(observations)} observations",
+            )
+        positions: dict[int, str] = {}
+        attributed = 0
+        for observation in observations:
+            try:
+                sources = json.loads(observation["sources_json"])
+                evidence = json.loads(observation["screen_evidence_json"])
+            except (TypeError, ValueError, json.JSONDecodeError):
+                _issue(
+                    issues,
+                    "SWEEP_EVIDENCE_INVALID",
+                    f"tick {tick_id} symbol {observation['symbol']} has invalid JSON",
+                )
+                continue
+            if FULL_UNIVERSE_RTH_SWEEP_SOURCE not in sources:
+                continue
+            attributed += 1
+            sweep_evidence = [
+                item
+                for item in evidence
+                if isinstance(item, dict)
+                and item.get("source") == FULL_UNIVERSE_RTH_SWEEP_SOURCE
+            ]
+            if len(sweep_evidence) != 1:
+                _issue(
+                    issues,
+                    "SWEEP_EVIDENCE_INVALID",
+                    f"tick {tick_id} symbol {observation['symbol']} lacks one sweep fact",
+                )
+                continue
+            fact = sweep_evidence[0]
+            if (
+                fact.get("universe_sha256") != digest
+                or fact.get("cycle_ticks") != cycle_ticks
+                or fact.get("shard_index") != shard_index
+                or fact.get("shard_count") != shard_count
+                or fact.get("shard_size") != shard_size
+                or fact.get("scheduled_tick_utc")
+                != scheduled.astimezone(timezone.utc).isoformat()
+            ):
+                _issue(
+                    issues,
+                    "SWEEP_EVIDENCE_IDENTITY_MISMATCH",
+                    f"tick {tick_id} symbol {observation['symbol']} disagrees with tick",
+                )
+                continue
+            position = fact.get("universe_position")
+            if not isinstance(position, int) or isinstance(position, bool):
+                _issue(
+                    issues,
+                    "SWEEP_POSITION_INVALID",
+                    f"tick {tick_id} symbol {observation['symbol']} has invalid position",
+                )
+                continue
+            if position in positions:
+                _issue(
+                    issues,
+                    "SWEEP_POSITION_DUPLICATE",
+                    f"tick {tick_id} repeats universe position {position}",
+                )
+            positions[position] = observation["symbol"]
+        if attributed != shard_symbols or len(positions) != shard_symbols:
+            _issue(
+                issues,
+                "SWEEP_OBSERVATION_MISMATCH",
+                f"tick {tick_id} declares {shard_symbols}, attributed={attributed}, "
+                f"positions={len(positions)}",
+            )
+        cycle_number = slot // shard_count
+        cycle = cycle_positions.setdefault(cycle_number, {})
+        for position, symbol in positions.items():
+            if position in cycle:
+                _issue(
+                    issues,
+                    "SWEEP_CYCLE_DUPLICATE_POSITION",
+                    f"cycle {cycle_number} repeats position {position}",
+                )
+            cycle[position] = symbol
+    if len(digests) > 1:
+        _issue(issues, "SWEEP_UNIVERSE_DRIFT", f"digests={sorted(digests)!r}")
+    if len(cycle_values) > 1:
+        _issue(issues, "SWEEP_CYCLE_DRIFT", f"cycle_ticks={sorted(cycle_values)!r}")
+    universe_counts = {int(row["universe_symbols"]) for row in ticks}
+    if len(universe_counts) > 1:
+        _issue(
+            issues,
+            "SWEEP_UNIVERSE_COUNT_DRIFT",
+            f"universe_counts={sorted(universe_counts)!r}",
+        )
+    universe_count = next(iter(universe_counts), 0)
+    complete_cycles = 0
+    for cycle_number, positions in sorted(cycle_positions.items()):
+        expected_slots = min(
+            FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
+            universe_count,
+        )
+        cycle_start_slot = cycle_number * expected_slots
+        if cycle_start_slot + expected_slots > len(ticks):
+            continue
+        complete_cycles += 1
+        if set(positions) != set(range(universe_count)):
+            _issue(
+                issues,
+                "SWEEP_CYCLE_COVERAGE",
+                f"cycle {cycle_number} covered {len(positions)}/{universe_count}",
+            )
+    return (
+        sweep_ticks,
+        next(iter(cycle_values), None) if len(cycle_values) == 1 else None,
+        tuple(sorted(digests)),
+        complete_cycles,
+        sweep_symbols_total,
+        overlap_total,
+    )
 
 
 def build_rth_momentum_audit(
@@ -239,6 +479,12 @@ def _build_rth_momentum_audit(
         else []
     )
     outcomes = {row["outcome"]: int(row["count"]) for row in observations}
+    sweep_metrics = _audit_universe_sweep(
+        conn,
+        ticks,
+        window_start=start,
+        issues=issues,
+    )
     has_candidates = _has_table(conn, "rth_momentum_candidates")
     has_handoffs = _has_table(conn, "rth_postmarket_handoffs")
     unique_candidates = (
@@ -375,6 +621,12 @@ def _build_rth_momentum_audit(
         first_scheduled_tick_utc=(min(scheduled).isoformat() if scheduled else None),
         final_scheduled_tick_utc=(max(scheduled).isoformat() if scheduled else None),
         missing_scheduled_ticks=tuple(value.isoformat() for value in missing),
+        sweep_ticks=sweep_metrics[0],
+        sweep_cycle_ticks=sweep_metrics[1],
+        sweep_universe_sha256=sweep_metrics[2],
+        complete_sweep_cycles=sweep_metrics[3],
+        sweep_symbols_total=sweep_metrics[4],
+        sweep_overlap_symbols_total=sweep_metrics[5],
         selected_symbols_total=sum(int(row["selected_symbols"]) for row in ticks),
         evaluated_symbols_total=sum(int(row["evaluated_symbols"]) for row in ticks),
         candidate_observations=sum(int(row["candidate_observations"]) for row in ticks),
@@ -484,11 +736,14 @@ def write_completed_rth_audits(
 
 
 def latest_rth_audit_summary(audit_dir: Path) -> dict | None:
-    paths = list(audit_dir.glob("rth_momentum_audit_*_v1.json"))
+    paths = list(audit_dir.glob("rth_momentum_audit_*_v*.json"))
     if not paths:
         return None
     payloads = [json.loads(path.read_text(encoding="utf-8")) for path in paths]
-    payload = max(payloads, key=lambda item: item["session"])
+    payload = max(
+        payloads,
+        key=lambda item: (item["session"], int(item.get("audit_version", 0))),
+    )
     return {
         "session": payload["session"],
         "operational_clean": payload["operational_clean"],

@@ -240,23 +240,28 @@ evidence.
   freshness, top-N scope, ranks, universe/fetch/evaluation/candidate counts,
   revision and threshold provenance; and preserves candidate plus near-miss
   lifecycles in the already-backed-up audit directory.
-- Final-RTH-to-postmarket handoff: implemented on a review branch, not yet
-  merged, deployed, or enabled. The discovery supervisor wakes 30 minutes
-  before the real XNYS close, admits bounded mover/activity symbols plus
-  scheduled after-hours reporters, evaluates strict completed RTH bars, and
+- Final-RTH-to-postmarket handoff: implemented on stacked review branches, not
+  yet merged, deployed, or enabled. The discovery supervisor wakes 30 minutes
+  before the real XNYS close, admits bounded mover/activity symbols, scheduled
+  after-hours reporters, and one attributable deterministic active-universe
+  shard per minute. Five shards cover the market at the five-minute cadence.
+  It evaluates strict completed RTH bars and
   persists an append-only `RTH_QUALIFIED` identity. Postmarket reconciliation
   adds either a same-direction qualification link or an explicit terminal
   non-qualification. Per-stage timing, schedule gaps, conservation, provenance,
   and handoff integrity are covered by an immutable 31-tick daily audit whose
-  exceptions fail discovery health. This closes a clock-boundary visibility
-  hole; it does not by itself prove full-market RTH recall. Holdout calibration,
-  independent-provider evidence, and the customer gate remain open.
+  exceptions fail discovery health. Audit v2 additionally reconciles sweep
+  digest, shard order, source evidence, universe positions, and complete cycles.
+  This closes clock-boundary and bounded-admission visibility holes, but the
+  retrospective census, empirical holdout, independent-provider evidence, and
+  customer gate remain mandatory.
 - Daily RTH missed-mover census: implemented on the stacked review branch, not
   merged, deployed, or enabled. After the 20:05 ET finalization point it scans
   finalized daily OHLCV for the full active universe in bounded chunks,
   identifies liquid closes at least 8% from the prior close, preserves high/low
   excursion-only review cases, and attributes every uncaught direction to lane
-  outage, bounded-selection omission, or exact live rejection outcomes. Runs,
+  outage, legacy bounded-selection omission, full-sweep invariant failure, or
+  exact live rejection outcomes. Runs,
   per-symbol events, universe identity, failures, and reports are append-only.
   Because the live lane and census both use Alpaca, the report explicitly
   remains ineligible as independent quality evidence. Independently labeled

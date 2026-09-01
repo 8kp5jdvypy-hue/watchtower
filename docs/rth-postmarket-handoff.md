@@ -16,13 +16,19 @@ wakes at `close - 30 minutes` and schedules one tick per minute through the
 exchange close, inclusive. That is 31 expected scheduled identities. Each tick
 unions:
 
-- the bounded Alpaca SIP mover/activity screen; and
-- symbols scheduled to report earnings after that session's close.
+- the bounded Alpaca SIP mover/activity screen;
+- symbols scheduled to report earnings after that session's close; and
+- one deterministic shard of the complete active universe.
 
-This is a low-latency admission lane, not a full-universe RTH census. The
-existing Stage-1 archive and the separate postmarket full-universe sweep remain
-the coverage truth surfaces. The after-the-fact full-market close census in
-`docs/rth-missed-mover-census.md` measures what this bounded lane did not admit.
+Five shards cover the full active universe at the five-minute bar cadence while
+the provider screen remains the low-latency fast lane. Sweep-only symbols use a
+bounded final-window fetch; provider leaders and scheduled reporters retain the
+full-session fetch. The Stage-1 archive and after-the-fact close census remain
+independent coverage truth surfaces rather than assuming the live sweep worked.
+If the bounded screen fails validation, that error is stored and makes the tick
+operationally dirty, but the attributable universe shard still evaluates. A
+screen endpoint outage therefore cannot silently erase the independent live
+coverage lane.
 
 The shared market-wide screen validator requires the exact endpoint set,
 provider/feed agreement, bounded ranks, finite metrics, canonical symbol
@@ -65,10 +71,12 @@ postmarket evidence window ends without that qualification, reconciliation adds
 ## Daily evidence gate
 
 Five minutes after the exchange close, the read-only audit can publish
-`rth_momentum_audit_<session>_v1.json`. A session is evidence-eligible only when
+`rth_momentum_audit_<session>_v2.json`. A session is evidence-eligible only when
 all 31 scheduled ticks are present and:
 
 - selection equals evaluation on every tick;
+- every sweep tick has the expected universe digest, shard identity, attributed
+  observations, unique universe positions, and complete five-tick cycles;
 - no invariant, evaluation error, or missed cycle exists;
 - schedule lag and total processing latency stay within the declared bounds;
 - code/feed/provider provenance is internally consistent;

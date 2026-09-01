@@ -46,7 +46,7 @@ def test_failure_injection_proves_conservation_and_zero_candidate_leakage():
     assert artifact.status == "passed"
     assert artifact.revision == REVISION
     assert artifact.completed_at_utc == COMPLETED.isoformat()
-    assert len(artifact.checks) == 9
+    assert len(artifact.checks) == 12
     assert all(check.passed for check in artifact.checks)
     assert {check.name for check in artifact.checks} >= {
         "missing_bulk_bar_is_conserved_as_fetch_error",
@@ -55,6 +55,9 @@ def test_failure_injection_proves_conservation_and_zero_candidate_leakage():
         "screener_outage_fails_before_persistence",
         "full_universe_sweep_outage_is_explicit_and_conserved",
         "full_universe_sweep_outage_cannot_fabricate_or_suppress_candidate",
+        "final_rth_universe_sweep_outage_is_explicit_and_conserved",
+        "final_rth_universe_sweep_outage_cannot_leak_or_hide_candidate",
+        "final_rth_sweep_survives_bounded_screen_outage_loudly",
     }
 
 
