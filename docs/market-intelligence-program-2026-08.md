@@ -274,6 +274,17 @@ evidence.
   naive, or out-of-order timestamps. Threshold drift is explicit. The empirical
   holdout remains intentionally empty and fails closed; synthetic success does
   not count as live precision, recall, profitability, or customer readiness.
+- Symbol incident reconstruction: implemented on the stacked review branch,
+  not merged or deployed. A read-only utility traces one symbol/session across
+  asset identity, digest-verified Stage-1 evidence, evaluations, detections,
+  decision and mark ledgers, catalysts, final-RTH observations/census/handoff,
+  postmarket qualification, lifecycle, context, rank, outcome marks, and the
+  owner-only outbox. Missing databases/tables, schema drift, corrupt archives,
+  malformed or non-UTC timestamps, invalid JSON, duplicates, and stored-order
+  regressions remain visible. The report separates observed, qualified, queued,
+  and delivered facts and refuses to translate absent evidence into a broad
+  caught/missed claim. It performs no vendor call, alert, broker, or order
+  action.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a
