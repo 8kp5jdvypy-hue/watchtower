@@ -25,6 +25,7 @@ SUBSYSTEM_STATUS_FIELDS = (
     "rank_status",
     "rth_handoff_status",
     "rth_audit_status",
+    "rth_missed_mover_census_status",
 )
 
 

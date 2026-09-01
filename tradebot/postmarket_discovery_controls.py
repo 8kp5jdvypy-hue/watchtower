@@ -43,6 +43,7 @@ DISCOVERY_STORE_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery.py"
 DISCOVERY_HEALTH_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery_health.py"
 RTH_MOMENTUM_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum.py"
 RTH_AUDIT_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum_audit.py"
+RTH_CENSUS_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_missed_mover_census.py"
 SESSION_CLOSE = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
 NOW = SESSION_CLOSE + timedelta(minutes=10)
 UPDATED = NOW - timedelta(minutes=1)
@@ -500,6 +501,7 @@ def run_discovery_delivery_isolation(
     store_source_path: Path = DISCOVERY_STORE_SOURCE_PATH,
     rth_source_path: Path = RTH_MOMENTUM_SOURCE_PATH,
     rth_audit_source_path: Path = RTH_AUDIT_SOURCE_PATH,
+    rth_census_source_path: Path = RTH_CENSUS_SOURCE_PATH,
 ) -> DiscoveryControlEvidence:
     """Prove the discovery service has no alert, broker, or order dependency."""
     revision = _revision(revision, "revision")
@@ -508,17 +510,20 @@ def run_discovery_delivery_isolation(
     store_raw = store_source_path.read_bytes()
     rth_raw = rth_source_path.read_bytes()
     rth_audit_raw = rth_audit_source_path.read_bytes()
+    rth_census_raw = rth_census_source_path.read_bytes()
     compose = compose_raw.decode("utf-8")
     source = source_raw.decode("utf-8")
     store = store_raw.decode("utf-8")
     rth_source = rth_raw.decode("utf-8")
     rth_audit_source = rth_audit_raw.decode("utf-8")
+    rth_census_source = rth_census_raw.decode("utf-8")
     service = _compose_service_block(compose, "postmarket-discovery")
     imports = (
         _imported_modules(source)
         | _imported_modules(store)
         | _imported_modules(rth_source)
         | _imported_modules(rth_audit_source)
+        | _imported_modules(rth_census_source)
     )
     delivery_imports = sorted(
         module
@@ -530,6 +535,7 @@ def run_discovery_delivery_isolation(
         for token in ("send_alert(", "enqueue_alert(", "place_order(", "submit_order(")
         if token in source or token in store or token in rth_source
         or token in rth_audit_source
+        or token in rth_census_source
     )
     checks = (
         DiscoveryControlCheck(
@@ -539,7 +545,8 @@ def run_discovery_delivery_isolation(
             f"observer_sha256={hashlib.sha256(source_raw).hexdigest()}; "
             f"store_sha256={hashlib.sha256(store_raw).hexdigest()}; "
             f"rth_sha256={hashlib.sha256(rth_raw).hexdigest()}; "
-            f"rth_audit_sha256={hashlib.sha256(rth_audit_raw).hexdigest()}",
+            f"rth_audit_sha256={hashlib.sha256(rth_audit_raw).hexdigest()}; "
+            f"rth_census_sha256={hashlib.sha256(rth_census_raw).hexdigest()}",
         ),
         DiscoveryControlCheck(
             "discovery_modules_have_no_delivery_or_order_callsite",

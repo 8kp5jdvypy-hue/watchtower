@@ -75,6 +75,13 @@ from tradebot.rth_momentum_audit import (
     rth_audit_session_due,
     write_completed_rth_audits,
 )
+from tradebot.rth_missed_mover_census import (
+    latest_rth_missed_mover_census_summary,
+    next_unreported_rth_missed_mover_census,
+    next_due_rth_missed_mover_census_session,
+    run_rth_missed_mover_census,
+    write_rth_missed_mover_census_report,
+)
 from tradebot.universe import active_symbols, connect as connect_universe
 
 
@@ -711,6 +718,112 @@ def recall_census_heartbeat_fields(
         }
 
 
+def rth_missed_mover_census_heartbeat_fields(
+    now: datetime,
+    shadow_conn,
+    universe_conn,
+    *,
+    data_feed: str,
+    version: str | None,
+    daily_fetch: Callable[[list[str]], dict] = _daily_bars_fetch,
+) -> dict:
+    """Run one finalized full-universe daily-mover census per idle cycle."""
+    try:
+        due = next_due_rth_missed_mover_census_session(shadow_conn, now=now)
+        if due is None:
+            unreported = next_unreported_rth_missed_mover_census(
+                shadow_conn, AUDIT_DIR
+            )
+            report_written = False
+            if unreported is not None:
+                _, report_written = write_rth_missed_mover_census_report(
+                    shadow_conn, AUDIT_DIR, unreported
+                )
+            return {
+                "rth_missed_mover_census_status": "current",
+                "rth_missed_mover_census_report_written": report_written,
+                "latest_rth_missed_mover_census": (
+                    latest_rth_missed_mover_census_summary(AUDIT_DIR)
+                ),
+            }
+        session, _, postmarket_end = due
+        result, _ = run_rth_missed_mover_census(
+            shadow_conn,
+            universe_symbols=active_symbols(universe_conn),
+            session=session,
+            postmarket_end=postmarket_end,
+            now=now,
+            run_id=new_run_id(),
+            code_version=version,
+            data_feed=data_feed,
+            daily_fetch=daily_fetch,
+        )
+        report, written = write_rth_missed_mover_census_report(
+            shadow_conn, AUDIT_DIR, result.census_id
+        )
+        logger.info(
+            "rth_missed_mover_census session=%s attempt=%s status=%s "
+            "universe=%s fetched=%s major_pairs=%s caught=%s missed=%s "
+            "recall=%s excursions=%s unavailable=%s errors=%s latency_ms=%s "
+            "report_written=%s",
+            result.session,
+            result.attempt,
+            result.status,
+            result.universe_symbols,
+            result.fetched_symbols,
+            result.major_close_pairs,
+            result.caught_pairs,
+            result.missed_pairs,
+            result.close_recall,
+            result.excursion_only_symbols,
+            result.unavailable_symbols,
+            result.error_count,
+            result.latency_ms,
+            written,
+        )
+        return {
+            "rth_missed_mover_census_status": result.status,
+            "rth_missed_mover_census_session": result.session,
+            "rth_missed_mover_census_attempt": result.attempt,
+            "rth_missed_mover_census_universe": result.universe_symbols,
+            "rth_missed_mover_census_fetched": result.fetched_symbols,
+            "rth_missed_mover_census_major_pairs": result.major_close_pairs,
+            "rth_missed_mover_census_caught_pairs": result.caught_pairs,
+            "rth_missed_mover_census_missed_pairs": result.missed_pairs,
+            "rth_missed_mover_census_recall": result.close_recall,
+            "rth_missed_mover_census_excursions": result.excursion_only_symbols,
+            "rth_missed_mover_census_unavailable": result.unavailable_symbols,
+            "rth_missed_mover_census_errors": result.error_count,
+            "rth_missed_mover_census_latency_ms": result.latency_ms,
+            "rth_missed_mover_census_report_written": written,
+            "latest_rth_missed_mover_census": {
+                "session": report.session,
+                "report_version": report.report_version,
+                "operational_complete": report.operational_complete,
+                "quality_evidence_eligible": report.quality_evidence_eligible,
+                "close_recall": report.metrics["close_recall"],
+                "missed_pairs": report.metrics["missed_pairs"],
+                "unavailable_symbols": report.metrics["unavailable_symbols"],
+                "issue_codes": list(report.issue_codes),
+            },
+        }
+    except Exception as exc:
+        shadow_conn.rollback()
+        logger.exception("RTH missed-mover census failed")
+        try:
+            latest = latest_rth_missed_mover_census_summary(AUDIT_DIR)
+        except Exception as summary_exc:
+            latest = {
+                "status": "error",
+                "error": f"{type(summary_exc).__name__}: {summary_exc}"[:1000],
+            }
+        return {
+            "rth_missed_mover_census_status": "error",
+            "rth_missed_mover_census_error": f"{type(exc).__name__}: {exc}"[:1000],
+            "latest_rth_missed_mover_census": latest,
+        }
+
+
 def provider_proof_heartbeat_fields(
     now: datetime,
     shadow_conn,
@@ -1195,6 +1308,13 @@ def main() -> int:
                 data_feed=data_feed,
                 version=version,
             )
+            rth_census_fields = rth_missed_mover_census_heartbeat_fields(
+                now,
+                shadow_conn,
+                universe_conn,
+                data_feed=data_feed,
+                version=version,
+            )
             provider_fields = provider_proof_heartbeat_fields(
                 now,
                 shadow_conn,
@@ -1214,6 +1334,7 @@ def main() -> int:
                     **rank_fields,
                     **quality_fields,
                     **census_fields,
+                    **rth_census_fields,
                     **provider_fields,
                     **rth_fields,
                 ),
