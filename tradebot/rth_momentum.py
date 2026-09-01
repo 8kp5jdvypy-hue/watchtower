@@ -438,6 +438,23 @@ def evaluate_rth_momentum(
     close_utc = session_close.astimezone(timezone.utc)
     if not open_utc < close_utc or not open_utc <= current <= close_utc:
         raise ValueError("RTH evaluation time must fall inside the exchange session")
+    if any(
+        bar.ts.tzinfo is None or bar.ts.utcoffset() is None for bar in rth_bars
+    ):
+        return _base_evaluation(
+            symbol,
+            session,
+            OUTCOME_INVALID_DATA,
+            "RTH history contains a naive timestamp",
+        )
+    timestamps = [bar.ts for bar in rth_bars]
+    if timestamps != sorted(timestamps):
+        return _base_evaluation(
+            symbol,
+            session,
+            OUTCOME_INVALID_DATA,
+            "RTH history is out of timestamp order",
+        )
     baseline = _prior_close(daily_bars, session)
     if baseline is None:
         return _base_evaluation(
