@@ -285,6 +285,16 @@ evidence.
   and delivered facts and refuses to translate absent evidence into a broad
   caught/missed claim. It performs no vendor call, alert, broker, or order
   action.
+- Interpretable rank calibration: implemented on a stacked review branch, not
+  merged, deployed, fitted, or holdout-qualified. A development-only monotonic
+  isotonic mapping must be frozen before the first holdout session opens and
+  binds exact labels, first-rankable scores, policy, revision, and model by
+  SHA-256. Development labels then freeze append-only. Only an explicitly
+  unblinded independent holdout can validate the observed-quality estimate;
+  sample support, reliability-bin support, Brier score, and expected
+  calibration error all fail closed. The raw evidence score remains a
+  heuristic, and no calibrated probability exists until real holdout evidence
+  passes every gate.
 - Owner visibility bridge: implemented as a separate default-off service that
   reads the shadow ledger in SQLite read-only mode and can enqueue a fresh,
   already-qualified candidate to one explicit administrator chat. Discovery

@@ -53,6 +53,9 @@ def _fixture_data(tmp_path: Path) -> tuple[Path, Path]:
     (audits / "postmarket_rank_empirical_deadbeef_holdout_cafebabe_v1.json").write_text(
         '{"artifact_type":"postmarket_rank_empirical"}\n', encoding="utf-8"
     )
+    (audits / "postmarket_rank_calibration_deadbeef_holdout_feedface_v1.json").write_text(
+        '{"artifact_type":"postmarket_rank_calibration"}\n', encoding="utf-8"
+    )
     (evidence / "kill_switch.json").write_text(
         '{"status":"passed"}\n', encoding="utf-8"
     )
@@ -208,6 +211,12 @@ def test_complete_backup_set_restores_every_database_and_artifact(tmp_path):
         / "data"
         / "postmarket_audits"
         / "postmarket_rank_empirical_deadbeef_holdout_cafebabe_v1.json"
+    ).is_file()
+    assert (
+        restore_dir
+        / "data"
+        / "postmarket_audits"
+        / "postmarket_rank_calibration_deadbeef_holdout_feedface_v1.json"
     ).is_file()
     assert (
         restore_dir

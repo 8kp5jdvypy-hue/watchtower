@@ -203,6 +203,22 @@ def test_label_writer_is_rank_blind_append_only_and_freezes_holdout():
     assert len(digest) == 64
     with pytest.raises(ValueError, match="frozen"):
         _label(conn, HOLDOUT, "AAA", "ineligible")
+    with pytest.raises(sqlite3.IntegrityError, match="frozen after unblinding"):
+        conn.execute(
+            """
+            INSERT INTO postmarket_independent_labels
+                (experiment_id,session,symbol,revision,classification,direction,
+                 eligible_at_utc,labeler,label_method,blinded_to_rank,reason_code,
+                 rationale,artifact_sha256,artifact_providers_json,
+                 artifact_feeds_json,artifact_acquired_at_utc,recorded_at_utc)
+            SELECT experiment_id,session,'ZZZ',1,classification,direction,
+                   eligible_at_utc,labeler,label_method,blinded_to_rank,reason_code,
+                   rationale,artifact_sha256,artifact_providers_json,
+                   artifact_feeds_json,artifact_acquired_at_utc,recorded_at_utc
+            FROM postmarket_independent_labels WHERE label_id=?
+            """,
+            (first,),
+        )
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute("UPDATE postmarket_independent_labels SET rationale='changed'")
 
@@ -228,6 +244,36 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
     assert report.passed_locked_policy is True
     assert report.blocking_reasons == ()
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_empirical_runs").fetchone()[0] == 1
+    with pytest.raises(ValueError, match="different attribution"):
+        evaluate_rank_experiment(
+            conn,
+            experiment_id="rank-v1-exp-1",
+            split="development",
+            evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),
+            code_version="def5678",
+        )
+    assert conn.execute(
+        "SELECT code_version FROM postmarket_rank_empirical_runs"
+    ).fetchone()[0] == "abc1234"
+
+
+def test_empirical_evaluation_cannot_be_backdated_before_input_evidence():
+    conn = _conn()
+    _lock(conn)
+    _seed_session(conn, DEV)
+    _seed_labels(conn, DEV)
+
+    with pytest.raises(ValueError, match="latest label evidence"):
+        evaluate_rank_experiment(
+            conn,
+            experiment_id="rank-v1-exp-1",
+            split="development",
+            evaluated_at=datetime(2026, 8, 21, 0, 0, 30, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_rank_empirical_runs"
+    ).fetchone()[0] == 0
 
 
 def test_exact_empirical_run_exports_as_immutable_digest_bound_artifact(tmp_path):
@@ -325,6 +371,12 @@ def test_holdout_cannot_be_read_before_explicit_unblind_and_failures_are_named()
             conn, "rank-v1-exp-1"
         )[0],
     )
+    with pytest.raises(ValueError, match="cannot predate holdout unblinding"):
+        evaluate_rank_experiment(
+            conn, experiment_id="rank-v1-exp-1", split="holdout",
+            evaluated_at=datetime(2026, 8, 22, 1, 59, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
     report = evaluate_rank_experiment(
         conn, experiment_id="rank-v1-exp-1", split="holdout",
         evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),

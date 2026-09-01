@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_discovery_evidence_set_v2.schema.json",
+  "title": "Postmarket market-wide discovery evidence set v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "evidence_set_version", "created_at_utc",
+    "coverage_start", "coverage_end", "campaign_artifact", "policy",
+    "discovery_audits", "recall_census_reports", "provider_proof_reports",
+    "empirical_artifact", "calibration_artifact", "control_artifacts"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "status": {"const": "locked"},
+    "evidence_set_version": {"type": "string", "minLength": 1},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "coverage_start": {"type": "string", "format": "date"},
+    "coverage_end": {"type": "string", "format": "date"},
+    "campaign_artifact": {"$ref": "#/$defs/singleArtifact"},
+    "policy": {"$ref": "postmarket_discovery_evidence_campaign_v2.schema.json#/$defs/policy"},
+    "discovery_audits": {"$ref": "#/$defs/sessionArtifacts"},
+    "recall_census_reports": {"$ref": "#/$defs/sessionArtifacts"},
+    "provider_proof_reports": {"$ref": "#/$defs/sessionArtifacts"},
+    "empirical_artifact": {"$ref": "#/$defs/singleArtifact"},
+    "calibration_artifact": {"$ref": "#/$defs/singleArtifact"},
+    "control_artifacts": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "items": {"$ref": "#/$defs/controlArtifact"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "singleArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "sessionArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session", "path", "sha256"],
+      "properties": {
+        "session": {"type": "string", "format": "date"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "sessionArtifacts": {
+      "type": "array", "minItems": 1,
+      "items": {"$ref": "#/$defs/sessionArtifact"}
+    },
+    "controlArtifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "path", "sha256", "revision", "completed_at_utc"],
+      "properties": {
+        "kind": {"enum": [
+          "discovery_failure_injection", "discovery_kill_switch",
+          "discovery_delivery_isolation", "rollback_runbook"
+        ]},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "revision": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+        "completed_at_utc": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

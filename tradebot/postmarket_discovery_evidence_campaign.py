@@ -12,6 +12,7 @@ from pathlib import Path
 
 from tradebot.postmarket_discovery_evidence_gate import (
     CALENDAR,
+    CAMPAIGN_SCHEMA_VERSION,
     _expected_sessions,
     _parse_policy,
     _sha256,
@@ -52,7 +53,7 @@ def lock_discovery_evidence_campaign(
     if locked >= first_open:
         raise ValueError("campaign must be locked before its first session opens")
     payload = {
-        "schema_version": 1,
+        "schema_version": CAMPAIGN_SCHEMA_VERSION,
         "status": "locked",
         "campaign_id": campaign_id.strip(),
         "locked_at_utc": locked.isoformat(),
@@ -116,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-positive-labels", type=int, required=True)
     parser.add_argument("--min-empirical-recall", type=float, required=True)
     parser.add_argument("--min-empirical-precision", type=float, required=True)
+    parser.add_argument("--min-calibration-negative-labels", type=int, required=True)
+    parser.add_argument("--min-calibration-bin-labels", type=int, required=True)
+    parser.add_argument("--max-calibration-brier-score", type=float, required=True)
+    parser.add_argument("--max-expected-calibration-error", type=float, required=True)
     parser.add_argument("--min-primary-recall", type=float, required=True)
     parser.add_argument("--max-primary-detection-latency-seconds", type=float, required=True)
     parser.add_argument("--min-provider-comparable-coverage", type=float, required=True)
@@ -140,6 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allowed-census-code-version", action="append", required=True)
     parser.add_argument("--allowed-provider-proof-code-version", action="append", required=True)
     parser.add_argument("--allowed-empirical-code-version", action="append", required=True)
+    parser.add_argument("--allowed-calibration-code-version", action="append", required=True)
     parser.add_argument("--allowed-control-code-version", action="append", required=True)
     args = parser.parse_args(argv)
     policy = {
@@ -148,6 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         "min_positive_labels": args.min_positive_labels,
         "min_empirical_recall": args.min_empirical_recall,
         "min_empirical_precision": args.min_empirical_precision,
+        "min_calibration_negative_labels": args.min_calibration_negative_labels,
+        "min_calibration_bin_labels": args.min_calibration_bin_labels,
+        "max_calibration_brier_score": args.max_calibration_brier_score,
+        "max_expected_calibration_error": args.max_expected_calibration_error,
         "min_primary_recall": args.min_primary_recall,
         "max_primary_detection_latency_seconds": args.max_primary_detection_latency_seconds,
         "min_provider_comparable_coverage": args.min_provider_comparable_coverage,
@@ -172,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         "allowed_census_code_versions": args.allowed_census_code_version,
         "allowed_provider_proof_code_versions": args.allowed_provider_proof_code_version,
         "allowed_empirical_code_versions": args.allowed_empirical_code_version,
+        "allowed_calibration_code_versions": args.allowed_calibration_code_version,
         "allowed_control_code_versions": args.allowed_control_code_version,
         "require_zero_dirty_sessions": True,
         "require_complete_session_inventory": True,

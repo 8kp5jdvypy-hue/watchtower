@@ -116,6 +116,18 @@ CREATE TRIGGER IF NOT EXISTS postmarket_independent_labels_no_delete
 BEFORE DELETE ON postmarket_independent_labels BEGIN
     SELECT RAISE(ABORT, 'postmarket_independent_labels is append-only');
 END;
+CREATE TRIGGER IF NOT EXISTS postmarket_holdout_labels_frozen_after_unblind
+BEFORE INSERT ON postmarket_independent_labels
+WHEN EXISTS (
+    SELECT 1
+    FROM postmarket_holdout_unblinds u
+    JOIN postmarket_rank_experiments e ON e.experiment_id=u.experiment_id
+    JOIN json_each(e.holdout_sessions_json) s ON s.value=NEW.session
+    WHERE u.experiment_id=NEW.experiment_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'holdout labels are frozen after unblinding');
+END;
 CREATE TRIGGER IF NOT EXISTS postmarket_holdout_unblinds_no_update
 BEFORE UPDATE ON postmarket_holdout_unblinds BEGIN
     SELECT RAISE(ABORT, 'postmarket_holdout_unblinds is append-only');
@@ -691,16 +703,49 @@ def evaluate_rank_experiment(
 ) -> EmpiricalReport:
     ensure_empirical_schema(conn)
     revision = _revision(code_version, "code_version")
+    evaluated = _utc(evaluated_at, "evaluated_at")
     if split not in SPLITS:
         raise ValueError(f"split must be one of {sorted(SPLITS)}")
     experiment = _experiment(conn, experiment_id)
-    if split == "holdout" and conn.execute(
-        "SELECT 1 FROM postmarket_holdout_unblinds WHERE experiment_id=?",
+    unblind = conn.execute(
+        "SELECT unblinded_at_utc,label_inventory_sha256,holdout_labels "
+        "FROM postmarket_holdout_unblinds WHERE experiment_id=?",
         (experiment_id,),
-    ).fetchone() is None:
-        raise ValueError("holdout is sealed; record an explicit unblind event first")
+    ).fetchone()
+    if split == "holdout":
+        if unblind is None:
+            raise ValueError("holdout is sealed; record an explicit unblind event first")
+        unblinded_at = _utc(datetime.fromisoformat(unblind[0]), "unblinded_at_utc")
+        if evaluated < unblinded_at:
+            raise ValueError("evaluation cannot predate holdout unblinding")
     sessions = tuple(json.loads(experiment[f"{split}_sessions_json"]))
     labels = _latest_labels(conn, experiment_id, sessions)
+    if labels:
+        latest_label_time = max(
+            _utc(datetime.fromisoformat(row["recorded_at_utc"]), "recorded_at_utc")
+            for row in labels
+        )
+        if evaluated < latest_label_time:
+            raise ValueError("evaluation cannot predate its latest label evidence")
+    if split == "holdout":
+        inventory_digest, inventory_count, _ = holdout_label_inventory(
+            conn, experiment_id
+        )
+        if inventory_digest != unblind[1] or inventory_count != int(unblind[2]):
+            raise ValueError("holdout label inventory changed after unblinding")
+    placeholders = ",".join("?" for _ in sessions)
+    rank_times = conn.execute(
+        f"""
+        SELECT MAX(x.as_of_utc),MAX(x.recorded_at_utc)
+        FROM postmarket_rank_runs x
+        JOIN postmarket_candidate_ranks r ON r.rank_run_id=x.rank_run_id
+        WHERE r.session IN ({placeholders}) AND x.rank_version=?
+        """,
+        (*sessions, int(experiment["rank_version"])),
+    ).fetchone()
+    for value, name in zip(rank_times, ("rank as_of_utc", "rank recorded_at_utc")):
+        if value is not None and evaluated < _utc(datetime.fromisoformat(value), name):
+            raise ValueError("evaluation cannot predate its latest rank evidence")
     eligibility_rule = EligibilityRule(**json.loads(experiment["eligibility_rule_json"]))
     rule = SelectionRule(**json.loads(experiment["selection_rule_json"]))
     policy = ExperimentPolicy(**json.loads(experiment["policy_json"]))
@@ -751,16 +796,31 @@ def evaluate_rank_experiment(
     )
     # The report itself is immutable and idempotent for the exact evidence inventory.
     raw = _canonical(asdict(report))
+    report_sha256 = hashlib.sha256(raw.encode()).hexdigest()
+    existing = conn.execute(
+        """
+        SELECT code_version,report_json,report_sha256
+        FROM postmarket_rank_empirical_runs
+        WHERE experiment_id=? AND split=? AND input_digest_sha256=?
+        """,
+        (experiment_id, split, input_digest),
+    ).fetchone()
+    if existing is not None:
+        if existing[0] != revision or existing[1] != raw or existing[2] != report_sha256:
+            raise ValueError(
+                "empirical input inventory was already evaluated with different attribution"
+            )
+        return report
     with conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO postmarket_rank_empirical_runs
+            INSERT INTO postmarket_rank_empirical_runs
                 (experiment_id,split,evaluated_at_utc,code_version,input_digest_sha256,
                  report_json,report_sha256) VALUES (?,?,?,?,?,?,?)
             """,
             (
-                experiment_id, split, _utc(evaluated_at, "evaluated_at").isoformat(),
-                revision, input_digest, raw, hashlib.sha256(raw.encode()).hexdigest(),
+                experiment_id, split, evaluated.isoformat(),
+                revision, input_digest, raw, report_sha256,
             ),
         )
     return report

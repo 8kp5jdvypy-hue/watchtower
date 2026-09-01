@@ -40,8 +40,8 @@ from tradebot.postmarket_evidence_gate import (
 )
 
 
-EVIDENCE_SCHEMA_VERSION = 1
-CAMPAIGN_SCHEMA_VERSION = 1
+EVIDENCE_SCHEMA_VERSION = 2
+CAMPAIGN_SCHEMA_VERSION = 2
 VERDICT_NOT_READY = "NOT_READY"
 VERDICT_OWNER_REVIEW = "ELIGIBLE_FOR_OWNER_REVIEW"
 REQUIRED_CONTROL_KINDS = {
@@ -64,6 +64,7 @@ ROOT_FIELDS = {
     "recall_census_reports",
     "provider_proof_reports",
     "empirical_artifact",
+    "calibration_artifact",
     "control_artifacts",
 }
 CAMPAIGN_FIELDS = {
@@ -84,6 +85,10 @@ POLICY_FIELDS = {
     "min_positive_labels",
     "min_empirical_recall",
     "min_empirical_precision",
+    "min_calibration_negative_labels",
+    "min_calibration_bin_labels",
+    "max_calibration_brier_score",
+    "max_expected_calibration_error",
     "min_primary_recall",
     "max_primary_detection_latency_seconds",
     "min_provider_comparable_coverage",
@@ -106,6 +111,7 @@ POLICY_FIELDS = {
     "allowed_census_code_versions",
     "allowed_provider_proof_code_versions",
     "allowed_empirical_code_versions",
+    "allowed_calibration_code_versions",
     "allowed_control_code_versions",
     "require_zero_dirty_sessions",
     "require_complete_session_inventory",
@@ -265,6 +271,88 @@ EMPIRICAL_POLICY_FIELDS = {
     "min_definitive_labels",
     "min_positive_labels",
 }
+CALIBRATION_ARTIFACT_FIELDS = {
+    "schema_version",
+    "artifact_type",
+    "calibration_run_id",
+    "experiment_id",
+    "split",
+    "evaluated_at_utc",
+    "code_version",
+    "input_digest_sha256",
+    "report_sha256",
+    "model_sha256",
+    "model",
+    "fitted_at_utc",
+    "fitting_code_version",
+    "development_definitive_labels",
+    "development_positive_labels",
+    "development_negative_labels",
+    "training_brier_score",
+    "training_expected_calibration_error",
+    "report",
+}
+CALIBRATION_MODEL_FIELDS = {
+    "calibration_version",
+    "experiment_id",
+    "method",
+    "scope",
+    "development_input_sha256",
+    "policy",
+    "segments",
+}
+CALIBRATION_SEGMENT_FIELDS = {
+    "minimum_score",
+    "maximum_score",
+    "calibrated_quality",
+    "development_labels",
+    "development_positives",
+}
+CALIBRATION_REPORT_FIELDS = {
+    "calibration_version",
+    "calibration_id",
+    "experiment_id",
+    "split",
+    "sessions",
+    "code_version",
+    "model_sha256",
+    "development_input_sha256",
+    "policy",
+    "definitive_labels",
+    "positive_labels",
+    "negative_labels",
+    "ambiguous_labels",
+    "unmatched_rank_labels",
+    "brier_score",
+    "expected_calibration_error",
+    "reliability_bins",
+    "holdout_unblinded",
+    "calibrated_quality_claim_valid",
+    "blocking_reasons",
+    "input_digest_sha256",
+}
+CALIBRATION_POLICY_FIELDS = {
+    "min_training_labels",
+    "min_training_positive_labels",
+    "min_training_negative_labels",
+    "min_holdout_labels",
+    "min_holdout_positive_labels",
+    "min_holdout_negative_labels",
+    "minimum_bin_labels",
+    "max_brier_score",
+    "max_expected_calibration_error",
+}
+RELIABILITY_BIN_FIELDS = {
+    "minimum_score",
+    "maximum_score",
+    "predicted_quality",
+    "labels",
+    "positives",
+    "observed_quality",
+    "absolute_error",
+    "wilson_lower_95",
+    "wilson_upper_95",
+}
 SESSION_METRIC_FIELDS = {
     "session",
     "baseline",
@@ -282,6 +370,10 @@ class DiscoveryGatePolicy:
     min_positive_labels: int
     min_empirical_recall: float
     min_empirical_precision: float
+    min_calibration_negative_labels: int
+    min_calibration_bin_labels: int
+    max_calibration_brier_score: float
+    max_expected_calibration_error: float
     min_primary_recall: float
     max_primary_detection_latency_seconds: float
     min_provider_comparable_coverage: float
@@ -304,6 +396,7 @@ class DiscoveryGatePolicy:
     allowed_census_code_versions: tuple[str, ...]
     allowed_provider_proof_code_versions: tuple[str, ...]
     allowed_empirical_code_versions: tuple[str, ...]
+    allowed_calibration_code_versions: tuple[str, ...]
     allowed_control_code_versions: tuple[str, ...]
     require_zero_dirty_sessions: bool
     require_complete_session_inventory: bool
@@ -350,6 +443,7 @@ class DiscoveryEvidenceManifest:
     recall_census_reports: tuple[SessionArtifact, ...]
     provider_proof_reports: tuple[SessionArtifact, ...]
     empirical_artifact: SingleArtifact
+    calibration_artifact: SingleArtifact
     control_artifacts: tuple[ControlArtifact, ...]
 
 
@@ -387,6 +481,9 @@ class DiscoveryAggregateMetrics:
     empirical_recall: float | None
     direction_mismatches: int
     duplicate_candidate_rows: int
+    calibration_brier_score: float | None
+    calibration_expected_calibration_error: float | None
+    calibration_reliability_bins: int
     audit_versions: tuple[int, ...]
     discovery_versions: tuple[int, ...]
     audit_code_versions: tuple[str, ...]
@@ -394,6 +491,7 @@ class DiscoveryAggregateMetrics:
     census_code_versions: tuple[str, ...]
     provider_proof_code_versions: tuple[str, ...]
     empirical_code_versions: tuple[str, ...]
+    calibration_code_versions: tuple[str, ...]
     control_code_versions: tuple[str, ...]
     data_feeds: tuple[str, ...]
     primary_market_data_providers: tuple[str, ...]
@@ -436,6 +534,21 @@ def _same_number(left: float | None, right: float | None) -> bool:
     if left is None or right is None:
         return left is right
     return math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)
+
+
+def _wilson_interval(positives: int, labels: int) -> tuple[float, float]:
+    observed = positives / labels
+    z = 1.96
+    denominator = 1 + z**2 / labels
+    center = (observed + z**2 / (2 * labels)) / denominator
+    margin = (
+        z
+        * math.sqrt(
+            (observed * (1 - observed) + z**2 / (4 * labels)) / labels
+        )
+        / denominator
+    )
+    return max(0.0, center - margin), min(1.0, center + margin)
 
 
 def _ratio_floor(raw: Any, context: str, *, minimum: float) -> float:
@@ -487,6 +600,23 @@ def _parse_policy(raw: Any) -> DiscoveryGatePolicy:
         ),
         min_empirical_precision=_ratio_floor(
             raw["min_empirical_precision"], "policy.min_empirical_precision", minimum=0.01
+        ),
+        min_calibration_negative_labels=_positive_int(
+            raw["min_calibration_negative_labels"],
+            "policy.min_calibration_negative_labels",
+        ),
+        min_calibration_bin_labels=_positive_int(
+            raw["min_calibration_bin_labels"], "policy.min_calibration_bin_labels"
+        ),
+        max_calibration_brier_score=_positive_limit(
+            raw["max_calibration_brier_score"],
+            "policy.max_calibration_brier_score",
+            maximum=0.25,
+        ),
+        max_expected_calibration_error=_positive_limit(
+            raw["max_expected_calibration_error"],
+            "policy.max_expected_calibration_error",
+            maximum=0.25,
         ),
         min_primary_recall=_ratio_floor(
             raw["min_primary_recall"], "policy.min_primary_recall", minimum=0.95
@@ -577,6 +707,10 @@ def _parse_policy(raw: Any) -> DiscoveryGatePolicy:
         allowed_empirical_code_versions=_string_list(
             raw["allowed_empirical_code_versions"], "policy.allowed_empirical_code_versions"
         ),
+        allowed_calibration_code_versions=_string_list(
+            raw["allowed_calibration_code_versions"],
+            "policy.allowed_calibration_code_versions",
+        ),
         allowed_control_code_versions=_string_list(
             raw["allowed_control_code_versions"], "policy.allowed_control_code_versions"
         ),
@@ -664,7 +798,9 @@ def _parse_campaign(
     if payload["schema_version"] != CAMPAIGN_SCHEMA_VERSION or isinstance(
         payload["schema_version"], bool
     ):
-        raise ValueError("campaign schema_version must be 1")
+        raise ValueError(
+            f"campaign schema_version must be {CAMPAIGN_SCHEMA_VERSION}"
+        )
     if payload["status"] != "locked":
         raise ValueError("campaign status must be locked")
     campaign_start = _iso_date(payload["coverage_start"], "campaign.coverage_start")
@@ -705,7 +841,9 @@ def load_discovery_evidence_manifest(
     if payload["schema_version"] != EVIDENCE_SCHEMA_VERSION or isinstance(
         payload["schema_version"], bool
     ):
-        raise ValueError("discovery evidence schema_version must be 1")
+        raise ValueError(
+            f"discovery evidence schema_version must be {EVIDENCE_SCHEMA_VERSION}"
+        )
     if payload["status"] != "locked":
         raise ValueError("discovery evidence manifest status must be locked")
     coverage_start = _iso_date(payload["coverage_start"], "evidence.coverage_start")
@@ -726,6 +864,9 @@ def load_discovery_evidence_manifest(
         payload["provider_proof_reports"], root, "provider_proof_reports"
     )
     empirical = _parse_single_artifact(payload["empirical_artifact"], root, "empirical_artifact")
+    calibration = _parse_single_artifact(
+        payload["calibration_artifact"], root, "calibration_artifact"
+    )
     controls = _parse_control_artifacts(payload["control_artifacts"], root)
     if any(control.completed_at_utc > created_at for control in controls):
         raise ValueError("control artifacts cannot complete after the manifest is locked")
@@ -747,6 +888,7 @@ def load_discovery_evidence_manifest(
         censuses,
         providers,
         empirical,
+        calibration,
         controls,
     )
 
@@ -1238,6 +1380,339 @@ def _load_empirical(
     }
 
 
+def _load_calibration(
+    artifact: SingleArtifact,
+    campaign: CampaignArtifact,
+    expected_sessions: tuple[date, ...],
+    policy: DiscoveryGatePolicy,
+) -> dict:
+    payload = _load_json(artifact, "calibration artifact")
+    _exact_fields(payload, CALIBRATION_ARTIFACT_FIELDS, "calibration artifact")
+    if (
+        payload["schema_version"] != 1
+        or isinstance(payload["schema_version"], bool)
+        or payload["artifact_type"] != "postmarket_rank_calibration"
+    ):
+        raise ValueError("calibration artifact identity is invalid")
+    if payload["experiment_id"] != campaign.experiment_id or payload["split"] != "holdout":
+        raise ValueError("calibration artifact does not match campaign holdout")
+    input_digest = _sha256(
+        payload["input_digest_sha256"], "calibration.input_digest_sha256"
+    )
+    report_digest = _sha256(payload["report_sha256"], "calibration.report_sha256")
+    model_digest = _sha256(payload["model_sha256"], "calibration.model_sha256")
+    model = payload["model"]
+    if not isinstance(model, dict):
+        raise ValueError("calibration model must be an object")
+    _exact_fields(model, CALIBRATION_MODEL_FIELDS, "calibration model")
+    canonical_model = json.dumps(model, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(canonical_model.encode()).hexdigest() != model_digest:
+        raise ValueError("calibration model digest does not match embedded model")
+    if (
+        model["calibration_version"] != 1
+        or isinstance(model["calibration_version"], bool)
+        or model["experiment_id"] != campaign.experiment_id
+        or model["method"] != "isotonic_pav"
+        or model["scope"] != "first_rankable_score_same_direction_quality"
+    ):
+        raise ValueError("calibration model identity is invalid")
+    fitted_at = _aware_datetime(payload["fitted_at_utc"], "calibration.fitted_at_utc")
+    fitting_code = _nonempty_string(
+        payload["fitting_code_version"], "calibration.fitting_code_version"
+    )
+    development_definitive = _positive_int(
+        payload["development_definitive_labels"],
+        "calibration.development_definitive_labels",
+    )
+    development_positives = _positive_int(
+        payload["development_positive_labels"],
+        "calibration.development_positive_labels",
+    )
+    development_negatives = _positive_int(
+        payload["development_negative_labels"],
+        "calibration.development_negative_labels",
+    )
+    if development_positives + development_negatives != development_definitive:
+        raise ValueError("calibration development labels do not conserve")
+    training_brier = _optional_ratio(
+        payload["training_brier_score"], "calibration.training_brier_score"
+    )
+    training_ece = _optional_ratio(
+        payload["training_expected_calibration_error"],
+        "calibration.training_expected_calibration_error",
+    )
+    if training_brier is None or training_ece is None:
+        raise ValueError("calibration training metrics cannot be null")
+    report = payload["report"]
+    if not isinstance(report, dict):
+        raise ValueError("calibration report must be an object")
+    canonical_report = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(canonical_report.encode()).hexdigest() != report_digest:
+        raise ValueError("calibration report digest does not match embedded report")
+    _exact_fields(report, CALIBRATION_REPORT_FIELDS, "calibration report")
+    sessions = tuple(
+        _iso_date(value, "calibration report.sessions") for value in report["sessions"]
+    )
+    if sessions != expected_sessions:
+        raise ValueError("calibration holdout sessions do not match exact campaign inventory")
+    if (
+        report["experiment_id"] != campaign.experiment_id
+        or report["split"] != "holdout"
+        or report["input_digest_sha256"] != input_digest
+        or report["model_sha256"] != model_digest
+        or report["code_version"] != payload["code_version"]
+    ):
+        raise ValueError("calibration report identity does not match artifact/campaign")
+    _positive_int(report["calibration_id"], "calibration.calibration_id")
+    _positive_int(report["calibration_version"], "calibration.calibration_version")
+    _sha256(
+        report["development_input_sha256"], "calibration.development_input_sha256"
+    )
+    if (
+        model["development_input_sha256"] != report["development_input_sha256"]
+    ):
+        raise ValueError("calibration model development input does not match report")
+    calibration_policy = report["policy"]
+    if not isinstance(calibration_policy, dict):
+        raise ValueError("calibration report policy must be an object")
+    _exact_fields(calibration_policy, CALIBRATION_POLICY_FIELDS, "calibration report.policy")
+    for key in (
+        "min_training_labels",
+        "min_training_positive_labels",
+        "min_training_negative_labels",
+        "min_holdout_labels",
+        "min_holdout_positive_labels",
+        "min_holdout_negative_labels",
+        "minimum_bin_labels",
+    ):
+        _positive_int(calibration_policy[key], f"calibration policy.{key}")
+    max_brier = _optional_ratio(
+        calibration_policy["max_brier_score"], "calibration policy.max_brier_score"
+    )
+    max_ece = _optional_ratio(
+        calibration_policy["max_expected_calibration_error"],
+        "calibration policy.max_expected_calibration_error",
+    )
+    expected_policy = {
+        "min_holdout_labels": policy.min_definitive_labels,
+        "min_holdout_positive_labels": policy.min_positive_labels,
+        "min_holdout_negative_labels": policy.min_calibration_negative_labels,
+        "minimum_bin_labels": policy.min_calibration_bin_labels,
+        "max_brier_score": policy.max_calibration_brier_score,
+        "max_expected_calibration_error": policy.max_expected_calibration_error,
+    }
+    if any(calibration_policy[key] != value for key, value in expected_policy.items()):
+        raise ValueError("calibration locked policy does not match campaign")
+    if model["policy"] != calibration_policy:
+        raise ValueError("calibration model policy does not match report")
+    if (
+        development_definitive < calibration_policy["min_training_labels"]
+        or development_positives
+        < calibration_policy["min_training_positive_labels"]
+        or development_negatives
+        < calibration_policy["min_training_negative_labels"]
+    ):
+        raise ValueError("calibration development sample does not meet locked policy")
+    segments_raw = model["segments"]
+    if not isinstance(segments_raw, list) or not segments_raw:
+        raise ValueError("calibration model segments must be a non-empty list")
+    segments = []
+    previous_maximum: float | None = None
+    previous_quality: float | None = None
+    for index, raw in enumerate(segments_raw):
+        context = f"calibration model.segments[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be an object")
+        _exact_fields(raw, CALIBRATION_SEGMENT_FIELDS, context)
+        minimum_score = _finite_number(raw["minimum_score"], f"{context}.minimum_score")
+        maximum_score = _finite_number(raw["maximum_score"], f"{context}.maximum_score")
+        quality = _optional_ratio(raw["calibrated_quality"], f"{context}.calibrated_quality")
+        labels = _positive_int(raw["development_labels"], f"{context}.development_labels")
+        positives_in_segment = _nonnegative_int(
+            raw["development_positives"], f"{context}.development_positives"
+        )
+        if (
+            quality is None
+            or not 0 <= minimum_score <= maximum_score <= 100
+            or positives_in_segment > labels
+            or (previous_maximum is not None and minimum_score <= previous_maximum)
+            or (previous_quality is not None and quality < previous_quality)
+            or not _same_number(quality, positives_in_segment / labels)
+        ):
+            raise ValueError(f"{context} violates monotonic model invariants")
+        segments.append({
+            "minimum_score": minimum_score,
+            "maximum_score": maximum_score,
+            "quality": quality,
+            "labels": labels,
+            "positives": positives_in_segment,
+        })
+        previous_maximum = maximum_score
+        previous_quality = quality
+    if sum(item["labels"] for item in segments) != development_definitive or sum(
+        item["positives"] for item in segments
+    ) != development_positives:
+        raise ValueError("calibration model segments do not conserve development labels")
+    expected_training_brier = sum(
+        item["positives"] * (1 - item["quality"]) ** 2
+        + (item["labels"] - item["positives"]) * item["quality"] ** 2
+        for item in segments
+    ) / development_definitive
+    expected_training_ece = sum(
+        item["labels"]
+        * abs(item["quality"] - item["positives"] / item["labels"])
+        for item in segments
+    ) / development_definitive
+    if not _same_number(training_brier, expected_training_brier) or not _same_number(
+        training_ece, expected_training_ece
+    ):
+        raise ValueError("calibration training metrics do not match frozen model")
+    definitive = _nonnegative_int(
+        report["definitive_labels"], "calibration.definitive_labels"
+    )
+    positives = _nonnegative_int(report["positive_labels"], "calibration.positive_labels")
+    negatives = _nonnegative_int(report["negative_labels"], "calibration.negative_labels")
+    ambiguous = _nonnegative_int(
+        report["ambiguous_labels"], "calibration.ambiguous_labels"
+    )
+    unmatched = _nonnegative_int(
+        report["unmatched_rank_labels"], "calibration.unmatched_rank_labels"
+    )
+    if positives + negatives != definitive:
+        raise ValueError("calibration definitive labels do not conserve")
+    brier = _optional_ratio(report["brier_score"], "calibration.brier_score")
+    ece = _optional_ratio(
+        report["expected_calibration_error"],
+        "calibration.expected_calibration_error",
+    )
+    bins_raw = report["reliability_bins"]
+    if not isinstance(bins_raw, list):
+        raise ValueError("calibration reliability_bins must be a list")
+    bins = []
+    model_segments = {
+        (item["minimum_score"], item["maximum_score"]): item for item in segments
+    }
+    observed_segment_ranges: set[tuple[float, float]] = set()
+    for index, raw in enumerate(bins_raw):
+        context = f"calibration reliability_bins[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be an object")
+        _exact_fields(raw, RELIABILITY_BIN_FIELDS, context)
+        minimum_score = _finite_number(raw["minimum_score"], f"{context}.minimum_score")
+        maximum_score = _finite_number(raw["maximum_score"], f"{context}.maximum_score")
+        if not 0 <= minimum_score <= maximum_score <= 100:
+            raise ValueError(f"{context} score range is invalid")
+        labels = _positive_int(raw["labels"], f"{context}.labels")
+        bin_positives = _nonnegative_int(raw["positives"], f"{context}.positives")
+        if bin_positives > labels:
+            raise ValueError(f"{context} positives exceed labels")
+        predicted = _optional_ratio(raw["predicted_quality"], f"{context}.predicted_quality")
+        observed = _optional_ratio(raw["observed_quality"], f"{context}.observed_quality")
+        absolute_error = _optional_ratio(raw["absolute_error"], f"{context}.absolute_error")
+        lower = _optional_ratio(raw["wilson_lower_95"], f"{context}.wilson_lower_95")
+        upper = _optional_ratio(raw["wilson_upper_95"], f"{context}.wilson_upper_95")
+        if None in (predicted, observed, absolute_error, lower, upper):
+            raise ValueError(f"{context} ratios cannot be null")
+        expected_observed = bin_positives / labels
+        if not _same_number(observed, expected_observed) or not _same_number(
+            absolute_error, abs(predicted - observed)
+        ):
+            raise ValueError(f"{context} observed quality/error does not match counts")
+        segment_key = (minimum_score, maximum_score)
+        segment = model_segments.get(segment_key)
+        if (
+            segment is None
+            or segment_key in observed_segment_ranges
+            or not _same_number(predicted, segment["quality"])
+        ):
+            raise ValueError(f"{context} does not match the frozen model")
+        observed_segment_ranges.add(segment_key)
+        expected_lower, expected_upper = _wilson_interval(bin_positives, labels)
+        if not _same_number(lower, expected_lower) or not _same_number(
+            upper, expected_upper
+        ):
+            raise ValueError(f"{context} Wilson interval does not match counts")
+        bins.append({
+            "labels": labels,
+            "positives": bin_positives,
+            "predicted": predicted,
+            "absolute_error": absolute_error,
+        })
+    if sum(item["labels"] for item in bins) != definitive or sum(
+        item["positives"] for item in bins
+    ) != positives:
+        raise ValueError("calibration reliability bins do not conserve aggregate labels")
+    expected_brier = (
+        sum(
+            item["positives"] * (1 - item["predicted"]) ** 2
+            + (item["labels"] - item["positives"]) * item["predicted"] ** 2
+            for item in bins
+        )
+        / definitive
+        if definitive else None
+    )
+    expected_ece = (
+        sum(item["labels"] * item["absolute_error"] for item in bins) / definitive
+        if definitive else None
+    )
+    if not _same_number(brier, expected_brier) or not _same_number(ece, expected_ece):
+        raise ValueError("calibration Brier/ECE does not match reliability bins")
+    holdout_unblinded = _strict_bool(
+        report["holdout_unblinded"], "calibration.holdout_unblinded"
+    )
+    claim = _strict_bool(
+        report["calibrated_quality_claim_valid"],
+        "calibration.calibrated_quality_claim_valid",
+    )
+    blockers = _string_array(report["blocking_reasons"], "calibration.blocking_reasons")
+    expected_claim = (
+        holdout_unblinded
+        and definitive >= policy.min_definitive_labels
+        and positives >= policy.min_positive_labels
+        and negatives >= policy.min_calibration_negative_labels
+        and ambiguous == 0
+        and unmatched == 0
+        and bool(bins)
+        and all(item["labels"] >= policy.min_calibration_bin_labels for item in bins)
+        and brier is not None
+        and brier <= policy.max_calibration_brier_score
+        and ece is not None
+        and ece <= policy.max_expected_calibration_error
+        and not blockers
+    )
+    if claim != expected_claim:
+        raise ValueError("calibration claim contradicts locked policy/metrics/blockers")
+    evaluated_at = _aware_datetime(
+        payload["evaluated_at_utc"], "calibration.evaluated_at_utc"
+    )
+    last_end = datetime.combine(expected_sessions[-1], time(20, 0), tzinfo=ET).astimezone(
+        timezone.utc
+    )
+    first_open = CALENDAR.session_open(expected_sessions[0]).to_pydatetime().astimezone(
+        timezone.utc
+    )
+    if fitted_at >= first_open:
+        raise ValueError("calibration model was not frozen before holdout opened")
+    if evaluated_at <= last_end:
+        raise ValueError("calibration artifact was evaluated before holdout coverage ended")
+    return {
+        "code_versions": tuple(sorted({
+            _nonempty_string(payload["code_version"], "calibration.code_version"),
+            fitting_code,
+        })),
+        "claim_valid": claim,
+        "blocking_reasons": blockers,
+        "definitive_labels": definitive,
+        "positive_labels": positives,
+        "negative_labels": negatives,
+        "brier_score": brier,
+        "expected_calibration_error": ece,
+        "reliability_bins": len(bins),
+        "max_brier_score": max_brier,
+        "max_expected_calibration_error": max_ece,
+    }
+
+
 def _check(code: str, observed: Any, required: Any, passed: bool) -> GateCheck:
     return GateCheck(code, passed, observed, required)
 
@@ -1269,6 +1744,12 @@ def evaluate_discovery_evidence_gate(
     }
     empirical = _load_empirical(
         manifest.empirical_artifact,
+        manifest.campaign_artifact,
+        expected_sessions,
+        manifest.policy,
+    )
+    calibration = _load_calibration(
+        manifest.calibration_artifact,
         manifest.campaign_artifact,
         expected_sessions,
         manifest.policy,
@@ -1308,6 +1789,7 @@ def evaluate_discovery_evidence_gate(
     census_codes = tuple(sorted({row["code_version"] for row in census_rows}))
     provider_codes = tuple(sorted({row["code_version"] for row in provider_rows}))
     empirical_codes = (empirical["code_version"],)
+    calibration_codes = calibration["code_versions"]
     control_codes = tuple(sorted({artifact.revision for artifact in manifest.control_artifacts}))
     data_feeds = tuple(
         sorted(
@@ -1370,6 +1852,11 @@ def evaluate_discovery_evidence_gate(
         empirical_recall=candidate_rank["recall"],
         direction_mismatches=candidate_rank["direction_mismatches"],
         duplicate_candidate_rows=empirical["duplicate_candidate_rows"],
+        calibration_brier_score=calibration["brier_score"],
+        calibration_expected_calibration_error=calibration[
+            "expected_calibration_error"
+        ],
+        calibration_reliability_bins=calibration["reliability_bins"],
         audit_versions=audit_versions,
         discovery_versions=discovery_versions,
         audit_code_versions=audit_codes,
@@ -1377,6 +1864,7 @@ def evaluate_discovery_evidence_gate(
         census_code_versions=census_codes,
         provider_proof_code_versions=provider_codes,
         empirical_code_versions=empirical_codes,
+        calibration_code_versions=calibration_codes,
         control_code_versions=control_codes,
         data_feeds=data_feeds,
         primary_market_data_providers=primary_providers,
@@ -1547,6 +2035,30 @@ def evaluate_discovery_evidence_gate(
             empirical["passed_locked_policy"] and not empirical["blocking_reasons"],
         ),
         _check(
+            "CALIBRATED_QUALITY_HOLDOUT_PASSED",
+            {
+                "claim_valid": calibration["claim_valid"],
+                "blockers": list(calibration["blocking_reasons"]),
+            },
+            {"claim_valid": True, "blockers": []},
+            calibration["claim_valid"] and not calibration["blocking_reasons"],
+        ),
+        _check(
+            "MAX_CALIBRATION_BRIER_SCORE",
+            metrics.calibration_brier_score,
+            policy.max_calibration_brier_score,
+            metrics.calibration_brier_score is not None
+            and metrics.calibration_brier_score <= policy.max_calibration_brier_score,
+        ),
+        _check(
+            "MAX_EXPECTED_CALIBRATION_ERROR",
+            metrics.calibration_expected_calibration_error,
+            policy.max_expected_calibration_error,
+            metrics.calibration_expected_calibration_error is not None
+            and metrics.calibration_expected_calibration_error
+            <= policy.max_expected_calibration_error,
+        ),
+        _check(
             "MIN_DEFINITIVE_LABELS",
             metrics.definitive_labels,
             policy.min_definitive_labels,
@@ -1670,6 +2182,12 @@ def evaluate_discovery_evidence_gate(
             set(empirical_codes) <= set(policy.allowed_empirical_code_versions),
         ),
         _check(
+            "ALLOWED_CALIBRATION_CODE_VERSIONS",
+            list(calibration_codes),
+            list(policy.allowed_calibration_code_versions),
+            set(calibration_codes) <= set(policy.allowed_calibration_code_versions),
+        ),
+        _check(
             "ALLOWED_CONTROL_CODE_VERSIONS",
             list(control_codes),
             list(policy.allowed_control_code_versions),
@@ -1698,6 +2216,14 @@ def evaluate_discovery_evidence_gate(
             "session": "aggregate",
             "path": str(manifest.empirical_artifact.path),
             "sha256": manifest.empirical_artifact.sha256,
+        }
+    )
+    artifacts.append(
+        {
+            "kind": "calibrated_quality_holdout",
+            "session": "aggregate",
+            "path": str(manifest.calibration_artifact.path),
+            "sha256": manifest.calibration_artifact.sha256,
         }
     )
     artifacts.extend(
