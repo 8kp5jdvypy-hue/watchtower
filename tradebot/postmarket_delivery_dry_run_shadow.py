@@ -35,6 +35,7 @@ from tradebot.postmarket_delivery_readiness import (
     parse_delivery_policy,
     parse_owner_authorization,
 )
+from tradebot.postmarket_calibration import project_rank_calibration
 from tradebot.postmarket_shadow import (
     idle_sleep_seconds,
     postmarket_is_active,
@@ -235,6 +236,7 @@ def load_latest_delivery_candidates(
     *,
     session: date,
     rank_version: int,
+    calibration_model_sha256: str,
 ) -> tuple[int | None, tuple[DeliveryCandidate, ...]]:
     original = conn.row_factory
     conn.row_factory = sqlite3.Row
@@ -256,21 +258,26 @@ def load_latest_delivery_candidates(
         ).fetchone()[0])
         rows = conn.execute(
             """
-            SELECT r.candidate_id,r.session,r.symbol,r.direction,r.transition_id,
+            SELECT r.rank_id,r.candidate_id,r.session,r.symbol,r.direction,r.transition_id,
                    r.observation_seq,r.rankable,r.ordinal_rank,r.evidence_score,
                    r.evidence_coverage_pct,r.exclusion_reasons_json,
                    rr.rank_run_id,rr.rank_version,rr.status AS rank_status,
                    rr.code_version,l.state,l.actionability,l.transition_at_utc,
-                   o.evidence_bar_open_ts_utc,o.data_feed,o.market_data_provider
+                   o.evidence_bar_open_ts_utc,o.data_feed,o.market_data_provider,
+                   p.projection_id,p.calibration_run_id,p.calibration_version,
+                   p.model_sha256,p.calibrated_quality,p.projected_at_utc,
+                   p.code_version AS calibration_code_version
             FROM postmarket_candidate_ranks r
             JOIN postmarket_rank_runs rr ON rr.rank_run_id=r.rank_run_id
             JOIN postmarket_candidate_lifecycle l ON l.transition_id=r.transition_id
             JOIN postmarket_candidate_lifecycle_observations o
               ON o.seq=r.observation_seq
+            LEFT JOIN postmarket_rank_calibration_projections p
+              ON p.rank_id=r.rank_id AND p.model_sha256=?
             WHERE r.rank_run_id=?
             ORDER BY r.candidate_id
             """,
-            (run["rank_run_id"],),
+            (calibration_model_sha256, run["rank_run_id"]),
         ).fetchall()
         if len(rows) != expected_rows:
             raise ValueError("rank snapshot evidence join is incomplete")
@@ -290,6 +297,7 @@ def load_latest_delivery_candidates(
                 row["evidence_bar_open_ts_utc"], "evidence_bar_open_ts_utc"
             ),
             rank_run_id=int(row["rank_run_id"]),
+            rank_id=int(row["rank_id"]),
             rank_version=int(row["rank_version"]),
             rank_status=row["rank_status"],
             rankable=bool(row["rankable"]),
@@ -297,6 +305,33 @@ def load_latest_delivery_candidates(
                 None if row["ordinal_rank"] is None else int(row["ordinal_rank"])
             ),
             evidence_score=float(row["evidence_score"]),
+            calibration_projection_id=(
+                None
+                if row["projection_id"] is None
+                else int(row["projection_id"])
+            ),
+            calibration_run_id=(
+                None
+                if row["calibration_run_id"] is None
+                else int(row["calibration_run_id"])
+            ),
+            calibration_version=(
+                None
+                if row["calibration_version"] is None
+                else int(row["calibration_version"])
+            ),
+            calibration_model_sha256=row["model_sha256"],
+            calibrated_quality=(
+                None
+                if row["calibrated_quality"] is None
+                else float(row["calibrated_quality"])
+            ),
+            calibration_projected_at=(
+                None
+                if row["projected_at_utc"] is None
+                else _aware(row["projected_at_utc"], "projected_at_utc")
+            ),
+            calibration_code_version=row["calibration_code_version"],
             evidence_coverage_pct=float(row["evidence_coverage_pct"]),
             exclusion_reasons=_exclusion_reasons(row["exclusion_reasons_json"]),
             data_feed=row["data_feed"],
@@ -332,8 +367,53 @@ def run_dry_run_tick(
     scheduled = (scheduled_at or now).astimezone(timezone.utc)
     scheduled_lag_ms = max(0, round((started_at - scheduled).total_seconds() * 1000))
     ensure_dry_run_schema(conn)
+    rank_row = conn.execute(
+        """
+        SELECT rank_run_id FROM postmarket_rank_runs
+        WHERE session=? AND rank_version=?
+        ORDER BY rank_run_id DESC LIMIT 1
+        """,
+        (session.isoformat(), policy.rank_version),
+    ).fetchone()
+    effective_status = operational_status
+    effective_reasons = list(operational_reasons)
+    if rank_row is not None:
+        rank_run_id_for_projection = int(rank_row[0])
+        projection_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='postmarket_rank_calibration_projections'"
+        ).fetchone()
+        rank_rows = int(conn.execute(
+            "SELECT COUNT(*) FROM postmarket_candidate_ranks WHERE rank_run_id=?",
+            (rank_run_id_for_projection,),
+        ).fetchone()[0])
+        projection_rows = 0
+        if projection_table is not None:
+            projection_rows = int(conn.execute(
+                """
+                SELECT COUNT(*) FROM postmarket_rank_calibration_projections
+                WHERE rank_run_id=? AND model_sha256=?
+                """,
+                (rank_run_id_for_projection, policy.calibration_model_sha256),
+            ).fetchone()[0])
+        if projection_rows != rank_rows:
+            try:
+                project_rank_calibration(
+                    conn,
+                    rank_run_id=rank_run_id_for_projection,
+                    model_sha256=policy.calibration_model_sha256,
+                    projected_at=now,
+                    code_version=runtime_router_revision,
+                )
+            except (sqlite3.Error, TypeError, ValueError):
+                logger.exception("rank calibration projection failed")
+                effective_status = "degraded"
+                effective_reasons.append("CALIBRATION_PROJECTION_FAILED")
     rank_run_id, candidates = load_latest_delivery_candidates(
-        conn, session=session, rank_version=policy.rank_version
+        conn,
+        session=session,
+        rank_version=policy.rank_version,
+        calibration_model_sha256=policy.calibration_model_sha256,
     )
     results = tuple(
         route_dry_run(
@@ -346,7 +426,7 @@ def run_dry_run_tick(
             run_id=run_id,
             dry_run_enabled=True,
             kill_switch_engaged=False,
-            operational_status=operational_status,
+            operational_status=effective_status,
         )
         for candidate in candidates
     )
@@ -361,7 +441,7 @@ def run_dry_run_tick(
         eligible + suppressed == len(results)
         and written + duplicates == len(results)
         and len({result.route_id for result in results}) == len(results)
-        and operational_status in {"clean", "degraded"}
+        and effective_status in {"clean", "degraded"}
         and scheduled <= started_at
     )
     completed_at = _utc_now()
@@ -379,8 +459,8 @@ def run_dry_run_tick(
             eligible_candidates=eligible,
             suppressed_candidates=suppressed,
             duplicate_decisions=duplicates,
-            operational_status=operational_status,
-            operational_reasons=operational_reasons,
+            operational_status=effective_status,
+            operational_reasons=tuple(dict.fromkeys(effective_reasons)),
             scheduled_lag_ms=scheduled_lag_ms,
             latency_ms=latency_ms,
             invariant_ok=invariant_ok,
@@ -403,8 +483,8 @@ def run_dry_run_tick(
         suppressed_candidates=suppressed,
         duplicate_decisions=duplicates,
         suppression_reasons=tuple(sorted(reasons.items())),
-        operational_status=operational_status,
-        operational_reasons=operational_reasons,
+        operational_status=effective_status,
+        operational_reasons=tuple(dict.fromkeys(effective_reasons)),
         scheduled_lag_ms=scheduled_lag_ms,
         latency_ms=latency_ms,
         invariant_ok=invariant_ok,

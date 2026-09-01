@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_customer_dry_run_audit_v2.schema.json",
+  "title": "Postmarket customer-readiness dry-run daily audit v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "audit_version", "audit_code_version", "session", "database",
+    "created_at_utc", "source_evidence_sha256", "operational_clean",
+    "session_evidence_eligible", "metrics", "issues"
+  ],
+  "properties": {
+    "audit_version": {"const": 2},
+    "audit_code_version": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^[0-9a-f]{7,40}$"}
+      ]
+    },
+    "session": {"type": "string", "format": "date"},
+    "database": {"type": "string", "minLength": 1},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "source_evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "operational_clean": {"type": "boolean"},
+    "session_evidence_eligible": {"type": "boolean"},
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_ticks", "observed_ticks", "coverage_pct",
+        "first_scheduled_at_utc", "final_scheduled_at_utc",
+        "expected_start_utc", "expected_end_utc",
+        "missing_scheduled_slots_utc", "max_tick_gap_seconds",
+        "average_scheduled_lag_ms", "max_scheduled_lag_ms",
+        "average_latency_ms", "max_latency_ms", "degraded_ticks",
+        "failed_invariants", "input_candidates", "eligible_candidates",
+        "suppressed_candidates", "decisions_written", "duplicate_decisions",
+        "linked_decisions", "orphan_routes", "duplicate_eligible_identities",
+        "conservation_failures", "link_failures", "identity_failures",
+        "input_digest_failures", "decision_attribution_failures",
+        "actionability_failures", "calibrated_routes",
+        "calibration_link_failures", "calibration_attribution_failures",
+        "rank_missing_after_first_bar", "operational_reason_counts",
+        "suppression_reason_counts", "policy_sha256s",
+        "authorization_sha256s", "runtime_router_revisions",
+        "router_versions", "calibration_model_sha256s"
+      ],
+      "properties": {
+        "expected_ticks": {"type": "integer", "minimum": 0},
+        "observed_ticks": {"type": "integer", "minimum": 0},
+        "coverage_pct": {"type": "number", "minimum": 0, "maximum": 100},
+        "first_scheduled_at_utc": {"type": ["string", "null"], "format": "date-time"},
+        "final_scheduled_at_utc": {"type": ["string", "null"], "format": "date-time"},
+        "expected_start_utc": {"type": ["string", "null"], "format": "date-time"},
+        "expected_end_utc": {"type": ["string", "null"], "format": "date-time"},
+        "missing_scheduled_slots_utc": {"type": "array", "items": {"type": "string", "format": "date-time"}},
+        "max_tick_gap_seconds": {"type": ["integer", "null"], "minimum": 0},
+        "average_scheduled_lag_ms": {"type": ["number", "null"], "minimum": 0},
+        "max_scheduled_lag_ms": {"type": ["integer", "null"], "minimum": 0},
+        "average_latency_ms": {"type": ["number", "null"], "minimum": 0},
+        "max_latency_ms": {"type": ["integer", "null"], "minimum": 0},
+        "degraded_ticks": {"$ref": "#/$defs/count"},
+        "failed_invariants": {"$ref": "#/$defs/count"},
+        "input_candidates": {"$ref": "#/$defs/count"},
+        "eligible_candidates": {"$ref": "#/$defs/count"},
+        "suppressed_candidates": {"$ref": "#/$defs/count"},
+        "decisions_written": {"$ref": "#/$defs/count"},
+        "duplicate_decisions": {"$ref": "#/$defs/count"},
+        "linked_decisions": {"$ref": "#/$defs/count"},
+        "orphan_routes": {"$ref": "#/$defs/count"},
+        "duplicate_eligible_identities": {"$ref": "#/$defs/count"},
+        "conservation_failures": {"$ref": "#/$defs/count"},
+        "link_failures": {"$ref": "#/$defs/count"},
+        "identity_failures": {"$ref": "#/$defs/count"},
+        "input_digest_failures": {"$ref": "#/$defs/count"},
+        "decision_attribution_failures": {"$ref": "#/$defs/count"},
+        "actionability_failures": {"$ref": "#/$defs/count"},
+        "calibrated_routes": {"$ref": "#/$defs/count"},
+        "calibration_link_failures": {"$ref": "#/$defs/count"},
+        "calibration_attribution_failures": {"$ref": "#/$defs/count"},
+        "rank_missing_after_first_bar": {"$ref": "#/$defs/count"},
+        "operational_reason_counts": {"$ref": "#/$defs/counts"},
+        "suppression_reason_counts": {"$ref": "#/$defs/counts"},
+        "policy_sha256s": {"$ref": "#/$defs/strings"},
+        "authorization_sha256s": {"$ref": "#/$defs/strings"},
+        "runtime_router_revisions": {"$ref": "#/$defs/strings"},
+        "router_versions": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "calibration_model_sha256s": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+      }
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["code", "severity", "detail"],
+        "properties": {
+          "code": {"type": "string", "minLength": 1},
+          "severity": {"const": "blocker"},
+          "detail": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "count": {"type": "integer", "minimum": 0},
+    "counts": {"type": "object", "additionalProperties": {"$ref": "#/$defs/count"}},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  }
+}

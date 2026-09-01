@@ -26,7 +26,7 @@ def _conn():
     ensure_dry_run_schema(conn)
     conn.executescript("""
     CREATE TABLE postmarket_candidate_ranks (
-      rank_run_id INTEGER, candidate_id INTEGER, observation_seq INTEGER,
+      rank_id INTEGER, rank_run_id INTEGER, candidate_id INTEGER, observation_seq INTEGER,
       ordinal_rank INTEGER, evidence_score REAL, evidence_coverage_pct REAL,
       components_json TEXT, penalties_json TEXT, exclusion_reasons_json TEXT,
       explanation_json TEXT
@@ -39,10 +39,16 @@ def _conn():
       move_pct REAL, cumulative_notional REAL, data_age_seconds REAL,
       data_feed TEXT, market_data_provider TEXT
     );
+    CREATE TABLE postmarket_rank_calibration_projections (
+      projection_id INTEGER, calibration_run_id INTEGER,
+      calibration_version INTEGER, model_sha256 TEXT, rank_id INTEGER,
+      rank_run_id INTEGER, candidate_id INTEGER, calibrated_quality REAL,
+      projected_at_utc TEXT, code_version TEXT
+    );
     """)
     conn.execute(
-        "INSERT INTO postmarket_candidate_ranks VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (7, 11, 13, 2, 82.5, 100, '{"move":30}', '{"spread":0}', '[]',
+        "INSERT INTO postmarket_candidate_ranks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (17, 7, 11, 13, 2, 82.5, 100, '{"move":30}', '{"spread":0}', '[]',
          '["large persistent move","liquid"]'),
     )
     conn.execute(
@@ -67,6 +73,21 @@ def _conn():
         (1, "case-1", "b" * 64, NOW.isoformat(), NOW.isoformat(), "2026-08-28",
          "OKTA", "up", 11, 5, 7, "ELIGIBLE_FOR_DRY_RUN", "ACTIONABLE", "[]",
          "c" * 64, "d" * 64, "release-1", 1, 0, "clean", "abc1234", "run-1"),
+    )
+    conn.execute(
+        "INSERT INTO postmarket_rank_calibration_projections VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (55, 9, 1, "e" * 64, 17, 7, 11, 0.8,
+         (NOW - timedelta(minutes=1)).isoformat(), "abc1234"),
+    )
+    conn.execute(
+        """
+        INSERT INTO postmarket_delivery_dry_run_calibrations
+          (route_id,projection_id,calibration_run_id,calibration_version,
+           model_sha256,calibrated_quality,projected_at_utc,code_version)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        (cursor.lastrowid, 55, 9, 1, "e" * 64, 0.8,
+         (NOW - timedelta(minutes=1)).isoformat(), "abc1234"),
     )
     conn.commit()
     return conn, cursor.lastrowid
@@ -97,7 +118,7 @@ def _assessment(**changes):
 
 def _campaign():
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "locked",
         "campaign_id": "campaign-1",
         "locked_at_utc": "2026-08-27T12:00:00+00:00",
@@ -115,6 +136,10 @@ def _campaign():
         "upstream_discovery_evidence_gate_sha256": "6" * 64,
         "upstream_discovery_gate_code_version": "abc1234",
         "upstream_discovery_gate_evaluated_at_utc": "2026-08-26T12:00:00+00:00",
+        "upstream_calibration_artifact_sha256": "7" * 64,
+        "calibration_model_sha256": "e" * 64,
+        "calibration_version": 1,
+        "calibration_evaluated_at_utc": "2026-08-25T12:00:00+00:00",
         "policy": {
             "min_clean_sessions": 10,
             "min_eligible_decisions": 20,
@@ -124,7 +149,7 @@ def _campaign():
             "min_session_coverage_pct": 100,
             "max_scheduled_lag_seconds": 30,
             "max_tick_latency_seconds": 10,
-            "allowed_audit_versions": [1],
+            "allowed_audit_versions": [2],
             "allowed_audit_code_versions": ["abc1234"],
             "allowed_runtime_router_revisions": ["abc1234"],
             **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
@@ -242,7 +267,7 @@ def test_case_and_assessment_contract_shapes_match_truth_schemas():
         conn, campaign_sha256=CAMPAIGN, route_id=route_id, exported_at=NOW
     )
     case_schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_review_case_v1.schema.json"
+        "truth/postmarket_customer_dry_run_review_case_v2.schema.json"
     ).read_text())
     review_schema = json.loads(Path(
         "truth/postmarket_customer_dry_run_review_assessment_v1.schema.json"

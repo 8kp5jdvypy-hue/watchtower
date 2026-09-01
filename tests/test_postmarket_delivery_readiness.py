@@ -34,11 +34,15 @@ def _policy(**changes):
         "evidence_gate_sha256": DIGEST_B,
         "rank_version": 1,
         "minimum_evidence_score": 60.0,
+        "calibration_version": 1,
+        "calibration_model_sha256": "c" * 64,
+        "minimum_calibrated_quality": 0.70,
         "maximum_ordinal_rank": 10,
         "minimum_evidence_coverage_pct": 90.0,
         "maximum_data_age_seconds": 330.0,
         "allowed_states": (STATE_CONFIRMED,),
         "allowed_evidence_revisions": ("abc1234",),
+        "allowed_calibration_revisions": ("abc1234",),
         "allowed_providers": ("alpaca",),
         "allowed_feeds": ("sip",),
     }
@@ -58,11 +62,19 @@ def _candidate(**changes):
         "transition_at": NOW - timedelta(minutes=2),
         "evidence_bar_open_at": NOW - timedelta(minutes=7),
         "rank_run_id": 17,
+        "rank_id": 18,
         "rank_version": 1,
         "rank_status": "complete",
         "rankable": True,
         "ordinal_rank": 3,
         "evidence_score": 77.0,
+        "calibration_projection_id": 55,
+        "calibration_run_id": 9,
+        "calibration_version": 1,
+        "calibration_model_sha256": "c" * 64,
+        "calibrated_quality": 0.80,
+        "calibration_projected_at": NOW - timedelta(minutes=1),
+        "calibration_code_version": "abc1234",
         "evidence_coverage_pct": 100.0,
         "exclusion_reasons": (),
         "data_feed": "sip",
@@ -110,7 +122,7 @@ def test_exact_clean_authorized_candidate_is_only_dry_run_eligible():
     assert decision.decision == DECISION_ELIGIBLE
     assert decision.presentation == PRESENTATION_ACTIONABLE
     assert decision.reason_codes == ()
-    assert decision.idempotency_key.startswith("postmarket-readiness-v1:")
+    assert decision.idempotency_key.startswith("postmarket-readiness-v2:")
 
 
 def test_default_arguments_fail_closed_without_owner_authorization():
@@ -278,7 +290,7 @@ def test_exact_json_contracts_parse_without_implicit_approval():
 
 def test_truth_schemas_match_the_runtime_contracts():
     policy_schema = json.loads(
-        Path("truth/postmarket_customer_delivery_policy_v1.schema.json").read_text()
+        Path("truth/postmarket_customer_delivery_policy_v2.schema.json").read_text()
     )
     authorization_schema = json.loads(
         Path(

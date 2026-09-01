@@ -14,6 +14,7 @@ from tradebot.postmarket_calibration import (
     evaluate_rank_calibration,
     export_calibration_report,
     fit_rank_calibrator,
+    project_rank_calibration,
 )
 from tradebot.postmarket_discovery import DISCOVERY_SCHEMA
 from tradebot.postmarket_empirical import (
@@ -30,6 +31,7 @@ from tradebot.postmarket_rank import RANK_SCHEMA
 
 DEV = date(2026, 8, 20)
 HOLDOUT = date(2026, 8, 21)
+LIVE = date(2026, 8, 24)
 LOCKED_AT = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
 FITTED_AT = datetime(2026, 8, 21, 12, 30, tzinfo=timezone.utc)
 POLICY = CalibrationPolicy(6, 3, 3, 6, 3, 3, 2, 0.20, 0.10)
@@ -175,6 +177,27 @@ def _fit(conn: sqlite3.Connection):
         fitted_at=FITTED_AT,
         code_version="abc1234",
         policy=POLICY,
+    )
+
+
+def _validate_holdout(conn: sqlite3.Connection):
+    _seed_split(conn, HOLDOUT, "H")
+    unblind_holdout(
+        conn,
+        experiment_id="calibration-v1",
+        unblinded_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+        unblinded_by="owner",
+        reason="independent labels complete",
+        expected_inventory_sha256=holdout_label_inventory(
+            conn, "calibration-v1"
+        )[0],
+    )
+    return evaluate_rank_calibration(
+        conn,
+        experiment_id="calibration-v1",
+        split="holdout",
+        evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),
+        code_version="abc1234",
     )
 
 
@@ -423,3 +446,151 @@ def test_bad_holdout_calibration_fails_named_quality_gates():
         "BRIER_SCORE_FLOOR_NOT_MET",
         "EXPECTED_CALIBRATION_ERROR_FLOOR_NOT_MET",
     }
+
+
+def test_exact_passing_model_projects_append_only_candidate_quality():
+    conn = _conn()
+    _seed_split(conn, DEV, "D")
+    calibrator = _fit(conn)
+    _validate_holdout(conn)
+    _seed_rank(conn, LIVE, [("LOW", 20), ("HIGH", 80)])
+    rank_run_id = int(conn.execute(
+        "SELECT MAX(rank_run_id) FROM postmarket_rank_runs"
+    ).fetchone()[0])
+
+    first = project_rank_calibration(
+        conn,
+        rank_run_id=rank_run_id,
+        model_sha256=calibrator.model_sha256,
+        projected_at=datetime(2026, 8, 24, 20, 11, tzinfo=timezone.utc),
+        code_version="abc1234",
+    )
+    replay = project_rank_calibration(
+        conn,
+        rank_run_id=rank_run_id,
+        model_sha256=calibrator.model_sha256,
+        projected_at=datetime(2026, 8, 24, 20, 12, tzinfo=timezone.utc),
+        code_version="def5678",
+    )
+
+    assert first.projected_rows == 2
+    assert first.created_rows == 2
+    assert replay.created_rows == 0
+    assert replay.projection_digest_sha256 == first.projection_digest_sha256
+    assert [row.calibrated_quality for row in first.projections] == [0, 1]
+    assert {row.model_sha256 for row in first.projections} == {
+        calibrator.model_sha256
+    }
+    assert {row.calibration_run_id for row in first.projections} == {
+        first.calibration_run_id
+    }
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE postmarket_rank_calibration_projections "
+            "SET calibrated_quality=0.5"
+        )
+
+
+def test_projection_fails_closed_before_validation_or_for_late_model():
+    conn = _conn()
+    _seed_split(conn, DEV, "D")
+    calibrator = _fit(conn)
+    _seed_rank(conn, LIVE, [("LIVE", 80)])
+    live_run = int(conn.execute(
+        "SELECT MAX(rank_run_id) FROM postmarket_rank_runs"
+    ).fetchone()[0])
+    with pytest.raises(ValueError, match="no holdout evaluation"):
+        project_rank_calibration(
+            conn,
+            rank_run_id=live_run,
+            model_sha256=calibrator.model_sha256,
+            projected_at=datetime(2026, 8, 24, 20, 11, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
+
+    _validate_holdout(conn)
+    development_run = int(conn.execute(
+        "SELECT MIN(rank_run_id) FROM postmarket_rank_runs"
+    ).fetchone()[0])
+    with pytest.raises(ValueError, match="frozen after|validation postdates"):
+        project_rank_calibration(
+            conn,
+            rank_run_id=development_run,
+            model_sha256=calibrator.model_sha256,
+            projected_at=datetime(2026, 8, 24, 20, 11, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
+    with pytest.raises(ValueError, match="exactly one frozen calibrator"):
+        project_rank_calibration(
+            conn,
+            rank_run_id=live_run,
+            model_sha256="f" * 64,
+            projected_at=datetime(2026, 8, 24, 20, 11, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_rank_calibration_projections"
+    ).fetchone()[0] == 0
+
+
+def test_failed_holdout_can_never_produce_customer_quality_projection():
+    conn = _conn()
+    _seed_split(conn, DEV, "D")
+    calibrator = _fit(conn)
+    _seed_rank(
+        conn,
+        HOLDOUT,
+        [(f"H{index}", 20.0 if index < 3 else 80.0) for index in range(6)],
+    )
+    acquired = datetime(2026, 8, 22, 0, tzinfo=timezone.utc)
+    for index in range(6):
+        positive = index < 3
+        record_independent_label(
+            conn,
+            experiment_id="calibration-v1",
+            session=HOLDOUT,
+            symbol=f"H{index}",
+            classification="eligible" if positive else "ineligible",
+            direction="up" if positive else None,
+            eligible_at=(
+                datetime(2026, 8, 21, 20, 10, tzinfo=timezone.utc)
+                if positive else None
+            ),
+            labeler="blinded-reviewer",
+            reason_code="INDEPENDENT_BAR_REVIEW",
+            rationale="reviewed independently of rank output",
+            artifact_sha256=f"{index + 7:x}" * 64,
+            artifact_providers=("independent-source",),
+            artifact_feeds=("reviewed-bars",),
+            artifact_acquired_at=acquired,
+            recorded_at=acquired + timedelta(minutes=index),
+        )
+    unblind_holdout(
+        conn,
+        experiment_id="calibration-v1",
+        unblinded_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+        unblinded_by="owner",
+        reason="review complete",
+        expected_inventory_sha256=holdout_label_inventory(
+            conn, "calibration-v1"
+        )[0],
+    )
+    report = evaluate_rank_calibration(
+        conn,
+        experiment_id="calibration-v1",
+        split="holdout",
+        evaluated_at=datetime(2026, 8, 22, 3, tzinfo=timezone.utc),
+        code_version="abc1234",
+    )
+    assert report.calibrated_quality_claim_valid is False
+    _seed_rank(conn, LIVE, [("LIVE", 80)])
+    with pytest.raises(ValueError, match="not passed holdout"):
+        project_rank_calibration(
+            conn,
+            rank_run_id=int(conn.execute(
+                "SELECT MAX(rank_run_id) FROM postmarket_rank_runs"
+            ).fetchone()[0]),
+            model_sha256=calibrator.model_sha256,
+            projected_at=datetime(2026, 8, 24, 20, 11, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )

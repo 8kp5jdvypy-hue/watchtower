@@ -60,6 +60,23 @@ CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_runs_session
 CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_runs_candidate
     ON postmarket_delivery_dry_runs(candidate_id,route_id);
 
+CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_calibrations (
+    route_id INTEGER PRIMARY KEY,
+    projection_id INTEGER NOT NULL,
+    calibration_run_id INTEGER NOT NULL,
+    calibration_version INTEGER NOT NULL,
+    model_sha256 TEXT NOT NULL,
+    calibrated_quality REAL NOT NULL,
+    projected_at_utc TEXT NOT NULL,
+    code_version TEXT NOT NULL,
+    CHECK (projection_id > 0),
+    CHECK (calibration_run_id > 0),
+    CHECK (calibration_version > 0),
+    CHECK (calibrated_quality >= 0 AND calibrated_quality <= 1)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_run_calibrations_model
+    ON postmarket_delivery_dry_run_calibrations(model_sha256,route_id);
+
 CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_ticks (
     tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
     router_version INTEGER NOT NULL,
@@ -112,6 +129,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_runs_no_delete
 BEFORE DELETE ON postmarket_delivery_dry_runs BEGIN
     SELECT RAISE(ABORT, 'postmarket_delivery_dry_runs is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_calibrations_no_update
+BEFORE UPDATE ON postmarket_delivery_dry_run_calibrations BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_calibrations is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_calibrations_no_delete
+BEFORE DELETE ON postmarket_delivery_dry_run_calibrations BEGIN
+    SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_calibrations is append-only');
 END;
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_ticks_no_update
 BEFORE UPDATE ON postmarket_delivery_dry_run_ticks BEGIN
@@ -405,6 +430,54 @@ def route_dry_run(
             if row is None:
                 raise RuntimeError("suppressed dry-run decision conflict could not be resolved")
             route_id = int(row[0])
+        calibration_values = None
+        if candidate.calibration_projection_id is not None:
+            if (
+                candidate.calibration_run_id is None
+                or candidate.calibration_version is None
+                or candidate.calibration_model_sha256 is None
+                or candidate.calibrated_quality is None
+                or candidate.calibration_projected_at is None
+                or candidate.calibration_code_version is None
+            ):
+                raise ValueError("calibration projection attribution is incomplete")
+            calibration_values = (
+                route_id,
+                candidate.calibration_projection_id,
+                candidate.calibration_run_id,
+                candidate.calibration_version,
+                candidate.calibration_model_sha256,
+                candidate.calibrated_quality,
+                _aware_utc(
+                    candidate.calibration_projected_at,
+                    "candidate.calibration_projected_at",
+                ).isoformat(),
+                candidate.calibration_code_version,
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO postmarket_delivery_dry_run_calibrations
+                  (route_id,projection_id,calibration_run_id,calibration_version,
+                   model_sha256,calibrated_quality,projected_at_utc,code_version)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                calibration_values,
+            )
+        persisted_calibration = conn.execute(
+            """
+            SELECT route_id,projection_id,calibration_run_id,calibration_version,
+                   model_sha256,calibrated_quality,projected_at_utc,code_version
+            FROM postmarket_delivery_dry_run_calibrations WHERE route_id=?
+            """,
+            (route_id,),
+        ).fetchone()
+        if calibration_values is None:
+            if persisted_calibration is not None:
+                raise ValueError(
+                    "dry-run route has calibration evidence absent from candidate"
+                )
+        elif persisted_calibration is None or tuple(persisted_calibration) != calibration_values:
+            raise ValueError("dry-run route calibration evidence conflicts with candidate")
     return DryRunRouteResult(
         route_id=route_id,
         created=created,

@@ -36,17 +36,21 @@ END = date(2026, 9, 18)
 
 def _delivery_policy():
     return {
-        "delivery_policy_version": 1,
+        "delivery_policy_version": 2,
         "router_revision": REVISION,
         "evidence_set_sha256": "1" * 64,
         "evidence_gate_sha256": "2" * 64,
         "rank_version": 1,
         "minimum_evidence_score": 70,
+        "calibration_version": 1,
+        "calibration_model_sha256": "c" * 64,
+        "minimum_calibrated_quality": 0.70,
         "maximum_ordinal_rank": 10,
         "minimum_evidence_coverage_pct": 95,
         "maximum_data_age_seconds": 330,
         "allowed_states": ["CONFIRMED"],
         "allowed_evidence_revisions": [REVISION],
+        "allowed_calibration_revisions": [REVISION],
         "allowed_providers": ["alpaca"],
         "allowed_feeds": ["sip"],
     }
@@ -79,7 +83,7 @@ def _campaign_policy():
         "min_session_coverage_pct": 100,
         "max_scheduled_lag_seconds": 30,
         "max_tick_latency_seconds": 10,
-        "allowed_audit_versions": [1],
+        "allowed_audit_versions": [2],
         "allowed_audit_code_versions": [REVISION],
         "allowed_runtime_router_revisions": [REVISION],
         **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
@@ -130,6 +134,12 @@ def _fixture(tmp_path, monkeypatch):
         gate_artifact_sha256="2" * 64,
         gate_code_version=REVISION,
         evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+        calibration_artifact_sha256="7" * 64,
+        calibration_model_sha256="c" * 64,
+        calibration_version=1,
+        calibration_evaluated_at_utc=datetime(
+            2026, 8, 25, 12, tzinfo=timezone.utc
+        ),
         report=SimpleNamespace(rank_version=1),
     )
     monkeypatch.setattr(
@@ -165,7 +175,7 @@ def _fixture(tmp_path, monkeypatch):
         source = hashlib.sha256(session.encode()).hexdigest()
         source_by_session[session] = source
         payload = {
-            "audit_version": 1,
+            "audit_version": 2,
             "audit_code_version": REVISION,
             "session": session,
             "database": "shadow.db",
@@ -187,6 +197,11 @@ def _fixture(tmp_path, monkeypatch):
                 "orphan_routes": 0,
                 "duplicate_eligible_identities": 0,
                 "actionability_failures": 0,
+                "eligible_candidates": 20,
+                "calibrated_routes": 20,
+                "calibration_link_failures": 0,
+                "calibration_attribution_failures": 0,
+                "calibration_model_sha256s": [campaign["calibration_model_sha256"]],
                 "policy_sha256s": [campaign["delivery_policy_sha256"]],
                 "authorization_sha256s": [campaign["owner_authorization_sha256"]],
                 "runtime_router_revisions": [REVISION],
@@ -194,7 +209,7 @@ def _fixture(tmp_path, monkeypatch):
             },
             "issues": [],
         }
-        (audit_dir / f"postmarket_customer_dry_run_audit_{session}_v1.json").write_text(
+        (audit_dir / f"postmarket_customer_dry_run_audit_{session}_v2.json").write_text(
             json.dumps(payload, sort_keys=True)
         )
     monkeypatch.setattr(
@@ -223,6 +238,12 @@ def _fixture(tmp_path, monkeypatch):
       verdict TEXT, rubric_json TEXT, critical_finding INTEGER, notes TEXT,
       attestation TEXT, review_payload_sha256 TEXT, recorded_at_utc TEXT
     );
+    CREATE TABLE postmarket_delivery_dry_run_calibrations (
+      route_id INTEGER PRIMARY KEY, projection_id INTEGER,
+      calibration_run_id INTEGER, calibration_version INTEGER,
+      model_sha256 TEXT, calibrated_quality REAL,
+      projected_at_utc TEXT, code_version TEXT
+    );
     """)
     rubric = {field: "PASS" for field in gate.RUBRIC_FIELDS}
     case_by_route = {}
@@ -236,6 +257,11 @@ def _fixture(tmp_path, monkeypatch):
             (route_id, session, symbol, fingerprint, "ELIGIBLE_FOR_DRY_RUN",
              "ACTIONABLE", campaign["delivery_policy_sha256"],
              campaign["owner_authorization_sha256"], REVISION),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_delivery_dry_run_calibrations VALUES (?,?,?,?,?,?,?,?)",
+            (route_id, route_id, 1, 1, campaign["calibration_model_sha256"],
+             0.91, "2026-08-31T20:01:00+00:00", REVISION),
         )
         case_sha = hashlib.sha256(f"case-{route_id}".encode()).hexdigest()
         case_by_route[route_id] = case_sha
@@ -348,6 +374,12 @@ def test_gate_rejects_upstream_artifact_that_no_longer_matches_campaign(
             gate_artifact_sha256="2" * 64,
             gate_code_version=REVISION,
             evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="c" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
             report=SimpleNamespace(rank_version=1),
         ),
     )
@@ -365,3 +397,60 @@ def test_gate_rejects_upstream_artifact_that_no_longer_matches_campaign(
     assert "UPSTREAM_DISCOVERY_EVIDENCE_EXACT" in {
         check.code for check in report.checks if not check.passed
     }
+
+
+def test_gate_rejects_substituted_calibration_model(tmp_path, monkeypatch):
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(
+        gate,
+        "verify_discovery_gate_artifact",
+        lambda *args: SimpleNamespace(
+            evidence_set_sha256="1" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="d" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    report = evaluate_customer_dry_run_gate(
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits, control_paths=controls,
+        db_path=database, now=NOW, gate_code_version=REVISION,
+    )
+    failed = {check.code for check in report.checks if not check.passed}
+    assert report.verdict == VERDICT_NOT_READY
+    assert "UPSTREAM_DISCOVERY_EVIDENCE_EXACT" in failed
+
+
+def test_gate_rejects_eligible_route_without_exact_calibration_link(
+    tmp_path, monkeypatch
+):
+    campaign, upstream_set, upstream_gate, audits, controls, database = _fixture(
+        tmp_path, monkeypatch
+    )
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "DELETE FROM postmarket_delivery_dry_run_calibrations WHERE route_id=1"
+    )
+    conn.commit()
+    conn.close()
+    report = evaluate_customer_dry_run_gate(
+        campaign_path=campaign,
+        upstream_discovery_evidence_set_path=upstream_set,
+        upstream_discovery_evidence_gate_path=upstream_gate,
+        audit_dir=audits, control_paths=controls,
+        db_path=database, now=NOW, gate_code_version=REVISION,
+    )
+    failed = {check.code for check in report.checks if not check.passed}
+    assert report.verdict == VERDICT_NOT_READY
+    assert "ELIGIBLE_ROUTES_CALIBRATION_EXACT" in failed

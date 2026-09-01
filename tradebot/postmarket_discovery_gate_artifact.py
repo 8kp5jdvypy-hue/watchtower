@@ -46,6 +46,10 @@ class VerifiedDiscoveryGateArtifact:
     gate_artifact_sha256: str
     gate_code_version: str
     evaluated_at_utc: datetime
+    calibration_artifact_sha256: str
+    calibration_model_sha256: str
+    calibration_version: int
+    calibration_evaluated_at_utc: datetime
     report: DiscoveryEvidenceGateReport
 
 
@@ -176,6 +180,33 @@ def verify_discovery_gate_artifact(
         raise ValueError("embedded discovery gate report is not reproducible")
     if report.verdict != VERDICT_OWNER_REVIEW:
         raise ValueError("discovery gate artifact is not eligible for owner review")
+    calibration_payload = json.loads(
+        manifest.calibration_artifact.path.read_text(encoding="utf-8")
+    )
+    if (
+        not isinstance(calibration_payload, dict)
+        or calibration_payload.get("artifact_type")
+        != "postmarket_rank_calibration"
+    ):
+        raise ValueError("verified calibration artifact identity is invalid")
+    calibration_model_sha256 = _sha(
+        calibration_payload.get("model_sha256"),
+        "calibration model_sha256",
+    )
+    calibration_model = calibration_payload.get("model")
+    if not isinstance(calibration_model, dict):
+        raise ValueError("verified calibration model must be an object")
+    calibration_version = calibration_model.get("calibration_version")
+    if (
+        isinstance(calibration_version, bool)
+        or not isinstance(calibration_version, int)
+        or calibration_version <= 0
+    ):
+        raise ValueError("verified calibration_version must be positive")
+    calibration_evaluated_at = _utc(
+        datetime.fromisoformat(calibration_payload["evaluated_at_utc"]),
+        "calibration evaluated_at_utc",
+    )
     return VerifiedDiscoveryGateArtifact(
         evidence_path,
         evidence_digest,
@@ -183,6 +214,10 @@ def verify_discovery_gate_artifact(
         hashlib.sha256(gate_raw).hexdigest(),
         revision,
         evaluated,
+        manifest.calibration_artifact.sha256,
+        calibration_model_sha256,
+        calibration_version,
+        calibration_evaluated_at,
         report,
     )
 

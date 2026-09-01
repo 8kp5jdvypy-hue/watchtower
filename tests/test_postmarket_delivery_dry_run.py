@@ -40,11 +40,15 @@ def policy():
         evidence_gate_sha256="b" * 64,
         rank_version=1,
         minimum_evidence_score=60,
+        calibration_version=1,
+        calibration_model_sha256="c" * 64,
+        minimum_calibrated_quality=0.70,
         maximum_ordinal_rank=10,
         minimum_evidence_coverage_pct=90,
         maximum_data_age_seconds=330,
         allowed_states=(STATE_CONFIRMED,),
         allowed_evidence_revisions=("abc1234",),
+        allowed_calibration_revisions=("abc1234",),
         allowed_providers=("alpaca",),
         allowed_feeds=("sip",),
     )
@@ -79,11 +83,19 @@ def candidate():
         transition_at=NOW - timedelta(minutes=2),
         evidence_bar_open_at=NOW - timedelta(minutes=7),
         rank_run_id=17,
+        rank_id=18,
         rank_version=1,
         rank_status="complete",
         rankable=True,
         ordinal_rank=3,
         evidence_score=77,
+        calibration_projection_id=55,
+        calibration_run_id=9,
+        calibration_version=1,
+        calibration_model_sha256="c" * 64,
+        calibrated_quality=0.80,
+        calibration_projected_at=NOW - timedelta(minutes=1),
+        calibration_code_version="abc1234",
         evidence_coverage_pct=100,
         exclusion_reasons=(),
         data_feed="sip",
@@ -117,6 +129,10 @@ def test_eligible_decision_is_append_only_and_transactionally_deduplicated(
     assert conn.execute(
         "SELECT COUNT(*) FROM postmarket_delivery_dry_runs"
     ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT projection_id,calibration_run_id,model_sha256,calibrated_quality "
+        "FROM postmarket_delivery_dry_run_calibrations"
+    ).fetchone() == (55, 9, "c" * 64, 0.8)
 
 
 def test_suppressed_state_can_later_become_one_eligible_decision(
@@ -178,12 +194,39 @@ def test_ledger_rejects_update_delete_and_empty_run_id(
     conn.rollback()
     with pytest.raises(sqlite3.IntegrityError, match="append-only"):
         conn.execute(
+            "UPDATE postmarket_delivery_dry_run_calibrations "
+            "SET calibrated_quality=0.1"
+        )
+    conn.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
             "DELETE FROM postmarket_delivery_dry_runs WHERE route_id=?",
             (result.route_id,),
         )
     conn.rollback()
     with pytest.raises(ValueError, match="run_id"):
         _route(conn, candidate, policy, authorization, run_id=" ")
+
+
+def test_missing_calibration_is_suppressed_without_fabricating_route_evidence(
+    conn, candidate, policy, authorization,
+):
+    missing = replace(
+        candidate,
+        calibration_projection_id=None,
+        calibration_run_id=None,
+        calibration_version=None,
+        calibration_model_sha256=None,
+        calibrated_quality=None,
+        calibration_projected_at=None,
+        calibration_code_version=None,
+    )
+    result = _route(conn, missing, policy, authorization)
+    assert result.decision == DECISION_SUPPRESSED
+    assert "CALIBRATION_PROJECTION_MISSING" in result.reason_codes
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_delivery_dry_run_calibrations"
+    ).fetchone()[0] == 0
 
 
 def test_record_binds_authorization_policy_and_exact_evidence_ids(

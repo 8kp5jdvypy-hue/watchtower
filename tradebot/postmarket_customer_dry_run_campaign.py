@@ -31,7 +31,7 @@ from tradebot.postmarket_discovery_gate_artifact import (
 )
 
 
-CAMPAIGN_VERSION = 2
+CAMPAIGN_VERSION = 3
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 FINAL_BAR_GRACE = timedelta(minutes=5)
@@ -48,6 +48,9 @@ CAMPAIGN_FIELDS = frozenset({
     "upstream_discovery_evidence_gate_sha256",
     "upstream_discovery_gate_code_version",
     "upstream_discovery_gate_evaluated_at_utc",
+    "upstream_calibration_artifact_sha256",
+    "calibration_model_sha256", "calibration_version",
+    "calibration_evaluated_at_utc",
 })
 
 
@@ -76,6 +79,9 @@ class DryRunCampaignPolicy:
     require_zero_orphan_routes: bool
     require_zero_duplicate_eligible_identities: bool
     require_zero_actionability_failures: bool
+    require_zero_calibration_link_failures: bool
+    require_zero_calibration_attribution_failures: bool
+    require_exact_calibration_model: bool
     require_zero_critical_review_findings: bool
     require_independent_owner_review: bool
 
@@ -280,6 +286,10 @@ def lock_customer_dry_run_campaign(
         raise ValueError("delivery policy does not bind the verified upstream evidence gate")
     if upstream.report.rank_version != delivery_policy.rank_version:
         raise ValueError("upstream discovery rank version does not match delivery policy")
+    if upstream.calibration_model_sha256 != delivery_policy.calibration_model_sha256:
+        raise ValueError("delivery policy calibration model does not match upstream evidence")
+    if upstream.calibration_version != delivery_policy.calibration_version:
+        raise ValueError("delivery policy calibration version does not match upstream evidence")
     if upstream.gate_code_version not in delivery_policy.allowed_evidence_revisions:
         raise ValueError("upstream discovery gate revision is not allowed by delivery policy")
     if upstream.evaluated_at_utc > authorization.approved_at:
@@ -293,8 +303,8 @@ def lock_customer_dry_run_campaign(
         raise ValueError("campaign must pin the exact delivery policy router revision")
     if campaign_policy.allowed_audit_code_versions != expected_revision:
         raise ValueError("campaign must pin the audit to the exact router revision")
-    if campaign_policy.allowed_audit_versions != (1,):
-        raise ValueError("campaign must pin customer dry-run audit version 1")
+    if campaign_policy.allowed_audit_versions != (2,):
+        raise ValueError("campaign must pin customer dry-run audit version 2")
     if len(control_evidence_sha256s) != 4:
         raise ValueError("campaign requires exactly four control evidence digests")
     controls = tuple(_digest(item, "control_evidence_sha256s") for item in control_evidence_sha256s)
@@ -320,6 +330,10 @@ def lock_customer_dry_run_campaign(
         "upstream_discovery_evidence_gate_sha256": upstream.gate_artifact_sha256,
         "upstream_discovery_gate_code_version": upstream.gate_code_version,
         "upstream_discovery_gate_evaluated_at_utc": upstream.evaluated_at_utc.isoformat(),
+        "upstream_calibration_artifact_sha256": upstream.calibration_artifact_sha256,
+        "calibration_model_sha256": upstream.calibration_model_sha256,
+        "calibration_version": upstream.calibration_version,
+        "calibration_evaluated_at_utc": upstream.calibration_evaluated_at_utc.isoformat(),
         "policy": asdict(campaign_policy),
     }
     raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()

@@ -185,6 +185,24 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         payload["upstream_discovery_gate_evaluated_at_utc"],
         "upstream_discovery_gate_evaluated_at_utc",
     )
+    _sha(
+        payload["upstream_calibration_artifact_sha256"],
+        "upstream_calibration_artifact_sha256",
+    )
+    _sha(payload["calibration_model_sha256"], "calibration_model_sha256")
+    if not isinstance(payload["calibration_version"], int) or isinstance(
+        payload["calibration_version"], bool
+    ) or payload["calibration_version"] < 1:
+        raise ValueError("calibration_version must be a positive integer")
+    calibration_evaluated = _aware(
+        payload["calibration_evaluated_at_utc"], "calibration_evaluated_at_utc"
+    )
+    upstream_evaluated = _aware(
+        payload["upstream_discovery_gate_evaluated_at_utc"],
+        "upstream_discovery_gate_evaluated_at_utc",
+    )
+    if calibration_evaluated > upstream_evaluated:
+        raise ValueError("calibration evidence postdates the upstream gate")
     controls = tuple(_sha(value, "control_evidence_sha256s") for value in payload["control_evidence_sha256s"])
     if len(controls) != 4 or len(set(controls)) != 4:
         raise ValueError("campaign must bind four unique controls")
@@ -290,6 +308,13 @@ def evaluate_customer_dry_run_gate(
         and upstream.evaluated_at_utc.isoformat()
         == campaign["upstream_discovery_gate_evaluated_at_utc"]
         and upstream.report.rank_version == campaign["rank_version"]
+        and upstream.calibration_artifact_sha256
+        == campaign["upstream_calibration_artifact_sha256"]
+        and upstream.calibration_model_sha256
+        == campaign["calibration_model_sha256"]
+        and upstream.calibration_version == campaign["calibration_version"]
+        and upstream.calibration_evaluated_at_utc.isoformat()
+        == campaign["calibration_evaluated_at_utc"]
     )
     checks.append(_check(
         "UPSTREAM_DISCOVERY_EVIDENCE_EXACT",
@@ -297,6 +322,9 @@ def evaluate_customer_dry_run_gate(
             "evidence_set_sha256": upstream.evidence_set_sha256,
             "evidence_gate_sha256": upstream.gate_artifact_sha256,
             "gate_code_version": upstream.gate_code_version,
+            "calibration_artifact_sha256": upstream.calibration_artifact_sha256,
+            "calibration_model_sha256": upstream.calibration_model_sha256,
+            "calibration_version": upstream.calibration_version,
         },
         {
             "evidence_set_sha256": campaign[
@@ -308,6 +336,11 @@ def evaluate_customer_dry_run_gate(
             "gate_code_version": campaign[
                 "upstream_discovery_gate_code_version"
             ],
+            "calibration_artifact_sha256": campaign[
+                "upstream_calibration_artifact_sha256"
+            ],
+            "calibration_model_sha256": campaign["calibration_model_sha256"],
+            "calibration_version": campaign["calibration_version"],
         },
         upstream_exact,
     ))
@@ -343,7 +376,9 @@ def evaluate_customer_dry_run_gate(
 
     audit_paths = {
         path.name.split("postmarket_customer_dry_run_audit_", 1)[1].split("_v", 1)[0]: path
-        for path in Path(audit_dir).glob("postmarket_customer_dry_run_audit_*_v1.json")
+        for path in Path(audit_dir).glob(
+            f"postmarket_customer_dry_run_audit_*_v{AUDIT_VERSION}.json"
+        )
     }
     supplied_sessions = tuple(sorted(set(audit_paths) & set(expected_sessions)))
     checks.append(_check(
@@ -403,6 +438,7 @@ def evaluate_customer_dry_run_gate(
             "link_failures", "identity_failures", "input_digest_failures",
             "decision_attribution_failures", "orphan_routes",
             "duplicate_eligible_identities", "actionability_failures",
+            "calibration_link_failures", "calibration_attribution_failures",
         )
         zero_failures = sum(
             int(row["metrics"][field])
@@ -415,6 +451,11 @@ def evaluate_customer_dry_run_gate(
             and tuple(row["metrics"]["runtime_router_revisions"])
             == tuple(policy.allowed_runtime_router_revisions)
             and tuple(row["metrics"]["router_versions"]) == (campaign["router_version"],)
+            and (
+                int(row["metrics"]["eligible_candidates"]) == 0
+                or tuple(row["metrics"]["calibration_model_sha256s"])
+                == (campaign["calibration_model_sha256"],)
+            )
             and row["audit_code_version"] in policy.allowed_audit_code_versions
             for row in audit_rows
         )
@@ -429,7 +470,7 @@ def evaluate_customer_dry_run_gate(
         ))
 
         placeholders = ",".join("?" for _ in expected_sessions)
-        route_rows = conn.execute(
+        base_route_rows = conn.execute(
             f"""
             SELECT route_id,session,symbol,decision_fingerprint_sha256
             FROM postmarket_delivery_dry_runs
@@ -443,6 +484,30 @@ def evaluate_customer_dry_run_gate(
             (*expected_sessions, campaign["delivery_policy_sha256"],
              campaign["owner_authorization_sha256"], revision),
         ).fetchall()
+        route_rows = conn.execute(
+            f"""
+            SELECT d.route_id,d.session,d.symbol,d.decision_fingerprint_sha256
+            FROM postmarket_delivery_dry_runs d
+            JOIN postmarket_delivery_dry_run_calibrations q
+              ON q.route_id=d.route_id
+            WHERE d.session IN ({placeholders})
+              AND d.decision='ELIGIBLE_FOR_DRY_RUN'
+              AND d.presentation='ACTIONABLE'
+              AND d.policy_sha256=? AND d.authorization_sha256=?
+              AND d.runtime_router_revision=?
+              AND q.model_sha256=?
+              AND q.calibration_version=?
+            ORDER BY d.route_id
+            """,
+            (*expected_sessions, campaign["delivery_policy_sha256"],
+             campaign["owner_authorization_sha256"], revision,
+             campaign["calibration_model_sha256"], campaign["calibration_version"]),
+        ).fetchall()
+        calibration_bound = len(route_rows) == len(base_route_rows)
+        checks.append(_check(
+            "ELIGIBLE_ROUTES_CALIBRATION_EXACT",
+            len(route_rows), len(base_route_rows), calibration_bound,
+        ))
         eligible_route_ids = {int(row[0]) for row in route_rows}
         checks.append(_check(
             "MIN_ELIGIBLE_DECISIONS", len(eligible_route_ids),
@@ -538,6 +603,8 @@ def evaluate_customer_dry_run_gate(
             "upstream": [
                 upstream.evidence_set_sha256,
                 upstream.gate_artifact_sha256,
+                upstream.calibration_artifact_sha256,
+                upstream.calibration_model_sha256,
             ],
             "audits": sorted(item["sha256"] for item in audit_digests),
             "controls": list(control_digests),
@@ -565,6 +632,8 @@ def evaluate_customer_dry_run_gate(
         upstream_digests=(
             {"kind": "discovery_evidence_set", "sha256": upstream.evidence_set_sha256},
             {"kind": "discovery_evidence_gate", "sha256": upstream.gate_artifact_sha256},
+            {"kind": "rank_calibration_artifact", "sha256": upstream.calibration_artifact_sha256},
+            {"kind": "rank_calibration_model", "sha256": upstream.calibration_model_sha256},
         ),
         audit_digests=tuple(sorted(audit_digests, key=lambda item: item["session"])),
         control_digests=tuple(sorted(
