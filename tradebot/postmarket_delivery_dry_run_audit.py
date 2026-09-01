@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -25,7 +26,7 @@ from zoneinfo import ZoneInfo
 import exchange_calendars as ecals
 
 
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
 ROUTER_VERSION = 1
 EXPECTED_POLL_SECONDS = 60
 FINAL_BAR_GRACE = timedelta(minutes=5)
@@ -78,6 +79,9 @@ class DryRunAuditMetrics:
     input_digest_failures: int
     decision_attribution_failures: int
     actionability_failures: int
+    calibrated_routes: int
+    calibration_link_failures: int
+    calibration_attribution_failures: int
     rank_missing_after_first_bar: int
     operational_reason_counts: dict[str, int]
     suppression_reason_counts: dict[str, int]
@@ -85,6 +89,7 @@ class DryRunAuditMetrics:
     authorization_sha256s: tuple[str, ...]
     runtime_router_revisions: tuple[str, ...]
     router_versions: tuple[int, ...]
+    calibration_model_sha256s: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -161,11 +166,13 @@ def _canonical_digest(
     ticks: list[sqlite3.Row],
     links: list[sqlite3.Row],
     routes: list[sqlite3.Row],
+    calibrations: list[sqlite3.Row],
 ) -> str:
     payload = {
         "ticks": [dict(row) for row in ticks],
         "links": [dict(row) for row in links],
         "routes": [dict(row) for row in routes],
+        "calibrations": [dict(row) for row in calibrations],
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
@@ -201,6 +208,10 @@ def audit_dry_run_session(
         "postmarket_delivery_dry_runs",
         "postmarket_delivery_dry_run_ticks",
         "postmarket_delivery_dry_run_tick_decisions",
+        "postmarket_delivery_dry_run_calibrations",
+        "postmarket_rank_calibration_projections",
+        "postmarket_rank_calibration_runs",
+        "postmarket_rank_calibrators",
     }
     missing_tables = sorted(required - _tables(conn))
     if missing_tables:
@@ -221,6 +232,15 @@ def audit_dry_run_session(
     ).fetchall()
     routes = conn.execute(
         "SELECT * FROM postmarket_delivery_dry_runs WHERE session=? ORDER BY route_id",
+        (session.isoformat(),),
+    ).fetchall()
+    calibrations = conn.execute(
+        """
+        SELECT c.*
+        FROM postmarket_delivery_dry_run_calibrations c
+        JOIN postmarket_delivery_dry_runs d ON d.route_id=c.route_id
+        WHERE d.session=? ORDER BY c.route_id
+        """,
         (session.isoformat(),),
     ).fetchall()
     expected_slots = _expected_slots(session)
@@ -418,6 +438,110 @@ def audit_dry_run_session(
     if actionability_failures:
         _issue(issues, "ELIGIBLE_ACTIONABILITY_MISMATCH", f"{actionability_failures} eligible routes are not actionable")
 
+    calibration_by_route = {
+        int(row["route_id"]): row for row in calibrations
+    }
+    eligible_route_ids = {
+        int(row["route_id"])
+        for row in routes
+        if row["decision"] == "ELIGIBLE_FOR_DRY_RUN"
+    }
+    calibration_link_failures = len(eligible_route_ids - set(calibration_by_route))
+    calibration_attribution_failures = 0
+    calibration_models: set[str] = set()
+    for route_id, calibration in calibration_by_route.items():
+        route = route_by_id.get(route_id)
+        if route is None:
+            calibration_link_failures += 1
+            continue
+        model_sha = str(calibration["model_sha256"])
+        calibration_models.add(model_sha)
+        projection = conn.execute(
+            """
+            SELECT * FROM postmarket_rank_calibration_projections
+            WHERE projection_id=?
+            """,
+            (calibration["projection_id"],),
+        ).fetchone()
+        run = conn.execute(
+            """
+            SELECT calibration_id,split,report_json,report_sha256
+            FROM postmarket_rank_calibration_runs WHERE calibration_run_id=?
+            """,
+            (calibration["calibration_run_id"],),
+        ).fetchone()
+        calibrator = None if run is None else conn.execute(
+            """
+            SELECT calibration_version,model_sha256,model_json
+            FROM postmarket_rank_calibrators WHERE calibration_id=?
+            """,
+            (run["calibration_id"],),
+        ).fetchone()
+        failure = (
+            projection is None
+            or run is None
+            or calibrator is None
+            or int(projection["rank_run_id"]) != int(route["rank_run_id"])
+            or int(projection["candidate_id"]) != int(route["candidate_id"])
+            or int(projection["calibration_run_id"])
+            != int(calibration["calibration_run_id"])
+            or int(projection["calibration_version"])
+            != int(calibration["calibration_version"])
+            or str(projection["model_sha256"]) != model_sha
+            or float(projection["calibrated_quality"])
+            != float(calibration["calibrated_quality"])
+            or str(projection["projected_at_utc"])
+            != str(calibration["projected_at_utc"])
+            or str(projection["code_version"])
+            != str(calibration["code_version"])
+            or run["split"] != "holdout"
+            or int(calibrator["calibration_version"])
+            != int(calibration["calibration_version"])
+            or str(calibrator["model_sha256"]) != model_sha
+        )
+        if not failure:
+            try:
+                report_raw = str(run["report_json"])
+                report = json.loads(report_raw)
+                failure = (
+                    hashlib.sha256(report_raw.encode()).hexdigest()
+                    != run["report_sha256"]
+                    or json.dumps(
+                        report, sort_keys=True, separators=(",", ":")
+                    ) != report_raw
+                    or report.get("model_sha256") != model_sha
+                    or report.get("calibrated_quality_claim_valid") is not True
+                    or report.get("blocking_reasons") != []
+                )
+            except (TypeError, json.JSONDecodeError):
+                failure = True
+        if (
+            not DIGEST_PATTERN.fullmatch(model_sha)
+            or not math.isfinite(float(calibration["calibrated_quality"]))
+            or not 0 <= float(calibration["calibrated_quality"]) <= 1
+        ):
+            failure = True
+        if failure:
+            calibration_attribution_failures += 1
+    if calibration_link_failures:
+        _issue(
+            issues,
+            "CALIBRATION_LINK_FAILURE",
+            f"{calibration_link_failures} eligible routes lack exact calibration evidence",
+        )
+    if calibration_attribution_failures:
+        _issue(
+            issues,
+            "CALIBRATION_ATTRIBUTION_FAILURE",
+            f"{calibration_attribution_failures} route calibration links are not reproducible",
+        )
+    if len(calibration_models) > 1:
+        _issue(
+            issues,
+            "CALIBRATION_MODEL_DRIFT",
+            f"session contains {len(calibration_models)} calibration models",
+        )
+
     policy_sha256s = tuple(sorted({str(row["policy_sha256"]) for row in ticks}))
     authorization_sha256s = tuple(sorted({str(row["authorization_sha256"]) for row in ticks}))
     runtime_revisions = tuple(sorted({str(row["runtime_router_revision"]) for row in ticks}))
@@ -498,11 +622,15 @@ def audit_dry_run_session(
         identity_failures=identity_failures, input_digest_failures=input_digest_failures,
         decision_attribution_failures=decision_attribution_failures,
         actionability_failures=actionability_failures,
+        calibrated_routes=len(calibration_by_route),
+        calibration_link_failures=calibration_link_failures,
+        calibration_attribution_failures=calibration_attribution_failures,
         rank_missing_after_first_bar=rank_missing_after_first_bar,
         operational_reason_counts=dict(sorted(operational_reasons.items())),
         suppression_reason_counts=dict(sorted(suppression_reasons.items())),
         policy_sha256s=policy_sha256s, authorization_sha256s=authorization_sha256s,
         runtime_router_revisions=runtime_revisions, router_versions=router_versions,
+        calibration_model_sha256s=tuple(sorted(calibration_models)),
     )
     clean = not issues
     eligible = clean
@@ -510,7 +638,9 @@ def audit_dry_run_session(
         audit_version=AUDIT_VERSION, audit_code_version=audit_code_version,
         session=session.isoformat(), database=database,
         created_at_utc=created.isoformat(),
-        source_evidence_sha256=_canonical_digest(ticks, links, routes),
+        source_evidence_sha256=_canonical_digest(
+            ticks, links, routes, calibrations
+        ),
         operational_clean=clean, session_evidence_eligible=eligible,
         metrics=metrics, issues=tuple(issues),
     )

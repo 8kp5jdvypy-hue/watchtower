@@ -66,6 +66,27 @@ CREATE TABLE IF NOT EXISTS postmarket_rank_calibration_runs (
     UNIQUE(calibration_id,split,input_digest_sha256),
     CHECK (split IN ('development','holdout'))
 );
+CREATE TABLE IF NOT EXISTS postmarket_rank_calibration_projections (
+    projection_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calibration_id INTEGER NOT NULL,
+    calibration_run_id INTEGER NOT NULL,
+    calibration_version INTEGER NOT NULL,
+    experiment_id TEXT NOT NULL,
+    model_sha256 TEXT NOT NULL,
+    rank_id INTEGER NOT NULL,
+    rank_run_id INTEGER NOT NULL,
+    candidate_id INTEGER NOT NULL,
+    evidence_score REAL NOT NULL,
+    segment_index INTEGER NOT NULL,
+    calibrated_quality REAL NOT NULL,
+    projected_at_utc TEXT NOT NULL,
+    code_version TEXT NOT NULL,
+    UNIQUE(rank_id,model_sha256),
+    CHECK (calibrated_quality >= 0 AND calibrated_quality <= 1),
+    CHECK (segment_index >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_rank_calibration_projections_run
+    ON postmarket_rank_calibration_projections(rank_run_id,model_sha256,rank_id);
 CREATE TRIGGER IF NOT EXISTS postmarket_rank_calibrators_no_update
 BEFORE UPDATE ON postmarket_rank_calibrators BEGIN
     SELECT RAISE(ABORT, 'postmarket_rank_calibrators is append-only');
@@ -81,6 +102,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS postmarket_rank_calibration_runs_no_delete
 BEFORE DELETE ON postmarket_rank_calibration_runs BEGIN
     SELECT RAISE(ABORT, 'postmarket_rank_calibration_runs is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_calibration_projections_no_update
+BEFORE UPDATE ON postmarket_rank_calibration_projections BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_calibration_projections is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_rank_calibration_projections_no_delete
+BEFORE DELETE ON postmarket_rank_calibration_projections BEGIN
+    SELECT RAISE(ABORT, 'postmarket_rank_calibration_projections is append-only');
 END;
 CREATE TRIGGER IF NOT EXISTS postmarket_development_labels_frozen_after_calibration
 BEFORE INSERT ON postmarket_independent_labels
@@ -188,6 +217,35 @@ class WrittenCalibrationArtifact:
     input_digest_sha256: str
     report_sha256: str
     model_sha256: str
+
+
+@dataclass(frozen=True)
+class RankCalibrationProjection:
+    projection_id: int
+    calibration_id: int
+    calibration_run_id: int
+    calibration_version: int
+    experiment_id: str
+    model_sha256: str
+    rank_id: int
+    rank_run_id: int
+    candidate_id: int
+    evidence_score: float
+    segment_index: int
+    calibrated_quality: float
+    projected_at_utc: str
+    code_version: str
+
+
+@dataclass(frozen=True)
+class RankCalibrationProjectionBatch:
+    rank_run_id: int
+    model_sha256: str
+    calibration_run_id: int
+    projected_rows: int
+    created_rows: int
+    projection_digest_sha256: str
+    projections: tuple[RankCalibrationProjection, ...]
 
 
 def ensure_calibration_schema(conn: sqlite3.Connection) -> None:
@@ -580,6 +638,235 @@ def _load_calibrator(conn: sqlite3.Connection, experiment_id: str) -> FrozenCali
         int(row["positive_labels"]), int(row["negative_labels"]),
         float(row["training_brier_score"]),
         float(row["training_expected_calibration_error"]), False,
+    )
+
+
+def load_calibrator_by_model_sha256(
+    conn: sqlite3.Connection, model_sha256: str,
+) -> FrozenCalibrator:
+    """Load and cryptographically verify one exact frozen calibrator."""
+    ensure_calibration_schema(conn)
+    digest = model_sha256.strip().lower()
+    if not SHA256_PATTERN.fullmatch(digest):
+        raise ValueError("model_sha256 must be a lowercase SHA-256 digest")
+    rows = conn.execute(
+        "SELECT experiment_id FROM postmarket_rank_calibrators WHERE model_sha256=?",
+        (digest,),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValueError("model_sha256 must identify exactly one frozen calibrator")
+    calibrator = _load_calibrator(conn, str(rows[0][0]))
+    if calibrator.model_sha256 != digest:
+        raise ValueError("loaded calibrator does not match model_sha256")
+    return calibrator
+
+
+def _passing_holdout_run(
+    conn: sqlite3.Connection, calibrator: FrozenCalibrator,
+) -> tuple[int, datetime]:
+    previous = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT calibration_run_id,evaluated_at_utc,report_json,report_sha256
+            FROM postmarket_rank_calibration_runs
+            WHERE calibration_id=? AND split='holdout'
+            ORDER BY evaluated_at_utc DESC,calibration_run_id DESC
+            """,
+            (calibrator.calibration_id,),
+        ).fetchall()
+    finally:
+        conn.row_factory = previous
+    if not rows:
+        raise ValueError("frozen calibrator has no holdout evaluation")
+    row = rows[0]
+    raw = str(row["report_json"])
+    if hashlib.sha256(raw.encode()).hexdigest() != row["report_sha256"]:
+        raise ValueError("holdout calibration report digest mismatch")
+    report = json.loads(raw)
+    if _canonical(report) != raw:
+        raise ValueError("holdout calibration report is not canonical JSON")
+    if report.get("model_sha256") != calibrator.model_sha256:
+        raise ValueError("holdout calibration report model mismatch")
+    if report.get("split") != "holdout" or report.get(
+        "calibrated_quality_claim_valid"
+    ) is not True:
+        raise ValueError("frozen calibrator has not passed holdout validation")
+    if report.get("blocking_reasons") != []:
+        raise ValueError("passing holdout calibration report contains blockers")
+    return int(row["calibration_run_id"]), _utc(
+        datetime.fromisoformat(row["evaluated_at_utc"]), "holdout evaluated_at_utc"
+    )
+
+
+def project_rank_calibration(
+    conn: sqlite3.Connection,
+    *,
+    rank_run_id: int,
+    model_sha256: str,
+    projected_at: datetime,
+    code_version: str,
+) -> RankCalibrationProjectionBatch:
+    """Append exact model-bound calibrated estimates for one immutable rank run.
+
+    Projection is deliberately unavailable until the frozen model has passed an
+    explicitly unblinded holdout.  The successful holdout evaluation and model
+    must both predate the rank snapshot, which prevents retroactive model
+    selection from becoming customer-readiness evidence.
+    """
+    ensure_calibration_schema(conn)
+    if not isinstance(rank_run_id, int) or isinstance(rank_run_id, bool) or rank_run_id <= 0:
+        raise ValueError("rank_run_id must be a positive integer")
+    projected = _utc(projected_at, "projected_at")
+    revision = _revision(code_version, "code_version")
+    calibrator = load_calibrator_by_model_sha256(conn, model_sha256)
+    calibration_run_id, validated_at = _passing_holdout_run(conn, calibrator)
+
+    previous = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        run = conn.execute(
+            """
+            SELECT rank_run_id,rank_version,as_of_utc,recorded_at_utc,status
+            FROM postmarket_rank_runs WHERE rank_run_id=?
+            """,
+            (rank_run_id,),
+        ).fetchone()
+        rows = conn.execute(
+            """
+            SELECT rank_id,rank_run_id,candidate_id,evidence_score
+            FROM postmarket_candidate_ranks
+            WHERE rank_run_id=? ORDER BY rank_id
+            """,
+            (rank_run_id,),
+        ).fetchall()
+    finally:
+        conn.row_factory = previous
+    if run is None:
+        raise ValueError("rank_run_id does not exist")
+    if int(run["rank_version"]) <= 0 or run["status"] != "complete":
+        raise ValueError("only a complete attributed rank run may be calibrated")
+    if not rows:
+        raise ValueError("rank run has no candidate rows")
+    as_of = _utc(datetime.fromisoformat(run["as_of_utc"]), "rank as_of_utc")
+    recorded = _utc(
+        datetime.fromisoformat(run["recorded_at_utc"]), "rank recorded_at_utc"
+    )
+    fitted = _utc(
+        datetime.fromisoformat(calibrator.fitted_at_utc), "calibrator fitted_at_utc"
+    )
+    if fitted > as_of:
+        raise ValueError("calibrator was frozen after the rank evidence")
+    if validated_at > as_of:
+        raise ValueError("holdout validation postdates the rank evidence")
+    if projected < max(as_of, recorded, validated_at):
+        raise ValueError("projection predates its model, validation, or rank evidence")
+
+    specifications: list[tuple[object, ...]] = []
+    for row in rows:
+        score = float(row["evidence_score"])
+        if not math.isfinite(score):
+            raise ValueError("rank evidence_score must be finite")
+        segment_index, quality = _predict(calibrator.segments, score)
+        specifications.append((
+            calibrator.calibration_id,
+            calibration_run_id,
+            calibrator.calibration_version,
+            calibrator.experiment_id,
+            calibrator.model_sha256,
+            int(row["rank_id"]),
+            int(row["rank_run_id"]),
+            int(row["candidate_id"]),
+            score,
+            segment_index,
+            quality,
+            projected.isoformat(),
+            revision,
+        ))
+    before = conn.total_changes
+    with conn:
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO postmarket_rank_calibration_projections
+              (calibration_id,calibration_run_id,calibration_version,experiment_id,
+               model_sha256,rank_id,rank_run_id,candidate_id,evidence_score,
+               segment_index,calibrated_quality,projected_at_utc,code_version)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            specifications,
+        )
+    created_rows = conn.total_changes - before
+
+    original = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        persisted = conn.execute(
+            """
+            SELECT * FROM postmarket_rank_calibration_projections
+            WHERE rank_run_id=? AND model_sha256=? ORDER BY rank_id
+            """,
+            (rank_run_id, calibrator.model_sha256),
+        ).fetchall()
+    finally:
+        conn.row_factory = original
+    if len(persisted) != len(specifications):
+        raise ValueError("rank calibration projection inventory is incomplete")
+    projections = tuple(RankCalibrationProjection(
+        projection_id=int(row["projection_id"]),
+        calibration_id=int(row["calibration_id"]),
+        calibration_run_id=int(row["calibration_run_id"]),
+        calibration_version=int(row["calibration_version"]),
+        experiment_id=str(row["experiment_id"]),
+        model_sha256=str(row["model_sha256"]),
+        rank_id=int(row["rank_id"]),
+        rank_run_id=int(row["rank_run_id"]),
+        candidate_id=int(row["candidate_id"]),
+        evidence_score=float(row["evidence_score"]),
+        segment_index=int(row["segment_index"]),
+        calibrated_quality=float(row["calibrated_quality"]),
+        projected_at_utc=str(row["projected_at_utc"]),
+        code_version=str(row["code_version"]),
+    ) for row in persisted)
+    expected = {
+        (int(item[5]), int(item[6]), int(item[7])): (
+            float(item[8]), int(item[9]), float(item[10])
+        )
+        for item in specifications
+    }
+    for item in projections:
+        identity = (item.rank_id, item.rank_run_id, item.candidate_id)
+        if identity not in expected or (
+            item.evidence_score,
+            item.segment_index,
+            item.calibrated_quality,
+        ) != expected[identity]:
+            raise ValueError("persisted rank calibration projection conflicts with evidence")
+        if (
+            item.calibration_id != calibrator.calibration_id
+            or item.calibration_run_id != calibration_run_id
+            or item.calibration_version != calibrator.calibration_version
+            or item.experiment_id != calibrator.experiment_id
+        ):
+            raise ValueError("persisted rank calibration attribution conflicts with model")
+    digest_payload = [{
+        "projection_id": item.projection_id,
+        "calibration_run_id": item.calibration_run_id,
+        "model_sha256": item.model_sha256,
+        "rank_id": item.rank_id,
+        "candidate_id": item.candidate_id,
+        "evidence_score": item.evidence_score,
+        "segment_index": item.segment_index,
+        "calibrated_quality": item.calibrated_quality,
+    } for item in projections]
+    return RankCalibrationProjectionBatch(
+        rank_run_id=rank_run_id,
+        model_sha256=calibrator.model_sha256,
+        calibration_run_id=calibration_run_id,
+        projected_rows=len(projections),
+        created_rows=created_rows,
+        projection_digest_sha256=_digest(digest_payload),
+        projections=projections,
     )
 
 

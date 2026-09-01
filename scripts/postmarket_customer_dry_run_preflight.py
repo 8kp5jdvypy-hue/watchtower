@@ -77,11 +77,16 @@ CAMPAIGN_POLICY_FIELDS = {
     "require_zero_decision_attribution_failures", "require_zero_orphan_routes",
     "require_zero_duplicate_eligible_identities",
     "require_zero_actionability_failures",
+    "require_zero_calibration_link_failures",
+    "require_zero_calibration_attribution_failures",
+    "require_exact_calibration_model",
     "require_zero_critical_review_findings", "require_independent_owner_review",
 }
 DELIVERY_POLICY_FIELDS = {
     "delivery_policy_version", "router_revision", "evidence_set_sha256",
     "evidence_gate_sha256", "rank_version", "minimum_evidence_score",
+    "calibration_version", "calibration_model_sha256",
+    "minimum_calibrated_quality", "allowed_calibration_revisions",
     "maximum_ordinal_rank", "minimum_evidence_coverage_pct",
     "maximum_data_age_seconds", "allowed_states",
     "allowed_evidence_revisions", "allowed_providers", "allowed_feeds",
@@ -98,11 +103,15 @@ REQUIRED_UPSTREAM_TABLES = {
     "postmarket_candidate_ranks",
     "postmarket_candidate_lifecycle",
     "postmarket_candidate_lifecycle_observations",
+    "postmarket_rank_calibration_runs",
+    "postmarket_rank_calibrators",
+    "postmarket_rank_calibration_projections",
 }
 DRY_RUN_TABLES = {
     "postmarket_delivery_dry_runs",
     "postmarket_delivery_dry_run_ticks",
     "postmarket_delivery_dry_run_tick_decisions",
+    "postmarket_delivery_dry_run_calibrations",
 }
 
 
@@ -207,7 +216,7 @@ def _number(
 
 
 def _parse_delivery_policy(payload: dict[str, object]) -> dict[str, object]:
-    if set(payload) != DELIVERY_POLICY_FIELDS or payload["delivery_policy_version"] != 1:
+    if set(payload) != DELIVERY_POLICY_FIELDS or payload["delivery_policy_version"] != 2:
         raise ValueError("delivery policy contract is not exact")
     states = _string_list(payload["allowed_states"], "allowed_states")
     if not set(states) <= ALLOWED_STATES:
@@ -217,8 +226,14 @@ def _parse_delivery_policy(payload: dict[str, object]) -> dict[str, object]:
     )
     for revision in revisions:
         _revision(revision, "allowed_evidence_revisions")
+    calibration_revisions = _string_list(
+        payload["allowed_calibration_revisions"],
+        "allowed_calibration_revisions",
+    )
+    for revision in calibration_revisions:
+        _revision(revision, "allowed_calibration_revisions")
     canonical = {
-        "delivery_policy_version": 1,
+        "delivery_policy_version": 2,
         "router_revision": _revision(payload["router_revision"], "router_revision"),
         "evidence_set_sha256": _digest(
             payload["evidence_set_sha256"], "evidence_set_sha256"
@@ -230,6 +245,19 @@ def _parse_delivery_policy(payload: dict[str, object]) -> dict[str, object]:
         "minimum_evidence_score": _number(
             payload["minimum_evidence_score"], "minimum_evidence_score",
             minimum=0, maximum=100,
+        ),
+        "calibration_version": _integer(
+            payload["calibration_version"], "calibration_version"
+        ),
+        "calibration_model_sha256": _digest(
+            payload["calibration_model_sha256"],
+            "calibration_model_sha256",
+        ),
+        "minimum_calibrated_quality": _number(
+            payload["minimum_calibrated_quality"],
+            "minimum_calibrated_quality",
+            minimum=0,
+            maximum=1,
         ),
         "maximum_ordinal_rank": _integer(
             payload["maximum_ordinal_rank"], "maximum_ordinal_rank"
@@ -244,6 +272,7 @@ def _parse_delivery_policy(payload: dict[str, object]) -> dict[str, object]:
         ),
         "allowed_states": states,
         "allowed_evidence_revisions": revisions,
+        "allowed_calibration_revisions": calibration_revisions,
         "allowed_providers": _string_list(
             payload["allowed_providers"], "allowed_providers"
         ),
@@ -355,8 +384,8 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         policy["max_tick_latency_seconds"], "tick latency",
         minimum=0.000000001, maximum=10,
     )
-    if policy["allowed_audit_versions"] != [1]:
-        raise ValueError("campaign must pin audit version 1")
+    if policy["allowed_audit_versions"] != [2]:
+        raise ValueError("campaign must pin audit version 2")
     audit_revisions = _string_list(
         policy["allowed_audit_code_versions"], "allowed_audit_code_versions"
     )
@@ -393,6 +422,22 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         payload["upstream_discovery_gate_evaluated_at_utc"],
         "upstream_discovery_gate_evaluated_at_utc",
     )
+    calibration_artifact = _digest(
+        payload["upstream_calibration_artifact_sha256"],
+        "upstream_calibration_artifact_sha256",
+    )
+    calibration_model = _digest(
+        payload["calibration_model_sha256"], "calibration_model_sha256"
+    )
+    calibration_version = _integer(
+        payload["calibration_version"], "calibration_version"
+    )
+    calibration_evaluated = _aware(
+        payload["calibration_evaluated_at_utc"],
+        "calibration_evaluated_at_utc",
+    )
+    if calibration_evaluated > upstream_evaluated:
+        raise ValueError("calibration evidence postdates the upstream gate")
     expires = _aware(
         payload["owner_authorization_expires_at_utc"],
         "owner_authorization_expires_at_utc",
@@ -406,6 +451,10 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         "control_evidence_sha256s": controls,
         "authorization_expires_at": expires,
         "upstream_discovery_gate_evaluated_at": upstream_evaluated,
+        "upstream_calibration_artifact_sha256": calibration_artifact,
+        "calibration_model_sha256": calibration_model,
+        "calibration_version": calibration_version,
+        "calibration_evaluated_at": calibration_evaluated,
         "campaign_sha256": digest,
     }
 
@@ -577,6 +626,20 @@ def evaluate_customer_dry_run_preflight(
             and upstream.evaluated_at_utc
             == campaign["upstream_discovery_gate_evaluated_at"]
             and upstream.evaluated_at_utc <= authorization["approved_at"]
+            and upstream.calibration_artifact_sha256
+            == campaign["upstream_calibration_artifact_sha256"]
+            and upstream.calibration_model_sha256
+            == campaign["calibration_model_sha256"]
+            == policy["calibration_model_sha256"]
+            and upstream.calibration_version
+            == campaign["calibration_version"]
+            == policy["calibration_version"]
+            and upstream.calibration_evaluated_at_utc
+            == campaign["calibration_evaluated_at"]
+            and upstream.calibration_evaluated_at_utc
+            <= upstream.evaluated_at_utc
+            and upstream.gate_code_version
+            in policy["allowed_calibration_revisions"]
         )
         first_session = date.fromisoformat(campaign["expected_session_tuple"][0])
         first_open = datetime.combine(

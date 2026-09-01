@@ -170,12 +170,15 @@ services:
         controls.append(path)
         control_digests.append(_control(path, kind, revision))
     policy_payload = {
-        "delivery_policy_version": 1, "router_revision": revision,
+        "delivery_policy_version": 2, "router_revision": revision,
         "evidence_set_sha256": "1" * 64, "evidence_gate_sha256": "2" * 64,
         "rank_version": 1, "minimum_evidence_score": 70,
+        "calibration_version": 1, "calibration_model_sha256": "c" * 64,
+        "minimum_calibrated_quality": 0.70,
         "maximum_ordinal_rank": 10, "minimum_evidence_coverage_pct": 95,
         "maximum_data_age_seconds": 330, "allowed_states": ["CONFIRMED"],
         "allowed_evidence_revisions": [revision], "allowed_providers": ["alpaca"],
+        "allowed_calibration_revisions": [revision],
         "allowed_feeds": ["sip"],
     }
     policy = parse_delivery_policy(policy_payload)
@@ -188,6 +191,12 @@ services:
         gate_artifact_sha256=policy.evidence_gate_sha256,
         gate_code_version=revision,
         evaluated_at_utc=datetime(2026, 8, 27, 12, tzinfo=timezone.utc),
+        calibration_artifact_sha256="7" * 64,
+        calibration_model_sha256="c" * 64,
+        calibration_version=1,
+        calibration_evaluated_at_utc=datetime(
+            2026, 8, 26, 12, tzinfo=timezone.utc
+        ),
         report=SimpleNamespace(rank_version=1),
     )
     monkeypatch.setattr(
@@ -216,7 +225,7 @@ services:
         "min_independently_reviewed_cases": 20, "min_distinct_reviewed_symbols": 10,
         "min_owner_review_approval_rate": 0.9, "min_session_coverage_pct": 100,
         "max_scheduled_lag_seconds": 30, "max_tick_latency_seconds": 10,
-        "allowed_audit_versions": [1], "allowed_audit_code_versions": [revision],
+        "allowed_audit_versions": [2], "allowed_audit_code_versions": [revision],
         "allowed_runtime_router_revisions": [revision],
         **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
     }
@@ -235,6 +244,8 @@ services:
     for table in (
         "postmarket_rank_runs", "postmarket_candidate_ranks",
         "postmarket_candidate_lifecycle", "postmarket_candidate_lifecycle_observations",
+        "postmarket_rank_calibration_runs", "postmarket_rank_calibrators",
+        "postmarket_rank_calibration_projections",
     ):
         conn.execute(f"CREATE TABLE {table} (id INTEGER)")
     conn.commit()
@@ -308,6 +319,12 @@ def test_preflight_fails_when_upstream_gate_binding_changes(tmp_path, monkeypatc
             gate_artifact_sha256="2" * 64,
             gate_code_version=args["expected_revision"][:7],
             evaluated_at_utc=datetime(2026, 8, 27, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="c" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 26, 12, tzinfo=timezone.utc
+            ),
             report=SimpleNamespace(rank_version=1),
         ),
     )

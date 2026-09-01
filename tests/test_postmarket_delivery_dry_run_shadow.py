@@ -35,11 +35,15 @@ def _policy():
         evidence_gate_sha256="b" * 64,
         rank_version=1,
         minimum_evidence_score=60,
+        calibration_version=1,
+        calibration_model_sha256="c" * 64,
+        minimum_calibrated_quality=0.70,
         maximum_ordinal_rank=10,
         minimum_evidence_coverage_pct=90,
         maximum_data_age_seconds=330,
         allowed_states=(STATE_CONFIRMED,),
         allowed_evidence_revisions=("abc1234",),
+        allowed_calibration_revisions=("abc1234",),
         allowed_providers=("alpaca",),
         allowed_feeds=("sip",),
     )
@@ -157,7 +161,8 @@ def _evidence_conn():
       status TEXT, code_version TEXT
     );
     CREATE TABLE postmarket_candidate_ranks (
-      rank_run_id INTEGER, candidate_id INTEGER, session TEXT, symbol TEXT,
+      rank_id INTEGER PRIMARY KEY, rank_run_id INTEGER, candidate_id INTEGER,
+      session TEXT, symbol TEXT,
       direction TEXT, transition_id INTEGER, observation_seq INTEGER,
       rankable INTEGER, ordinal_rank INTEGER, evidence_score REAL,
       evidence_coverage_pct REAL, exclusion_reasons_json TEXT
@@ -169,6 +174,12 @@ def _evidence_conn():
     CREATE TABLE postmarket_candidate_lifecycle_observations (
       seq INTEGER PRIMARY KEY, evidence_bar_open_ts_utc TEXT, data_feed TEXT,
       market_data_provider TEXT
+    );
+    CREATE TABLE postmarket_rank_calibration_projections (
+      projection_id INTEGER PRIMARY KEY, calibration_run_id INTEGER,
+      calibration_version INTEGER, model_sha256 TEXT, rank_id INTEGER,
+      rank_run_id INTEGER, calibrated_quality REAL, projected_at_utc TEXT,
+      code_version TEXT
     );
     """)
     conn.execute(
@@ -186,9 +197,16 @@ def _evidence_conn():
     conn.execute(
         """
         INSERT INTO postmarket_candidate_ranks VALUES
-          (17,12,?,'OKTA','up',44,8,1,3,77,100,'[]')
+          (18,17,12,?,'OKTA','up',44,8,1,3,77,100,'[]')
         """,
         (SESSION.isoformat(),),
+    )
+    conn.execute(
+        """
+        INSERT INTO postmarket_rank_calibration_projections VALUES
+          (55,9,1,?,18,17,0.8,?,?)
+        """,
+        ("c" * 64, (NOW - timedelta(minutes=1)).isoformat(), "abc1234"),
     )
     conn.commit()
     return conn
@@ -198,7 +216,10 @@ def test_latest_exact_rank_snapshot_is_hydrated_and_routed():
     conn = _evidence_conn()
     try:
         rank_run_id, candidates = load_latest_delivery_candidates(
-            conn, session=SESSION, rank_version=1
+            conn,
+            session=SESSION,
+            rank_version=1,
+            calibration_model_sha256="c" * 64,
         )
         assert rank_run_id == 17
         assert len(candidates) == 1
@@ -263,7 +284,10 @@ def test_incomplete_rank_evidence_join_fails_instead_of_silently_dropping():
         conn.commit()
         with pytest.raises(ValueError, match="evidence join is incomplete"):
             load_latest_delivery_candidates(
-                conn, session=SESSION, rank_version=1
+                conn,
+                session=SESSION,
+                rank_version=1,
+                calibration_model_sha256="c" * 64,
             )
     finally:
         conn.close()

@@ -26,7 +26,7 @@ from tradebot.postmarket_customer_dry_run_campaign import (
 )
 
 
-CASE_VERSION = 1
+CASE_VERSION = 2
 REVIEW_VERSION = 1
 REVIEW_ATTESTATION = (
     "I independently reviewed only the point-in-time evidence in this case, "
@@ -99,6 +99,13 @@ class ReviewCaseEvidence:
     rank_run_id: int
     ordinal_rank: int | None
     evidence_score: float
+    calibration_projection_id: int
+    calibration_run_id: int
+    calibration_version: int
+    calibration_model_sha256: str
+    calibrated_quality: float
+    calibration_projected_at_utc: str
+    calibration_code_version: str
     evidence_coverage_pct: float
     rank_components: dict[str, float]
     rank_penalties: dict[str, float]
@@ -190,19 +197,27 @@ def list_eligible_review_cases(
     )
     parameters: tuple[object, ...] = (
         (campaign_sha256,) if has_reviews else ()
-    ) + (*sessions, policy_sha, authorization_sha, revision)
+    ) + (
+        *sessions,
+        policy_sha,
+        authorization_sha,
+        revision,
+        campaign["calibration_model_sha256"],
+    )
     rows = conn.execute(
         f"""
         SELECT d.route_id,d.session,d.symbol,d.direction,d.evaluated_at_utc,
                d.rank_run_id,d.candidate_id,d.transition_id,
                {review_select} AS review_count
         FROM postmarket_delivery_dry_runs d
+        JOIN postmarket_delivery_dry_run_calibrations q ON q.route_id=d.route_id
         {review_join}
         WHERE d.session IN ({placeholders})
           AND d.decision='ELIGIBLE_FOR_DRY_RUN'
           AND d.presentation='ACTIONABLE'
           AND d.policy_sha256=? AND d.authorization_sha256=?
           AND d.runtime_router_revision=?
+          AND q.model_sha256=?
         GROUP BY d.route_id
         ORDER BY d.session,d.evaluated_at_utc,d.route_id
         """,
@@ -325,13 +340,30 @@ def build_review_case(
                    r.components_json,r.penalties_json,r.exclusion_reasons_json,
                    r.explanation_json,l.state,l.actionability,l.transition_at_utc,
                    o.evidence_bar_open_ts_utc,o.move_pct,o.cumulative_notional,
-                   o.data_age_seconds,o.data_feed,o.market_data_provider
+                   o.data_age_seconds,o.data_feed,o.market_data_provider,
+                   q.projection_id,q.calibration_run_id,q.calibration_version,
+                   q.model_sha256 AS calibration_model_sha256,
+                   q.calibrated_quality,q.projected_at_utc,
+                   q.code_version AS calibration_code_version
             FROM postmarket_delivery_dry_runs d
+            JOIN postmarket_delivery_dry_run_calibrations q
+              ON q.route_id=d.route_id
             JOIN postmarket_candidate_ranks r
               ON r.rank_run_id=d.rank_run_id AND r.candidate_id=d.candidate_id
             JOIN postmarket_candidate_lifecycle l ON l.transition_id=d.transition_id
             JOIN postmarket_candidate_lifecycle_observations o
               ON o.seq=r.observation_seq AND o.candidate_id=d.candidate_id
+            JOIN postmarket_rank_calibration_projections p
+              ON p.projection_id=q.projection_id
+             AND p.rank_id=r.rank_id
+             AND p.rank_run_id=d.rank_run_id
+             AND p.candidate_id=d.candidate_id
+             AND p.calibration_run_id=q.calibration_run_id
+             AND p.calibration_version=q.calibration_version
+             AND p.model_sha256=q.model_sha256
+             AND p.calibrated_quality=q.calibrated_quality
+             AND p.projected_at_utc=q.projected_at_utc
+             AND p.code_version=q.code_version
             WHERE d.route_id=?
             """,
             (route_id,),
@@ -343,9 +375,12 @@ def build_review_case(
     if row["decision"] != "ELIGIBLE_FOR_DRY_RUN" or row["presentation"] != "ACTIONABLE":
         raise ValueError("only actionable eligible dry-run routes may be reviewed")
     evidence_score = float(row["evidence_score"])
+    calibrated_quality = float(row["calibrated_quality"])
     evidence_coverage = float(row["evidence_coverage_pct"])
     if not math.isfinite(evidence_score):
         raise ValueError("evidence_score must be finite")
+    if not math.isfinite(calibrated_quality) or not 0 <= calibrated_quality <= 1:
+        raise ValueError("calibrated_quality must be between 0 and 1")
     if not math.isfinite(evidence_coverage) or not 0 <= evidence_coverage <= 100:
         raise ValueError("evidence_coverage_pct must be between 0 and 100")
     data_age = None if row["data_age_seconds"] is None else float(row["data_age_seconds"])
@@ -368,6 +403,19 @@ def build_review_case(
         rank_run_id=int(row["rank_run_id"]),
         ordinal_rank=None if row["ordinal_rank"] is None else int(row["ordinal_rank"]),
         evidence_score=evidence_score,
+        calibration_projection_id=int(row["projection_id"]),
+        calibration_run_id=int(row["calibration_run_id"]),
+        calibration_version=int(row["calibration_version"]),
+        calibration_model_sha256=_sha256(
+            row["calibration_model_sha256"], "calibration_model_sha256"
+        ),
+        calibrated_quality=calibrated_quality,
+        calibration_projected_at_utc=_aware(
+            row["projected_at_utc"], "calibration_projected_at_utc"
+        ).isoformat(),
+        calibration_code_version=_revision(
+            row["calibration_code_version"], "calibration_code_version"
+        ),
         evidence_coverage_pct=evidence_coverage,
         rank_components=_numeric_object(row["components_json"], "rank components"),
         rank_penalties=_numeric_object(row["penalties_json"], "rank penalties"),

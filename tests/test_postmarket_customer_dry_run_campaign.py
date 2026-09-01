@@ -34,6 +34,12 @@ def _verified_upstream(monkeypatch):
             gate_artifact_sha256="2" * 64,
             gate_code_version=REVISION,
             evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="c" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
             report=SimpleNamespace(rank_version=1),
         ),
     )
@@ -41,17 +47,21 @@ def _verified_upstream(monkeypatch):
 
 def _delivery_policy():
     return {
-        "delivery_policy_version": 1,
+        "delivery_policy_version": 2,
         "router_revision": REVISION,
         "evidence_set_sha256": "1" * 64,
         "evidence_gate_sha256": "2" * 64,
         "rank_version": 1,
         "minimum_evidence_score": 70,
+        "calibration_version": 1,
+        "calibration_model_sha256": "c" * 64,
+        "minimum_calibrated_quality": 0.70,
         "maximum_ordinal_rank": 10,
         "minimum_evidence_coverage_pct": 95,
         "maximum_data_age_seconds": 330,
         "allowed_states": ["CONFIRMED"],
         "allowed_evidence_revisions": [REVISION],
+        "allowed_calibration_revisions": [REVISION],
         "allowed_providers": ["alpaca"],
         "allowed_feeds": ["sip"],
     }
@@ -86,7 +96,7 @@ def _campaign_policy(**changes):
         "min_session_coverage_pct": 100,
         "max_scheduled_lag_seconds": 30,
         "max_tick_latency_seconds": 10,
-        "allowed_audit_versions": [1],
+        "allowed_audit_versions": [2],
         "allowed_audit_code_versions": [REVISION],
         "allowed_runtime_router_revisions": [REVISION],
         **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
@@ -136,7 +146,7 @@ def test_campaign_is_prospectively_locked_read_only_and_digest_bound(tmp_path):
 def test_campaign_contract_matches_truth_schema_shape(tmp_path):
     _, payload = _lock(tmp_path / "campaign.json")
     schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_campaign_v2.schema.json"
+        "truth/postmarket_customer_dry_run_campaign_v3.schema.json"
     ).read_text())
     assert set(payload) == set(schema["required"])
     assert set(payload["policy"]) == set(
@@ -181,6 +191,12 @@ def test_campaign_rejects_unverified_or_late_upstream_evidence(tmp_path, monkeyp
             gate_artifact_sha256="2" * 64,
             gate_code_version=REVISION,
             evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="c" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
             report=SimpleNamespace(rank_version=1),
         ),
     )
@@ -195,11 +211,41 @@ def test_campaign_rejects_unverified_or_late_upstream_evidence(tmp_path, monkeyp
             gate_artifact_sha256="2" * 64,
             gate_code_version=REVISION,
             evaluated_at_utc=datetime(2026, 8, 28, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="c" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
             report=SimpleNamespace(rank_version=1),
         ),
     )
     with pytest.raises(ValueError, match="predates the verified upstream"):
         _lock(tmp_path / "late-upstream.json")
+
+
+def test_campaign_rejects_delivery_policy_bound_to_a_different_calibrator(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        campaign_module,
+        "verify_discovery_gate_artifact",
+        lambda *args: SimpleNamespace(
+            evidence_set_sha256="1" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            calibration_artifact_sha256="7" * 64,
+            calibration_model_sha256="d" * 64,
+            calibration_version=1,
+            calibration_evaluated_at_utc=datetime(
+                2026, 8, 25, 12, tzinfo=timezone.utc
+            ),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    with pytest.raises(ValueError, match="calibration model"):
+        _lock(tmp_path / "wrong-calibrator.json")
 
 
 def test_campaign_quality_floors_and_fail_closed_flags_cannot_be_weakened(tmp_path):

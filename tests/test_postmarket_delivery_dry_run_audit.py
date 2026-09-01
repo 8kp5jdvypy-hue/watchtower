@@ -26,10 +26,32 @@ def _short_window(monkeypatch):
     return slots
 
 
+def _ensure_calibration_tables(conn):
+    conn.executescript("""
+    CREATE TABLE postmarket_rank_calibration_projections (
+      projection_id INTEGER PRIMARY KEY, calibration_id INTEGER,
+      calibration_run_id INTEGER, calibration_version INTEGER,
+      experiment_id TEXT, model_sha256 TEXT, rank_id INTEGER,
+      rank_run_id INTEGER, candidate_id INTEGER, evidence_score REAL,
+      segment_index INTEGER, calibrated_quality REAL,
+      projected_at_utc TEXT, code_version TEXT
+    );
+    CREATE TABLE postmarket_rank_calibration_runs (
+      calibration_run_id INTEGER PRIMARY KEY, calibration_id INTEGER,
+      split TEXT, report_json TEXT, report_sha256 TEXT
+    );
+    CREATE TABLE postmarket_rank_calibrators (
+      calibration_id INTEGER PRIMARY KEY, calibration_version INTEGER,
+      model_sha256 TEXT, model_json TEXT
+    );
+    """)
+
+
 def _connection() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     ensure_dry_run_schema(conn)
+    _ensure_calibration_tables(conn)
     return conn
 
 
@@ -91,6 +113,39 @@ def _route(conn, *, decision="SUPPRESSED", presentation="DEGRADED", reasons=("X"
     return cursor.lastrowid
 
 
+def _calibration(conn, route_id):
+    report = json.dumps({
+        "blocking_reasons": [],
+        "calibrated_quality_claim_valid": True,
+        "model_sha256": "c" * 64,
+        "split": "holdout",
+    }, sort_keys=True, separators=(",", ":"))
+    conn.execute(
+        "INSERT INTO postmarket_rank_calibrators VALUES (1,1,?,?)",
+        ("c" * 64, "{}"),
+    )
+    conn.execute(
+        "INSERT INTO postmarket_rank_calibration_runs VALUES (9,1,'holdout',?,?)",
+        (report, hashlib.sha256(report.encode()).hexdigest()),
+    )
+    conn.execute(
+        """
+        INSERT INTO postmarket_rank_calibration_projections VALUES
+          (55,1,9,1,'experiment',?,18,7,1,77,0,0.8,?,?)
+        """,
+        ("c" * 64, START.isoformat(), REVISION),
+    )
+    conn.execute(
+        """
+        INSERT INTO postmarket_delivery_dry_run_calibrations
+          (route_id,projection_id,calibration_run_id,calibration_version,
+           model_sha256,calibrated_quality,projected_at_utc,code_version)
+        VALUES (?,55,9,1,?,0.8,?,?)
+        """,
+        (route_id, "c" * 64, START.isoformat(), REVISION),
+    )
+
+
 def test_clean_audit_requires_exact_persisted_schedule(monkeypatch):
     slots = _short_window(monkeypatch)
     conn = _connection()
@@ -133,6 +188,7 @@ def test_audit_reconciles_exact_route_links_and_actionability(monkeypatch):
     route_id = _route(
         conn, decision="ELIGIBLE_FOR_DRY_RUN", presentation="ACTIONABLE", reasons=()
     )
+    _calibration(conn, route_id)
     tick_id = _tick(
         conn, slots[0], inputs=1, eligible=1, written=1, rank_run_id=7,
         route_ids=(route_id,),
@@ -173,7 +229,7 @@ def test_schema_contract_and_exclusive_read_only_writer(tmp_path, monkeypatch):
         conn, SESSION, database="memory", audit_code_version=REVISION,
     )
     schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_audit_v1.schema.json"
+        "truth/postmarket_customer_dry_run_audit_v2.schema.json"
     ).read_text())
     assert set(asdict(report)) == set(schema["required"])
     assert set(asdict(report.metrics)) == set(schema["properties"]["metrics"]["required"])
@@ -188,6 +244,7 @@ def test_completed_writer_waits_for_full_window_and_is_idempotent(tmp_path, monk
     database = tmp_path / "shadow.db"
     conn = sqlite3.connect(database)
     ensure_dry_run_schema(conn)
+    _ensure_calibration_tables(conn)
     conn.close()
     ready = START + timedelta(minutes=10)
     monkeypatch.setattr(audit, "_audit_ready_at", lambda session: ready)

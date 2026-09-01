@@ -1,9 +1,10 @@
-# Postmarket customer-delivery readiness foundation
+# Postmarket customer-readiness dry run
 
-This foundation defines when a future customer-alert router may enter a dry
-run. It does not enqueue, render, send, trade, write production state, add a
-Compose service, or enable a switch. Passing means only
-`ELIGIBLE_FOR_DRY_RUN`.
+This subsystem defines and records when a candidate may enter an isolated
+customer-readiness dry run. It does not enqueue, render, send, trade, or enable
+a customer-delivery switch. The default-off Compose service writes evidence
+only. Passing a candidate means only `ELIGIBLE_FOR_DRY_RUN`; passing the final
+campaign gate means only eligibility for a separate owner review.
 
 ## Intended use and failure costs
 
@@ -33,13 +34,17 @@ requires all of the following:
 - a complete rank run, no hard exclusions, the exact locked rank version,
   score/ordinal/coverage floors, an allowed evidence revision, and a fresh
   completed bar;
+- an append-only projection from the exact rank row through the exact frozen
+  isotonic calibrator that passed its preregistered holdout, including the
+  projection, calibration-run, model, version, timestamp, and revision
+  provenance; calibrated observed quality must meet the locked floor;
 - an allowed provider and feed; and
 - no future-dated transition or evidence.
 
 The deterministic idempotency key binds release, policy, candidate,
-transition, and rank run. It is necessary but not sufficient for delivery: a
-future router still needs an append-only routing ledger to enforce the key
-transactionally.
+transition, rank run, calibration projection, and calibration model. It is
+necessary but not sufficient for delivery. The append-only routing ledger
+enforces it transactionally, but the ledger has no delivery capability.
 
 `tradebot.postmarket_delivery_dry_run.py` supplies that offline ledger. It
 stores every distinct suppression state, permits a formerly suppressed item to
@@ -74,7 +79,11 @@ total latency, exact rank run, input/eligible/suppressed/deduplicated counts,
 operational status and reasons, provenance digests, runtime revision, and a
 conservation invariant. `postmarket_delivery_dry_run_tick_decisions` binds the
 tick atomically to its exact route rows. Each link must resolve to the same
-session, rank run, policy, authorization, and runtime revision. Exact reruns
+session, rank run, policy, authorization, and runtime revision. Each eligible
+route also receives one append-only row in
+`postmarket_delivery_dry_run_calibrations`, binding it to the exact projection,
+calibration run/version/model, calibrated quality, projection timestamp, and
+code revision. Exact reruns
 are idempotent; conflicting evidence for an existing scheduled slot fails
 rather than replacing the first record.
 
@@ -84,10 +93,12 @@ close-anchored schedule from the append-only database. It does not trust the
 service heartbeat. The immutable daily report reconciles every expected slot,
 tick/decision conservation, exact route links, orphan routes, eligible
 identity uniqueness, policy/authorization/runtime drift, rank availability,
-degraded cycles, invariants, scheduled lag, and processing latency. Any gap or
+calibration-link conservation, exact projection/model attribution, passing
+canonical holdout evidence, degraded cycles, invariants, scheduled lag, and
+processing latency. Any gap or
 inconsistency makes both `operational_clean` and
 `session_evidence_eligible` false. Reports conform to
-`truth/postmarket_customer_dry_run_audit_v1.schema.json` and are written
+`truth/postmarket_customer_dry_run_audit_v2.schema.json` and are written
 exclusively under `data/postmarket_audits` without replacement.
 
 Before any session may count, an owner-approved dry-run campaign must be
@@ -96,9 +107,11 @@ contract names every expected XNYS session and binds the exact delivery
 policy, owner authorization, release, rank/router/audit versions, four control
 artifacts, operational limits, case-count floors, independent-review
 requirements, and the exact upstream discovery evidence set plus its
-reproducible passing gate artifact. Campaign locking reopens both upstream
+reproducible passing gate artifact and exact frozen calibration artifact/model.
+Campaign v3 locking reopens both upstream
 files, re-runs the discovery gate, verifies the rank version and allowed gate
-revision, and rejects owner authorization that predates the gate decision.
+revision, reproduces the calibration identity, and rejects owner authorization
+that predates the gate decision.
 Digest strings alone cannot satisfy this boundary. It must be created before
 the first covered session opens, and
 the authorization must remain valid through the final session audit. The
@@ -111,7 +124,9 @@ authorization or enable the default-off supervisor.
 Eligible cases are exported with
 `tradebot.postmarket_customer_dry_run_review`. The immutable case contains the
 exact router, rank, lifecycle, provenance, and explanation evidence available
-at decision time and explicitly excludes later bars, outcome marks, and later
+at decision time. Review case v2 also includes the exact calibration
+projection/run/model, calibrated observed quality, projection timestamp, and
+calibration revision. It explicitly excludes later bars, outcome marks, and later
 headlines. A named owner, delegate, or independent market reviewer must attest
 both implementation independence and future-outcome blinding, then grade the
 exact relevance, timeliness, evidence, explanation, and risk rubric. Any failed
@@ -148,7 +163,8 @@ mutation is the append-only review row.
 `tradebot.postmarket_customer_dry_run_gate` is the final aggregate dry-run
 check. It reopens the append-only database read-only, recomputes every covered
 daily audit, independently re-verifies the exact upstream discovery evidence
-set and passing gate artifact, verifies the exact campaign and four control
+set, passing gate artifact, and calibration artifact/model; verifies the exact
+campaign and four control
 digests, reconciles unique actionable routes, reproduces every review payload and blinded case,
 and applies the preregistered session, latency, case-count, approval, and
 zero-failure rules. Its strongest possible verdict is
@@ -258,7 +274,7 @@ profitability, or advice.
 
 ## Manual authorization is not automatic approval
 
-The JSON contracts in `truth/postmarket_customer_delivery_policy_v1.schema.json`
+The JSON contracts in `truth/postmarket_customer_delivery_policy_v2.schema.json`
 and `truth/postmarket_customer_delivery_authorization_v1.schema.json` document
 the exact owner record a future release process must validate. Passing the
 aggregate evidence gate cannot create this record and cannot flip a runtime
@@ -273,7 +289,8 @@ Customer delivery remains intentionally unimplemented. The supervised router
 is evidence-only: it has no users/outbox/provider/alert/order/network path and
 can produce only `ELIGIBLE_FOR_DRY_RUN` or `SUPPRESSED` ledger rows. Its
 default-off switch, failure injection, rollback, isolation controls, cycle
-timing, and daily audits must first accumulate the prospectively required
-clean sessions. A later customer-delivery implementation still requires a
+timing, calibration attribution, and audit-v2 reports must first accumulate the
+prospectively required clean sessions and independently reviewed cases. A later
+customer-delivery implementation still requires a
 separate design, review, policy, owner activation, and release gate; no dry-run
 result can enable it.
