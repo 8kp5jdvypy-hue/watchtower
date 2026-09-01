@@ -300,6 +300,43 @@ def _wilson(positives: int, labels: int) -> tuple[float, float]:
 
 
 def _calibration() -> dict:
+    policy = {
+        "min_training_labels": 100,
+        "min_training_positive_labels": 30,
+        "min_training_negative_labels": 70,
+        "min_holdout_labels": 100,
+        "min_holdout_positive_labels": 30,
+        "min_holdout_negative_labels": 70,
+        "minimum_bin_labels": 20,
+        "max_brier_score": 0.20,
+        "max_expected_calibration_error": 0.10,
+    }
+    model = {
+        "calibration_version": 1,
+        "experiment_id": EXPERIMENT_ID,
+        "method": "isotonic_pav",
+        "scope": "first_rankable_score_same_direction_quality",
+        "development_input_sha256": "5" * 64,
+        "policy": policy,
+        "segments": [
+            {
+                "minimum_score": 20.0,
+                "maximum_score": 20.0,
+                "calibrated_quality": 0.0,
+                "development_labels": 70,
+                "development_positives": 0,
+            },
+            {
+                "minimum_score": 80.0,
+                "maximum_score": 80.0,
+                "calibrated_quality": 1.0,
+                "development_labels": 30,
+                "development_positives": 30,
+            },
+        ],
+    }
+    canonical_model = json.dumps(model, sort_keys=True, separators=(",", ":"))
+    model_sha256 = hashlib.sha256(canonical_model.encode()).hexdigest()
     bins = []
     for score, labels, positives, predicted in (
         (20.0, 70, 0, 0.0),
@@ -325,19 +362,9 @@ def _calibration() -> dict:
         "split": "holdout",
         "sessions": [session.isoformat() for session in SESSIONS],
         "code_version": CALIBRATION_CODE,
-        "model_sha256": "4" * 64,
+        "model_sha256": model_sha256,
         "development_input_sha256": "5" * 64,
-        "policy": {
-            "min_training_labels": 100,
-            "min_training_positive_labels": 30,
-            "min_training_negative_labels": 70,
-            "min_holdout_labels": 100,
-            "min_holdout_positive_labels": 30,
-            "min_holdout_negative_labels": 70,
-            "minimum_bin_labels": 20,
-            "max_brier_score": 0.20,
-            "max_expected_calibration_error": 0.10,
-        },
+        "policy": policy,
         "definitive_labels": 100,
         "positive_labels": 30,
         "negative_labels": 70,
@@ -362,7 +389,15 @@ def _calibration() -> dict:
         "code_version": CALIBRATION_CODE,
         "input_digest_sha256": "3" * 64,
         "report_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
-        "model_sha256": "4" * 64,
+        "model_sha256": model_sha256,
+        "model": model,
+        "fitted_at_utc": datetime(2026, 8, 14, 18, tzinfo=timezone.utc).isoformat(),
+        "fitting_code_version": CALIBRATION_CODE,
+        "development_definitive_labels": 100,
+        "development_positive_labels": 30,
+        "development_negative_labels": 70,
+        "training_brier_score": 0.0,
+        "training_expected_calibration_error": 0.0,
         "report": report,
     }
 
@@ -771,11 +806,17 @@ def test_calibration_is_mandatory_and_bad_holdout_is_not_ready(tmp_path):
     manifest_path, _ = _package(tmp_path / "bad-calibration")
 
     def degrade(payload):
-        for item in payload["report"]["reliability_bins"]:
-            item["predicted_quality"] = 0.5
-            item["absolute_error"] = abs(0.5 - item["observed_quality"])
-        payload["report"]["brier_score"] = 0.25
-        payload["report"]["expected_calibration_error"] = 0.5
+        low, high = payload["report"]["reliability_bins"]
+        low["positives"] = 30
+        low["observed_quality"] = 30 / 70
+        low["absolute_error"] = 30 / 70
+        low["wilson_lower_95"], low["wilson_upper_95"] = _wilson(30, 70)
+        high["positives"] = 0
+        high["observed_quality"] = 0.0
+        high["absolute_error"] = 1.0
+        high["wilson_lower_95"], high["wilson_upper_95"] = _wilson(0, 30)
+        payload["report"]["brier_score"] = 0.6
+        payload["report"]["expected_calibration_error"] = 0.6
         payload["report"]["calibrated_quality_claim_valid"] = False
         payload["report"]["blocking_reasons"] = [
             "BRIER_SCORE_FLOOR_NOT_MET",
@@ -793,6 +834,38 @@ def test_calibration_is_mandatory_and_bad_holdout_is_not_ready(tmp_path):
     assert checks["CALIBRATED_QUALITY_HOLDOUT_PASSED"].passed is False
     assert checks["MAX_CALIBRATION_BRIER_SCORE"].passed is False
     assert checks["MAX_EXPECTED_CALIBRATION_ERROR"].passed is False
+
+
+def test_calibration_report_cannot_invent_posthoc_predictions(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+
+    def tamper(payload):
+        item = payload["report"]["reliability_bins"][0]
+        item["predicted_quality"] = 0.5
+        item["absolute_error"] = abs(0.5 - item["observed_quality"])
+        canonical = json.dumps(payload["report"], sort_keys=True, separators=(",", ":"))
+        payload["report_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+
+    _rewrite_artifact(manifest_path, "calibration_artifact", None, tamper)
+    with pytest.raises(ValueError, match="does not match the frozen model"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
+
+
+def test_calibration_model_must_be_frozen_before_holdout_opens(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+
+    def tamper(payload):
+        payload["fitted_at_utc"] = datetime(
+            2026, 8, 17, 14, tzinfo=timezone.utc
+        ).isoformat()
+
+    _rewrite_artifact(manifest_path, "calibration_artifact", None, tamper)
+    with pytest.raises(ValueError, match="not frozen before holdout opened"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
 
 
 def test_calibration_wilson_interval_is_independently_recomputed(tmp_path):

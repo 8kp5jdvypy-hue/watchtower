@@ -15,6 +15,14 @@
     "input_digest_sha256",
     "report_sha256",
     "model_sha256",
+    "model",
+    "fitted_at_utc",
+    "fitting_code_version",
+    "development_definitive_labels",
+    "development_positive_labels",
+    "development_negative_labels",
+    "training_brier_score",
+    "training_expected_calibration_error",
     "report"
   ],
   "properties": {
@@ -28,6 +36,14 @@
     "input_digest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "model_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model": {"type": "object"},
+    "fitted_at_utc": {"type": "string", "format": "date-time"},
+    "fitting_code_version": {"type": "string", "pattern": "^[0-9a-f]{7,40}$"},
+    "development_definitive_labels": {"type": "integer", "minimum": 1},
+    "development_positive_labels": {"type": "integer", "minimum": 1},
+    "development_negative_labels": {"type": "integer", "minimum": 1},
+    "training_brier_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "training_expected_calibration_error": {"type": "number", "minimum": 0, "maximum": 1},
     "report": {
       "type": "object",
       "required": [

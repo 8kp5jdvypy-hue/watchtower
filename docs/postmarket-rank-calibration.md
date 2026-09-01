@@ -19,6 +19,12 @@ fails closed unless the complete leakage-resistant sequence below succeeds.
 7. Evaluate the already-frozen mapping. No refit or threshold selection is
    permitted after unblinding.
 
+The database rejects holdout-label inserts after unblinding even when a caller
+bypasses the Python writer. Fit and evaluation timestamps cannot predate their
+latest label/rank evidence or the explicit unblind event. Reusing an identical
+input inventory under a different code revision is rejected instead of being
+silently reattributed.
+
 The estimate means only: observed probability that the independently labeled
 postmarket reaction was eligible in the same direction, conditional on the
 candidate having a first rankable score. It is not expected return,
@@ -36,6 +42,13 @@ Each reliability bin reports its frozen score interval, predicted quality,
 holdout labels and positives, observed quality, absolute error, and a 95%
 Wilson interval. This keeps the model interpretable and makes small-sample
 uncertainty visible.
+
+The immutable artifact embeds the prospectively frozen model—not just its
+digest. The aggregate readiness gate independently recomputes the model hash,
+development-label conservation, monotonic segments, training Brier/ECE,
+Wilson intervals, holdout Brier/ECE, and each reliability-bin prediction. A
+report therefore cannot substitute post-hoc probabilities chosen after seeing
+the holdout outcomes.
 
 ## Operator sequence
 

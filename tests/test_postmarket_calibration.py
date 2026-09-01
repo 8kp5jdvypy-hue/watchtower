@@ -188,6 +188,16 @@ def test_development_only_isotonic_model_is_frozen_before_holdout_open():
     assert first.created is True
     assert second.created is False
     assert first.model_sha256 == second.model_sha256
+    replay = fit_rank_calibrator(
+        conn,
+        experiment_id="calibration-v1",
+        fitted_at=FITTED_AT + timedelta(minutes=5),
+        code_version="def5678",
+        policy=POLICY,
+    )
+    assert replay.created is False
+    assert replay.fitted_at_utc == FITTED_AT.isoformat()
+    assert replay.code_version == "abc1234"
     assert [segment.calibrated_quality for segment in first.segments] == [0.0, 1.0]
     assert first.training_brier_score == 0
     assert first.training_expected_calibration_error == 0
@@ -272,6 +282,24 @@ def test_development_cannot_validate_quality_and_holdout_stays_sealed():
         )
 
 
+def test_calibration_evaluation_cannot_be_backdated_before_input_evidence():
+    conn = _conn()
+    _seed_split(conn, DEV, "D")
+    _fit(conn)
+
+    with pytest.raises(ValueError, match="latest input evidence"):
+        evaluate_rank_calibration(
+            conn,
+            experiment_id="calibration-v1",
+            split="development",
+            evaluated_at=datetime(2026, 8, 21, 0, 4, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_rank_calibration_runs"
+    ).fetchone()[0] == 0
+
+
 def test_unblinded_holdout_validates_calibration_and_exports_immutable_artifact(tmp_path):
     conn = _conn()
     _seed_split(conn, DEV, "D")
@@ -286,6 +314,14 @@ def test_unblinded_holdout_validates_calibration_and_exports_immutable_artifact(
         reason="independent labels complete",
         expected_inventory_sha256=inventory,
     )
+    with pytest.raises(ValueError, match="cannot predate holdout unblinding"):
+        evaluate_rank_calibration(
+            conn,
+            experiment_id="calibration-v1",
+            split="holdout",
+            evaluated_at=datetime(2026, 8, 22, 1, 59, tzinfo=timezone.utc),
+            code_version="abc1234",
+        )
     report = evaluate_rank_calibration(
         conn,
         experiment_id="calibration-v1",
@@ -318,8 +354,23 @@ def test_unblinded_holdout_validates_calibration_and_exports_immutable_artifact(
     assert first.created is True
     assert second.created is False
     assert payload["model_sha256"] == calibrator.model_sha256
+    assert payload["fitted_at_utc"] == FITTED_AT.isoformat()
+    assert payload["fitting_code_version"] == "abc1234"
+    assert payload["model"]["method"] == "isotonic_pav"
+    assert payload["development_definitive_labels"] == 6
     assert payload["report"]["calibrated_quality_claim_valid"] is True
     assert Path(first.path).stat().st_mode & 0o777 == 0o444
+    with pytest.raises(ValueError, match="different attribution"):
+        evaluate_rank_calibration(
+            conn,
+            experiment_id="calibration-v1",
+            split="holdout",
+            evaluated_at=datetime(2026, 8, 22, 4, tzinfo=timezone.utc),
+            code_version="def5678",
+        )
+    assert conn.execute(
+        "SELECT code_version FROM postmarket_rank_calibration_runs"
+    ).fetchone()[0] == "abc1234"
 
 
 def test_bad_holdout_calibration_fails_named_quality_gates():

@@ -20,7 +20,11 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from tradebot.postmarket_empirical import CALENDAR, ensure_empirical_schema
+from tradebot.postmarket_empirical import (
+    CALENDAR,
+    ensure_empirical_schema,
+    holdout_label_inventory,
+)
 
 
 CALIBRATION_VERSION = 1
@@ -293,7 +297,7 @@ def _first_rank_rows(
             f"""
             WITH ordered AS (
               SELECT c.session,c.symbol,c.direction,r.evidence_score,r.rank_id,
-                     x.rank_run_id,x.as_of_utc,
+                     x.rank_run_id,x.as_of_utc,x.recorded_at_utc,
                      ROW_NUMBER() OVER (
                        PARTITION BY c.session,c.symbol
                        ORDER BY x.as_of_utc,r.rank_id
@@ -323,11 +327,11 @@ def _examples(
     ranks = _first_rank_rows(conn, sessions, rank_version)
     examples: list[dict[str, Any]] = []
     ambiguous = unmatched = 0
-    latest_recorded: datetime | None = None
+    latest_evidence: datetime | None = None
     inventory_labels = []
     for row in labels:
         recorded = _utc(datetime.fromisoformat(row["recorded_at_utc"]), "recorded_at_utc")
-        latest_recorded = recorded if latest_recorded is None else max(latest_recorded, recorded)
+        latest_evidence = recorded if latest_evidence is None else max(latest_evidence, recorded)
         key = (row["session"], row["symbol"])
         rank = ranks.get(key)
         inventory_labels.append({
@@ -341,6 +345,7 @@ def _examples(
                 "rank_run_id": int(rank["rank_run_id"]),
                 "rank_id": int(rank["rank_id"]),
                 "as_of_utc": rank["as_of_utc"],
+                "recorded_at_utc": rank["recorded_at_utc"],
                 "direction": rank["direction"],
                 "evidence_score": float(rank["evidence_score"]),
             },
@@ -351,6 +356,14 @@ def _examples(
         if rank is None:
             unmatched += 1
             continue
+        for value, name in (
+            (rank["as_of_utc"], "rank as_of_utc"),
+            (rank["recorded_at_utc"], "rank recorded_at_utc"),
+        ):
+            timestamp = _utc(datetime.fromisoformat(value), name)
+            latest_evidence = (
+                timestamp if latest_evidence is None else max(latest_evidence, timestamp)
+            )
         positive = int(
             row["classification"] == "eligible" and row["direction"] == rank["direction"]
         )
@@ -360,7 +373,7 @@ def _examples(
             "score": float(rank["evidence_score"]),
             "positive": positive,
         })
-    return examples, ambiguous, unmatched, _digest(inventory_labels), latest_recorded
+    return examples, ambiguous, unmatched, _digest(inventory_labels), latest_evidence
 
 
 def _fit_isotonic(examples: Iterable[dict[str, Any]]) -> tuple[CalibrationSegment, ...]:
@@ -474,13 +487,13 @@ def fit_rank_calibrator(
     if fitted >= first_open:
         raise ValueError("calibrator must be frozen before the first holdout session opens")
     development_sessions = tuple(json.loads(experiment["development_sessions_json"]))
-    examples, ambiguous, unmatched, input_digest, latest_recorded = _examples(
+    examples, ambiguous, unmatched, input_digest, latest_evidence = _examples(
         conn, experiment_id, development_sessions, int(experiment["rank_version"])
     )
-    if latest_recorded is None:
+    if latest_evidence is None:
         raise ValueError("development calibration requires independently recorded labels")
-    if fitted < latest_recorded:
-        raise ValueError("calibrator cannot predate its latest development label")
+    if fitted < latest_evidence:
+        raise ValueError("calibrator cannot predate its latest development evidence")
     if ambiguous:
         raise ValueError("development labels contain ambiguous classifications")
     if unmatched:
@@ -515,7 +528,7 @@ def fit_rank_calibrator(
     if existing is not None:
         if existing[9] != model_sha256:
             raise ValueError("experiment already has a different frozen calibrator")
-        calibration_id = int(existing[0])
+        return _load_calibrator(conn, experiment_id)
     else:
         with conn:
             calibration_id = int(conn.execute(
@@ -583,18 +596,33 @@ def evaluate_rank_calibration(
     if split not in SPLITS:
         raise ValueError(f"split must be one of {sorted(SPLITS)}")
     revision = _revision(code_version, "code_version")
+    evaluated = _utc(evaluated_at, "evaluated_at")
     calibrator = _load_calibrator(conn, experiment_id)
     experiment = _experiment(conn, experiment_id)
-    unblinded = conn.execute(
-        "SELECT 1 FROM postmarket_holdout_unblinds WHERE experiment_id=?",
+    unblind = conn.execute(
+        "SELECT unblinded_at_utc,label_inventory_sha256,holdout_labels "
+        "FROM postmarket_holdout_unblinds WHERE experiment_id=?",
         (experiment_id,),
-    ).fetchone() is not None
-    if split == "holdout" and not unblinded:
-        raise ValueError("holdout is sealed; record an explicit unblind event first")
+    ).fetchone()
+    unblinded = unblind is not None
+    if split == "holdout":
+        if unblind is None:
+            raise ValueError("holdout is sealed; record an explicit unblind event first")
+        unblinded_at = _utc(datetime.fromisoformat(unblind[0]), "unblinded_at_utc")
+        if evaluated < unblinded_at:
+            raise ValueError("calibration evaluation cannot predate holdout unblinding")
     sessions = tuple(json.loads(experiment[f"{split}_sessions_json"]))
-    examples, ambiguous, unmatched, label_rank_digest, _ = _examples(
+    examples, ambiguous, unmatched, label_rank_digest, latest_evidence = _examples(
         conn, experiment_id, sessions, int(experiment["rank_version"])
     )
+    if latest_evidence is not None and evaluated < latest_evidence:
+        raise ValueError("calibration evaluation cannot predate its latest input evidence")
+    if split == "holdout":
+        inventory_digest, inventory_count, _ = holdout_label_inventory(
+            conn, experiment_id
+        )
+        if inventory_digest != unblind[1] or inventory_count != int(unblind[2]):
+            raise ValueError("holdout label inventory changed after unblinding")
     positives = sum(int(row["positive"]) for row in examples)
     negatives = len(examples) - positives
     brier, ece, bins = _scores(examples, calibrator.segments)
@@ -645,18 +673,33 @@ def evaluate_rank_calibration(
         tuple(blockers), input_digest,
     )
     raw = _canonical(asdict(report))
+    report_sha256 = hashlib.sha256(raw.encode()).hexdigest()
+    existing = conn.execute(
+        """
+        SELECT evaluated_at_utc,code_version,report_json,report_sha256
+        FROM postmarket_rank_calibration_runs
+        WHERE calibration_id=? AND split=? AND input_digest_sha256=?
+        """,
+        (calibrator.calibration_id, split, input_digest),
+    ).fetchone()
+    if existing is not None:
+        if existing[1] != revision or existing[2] != raw or existing[3] != report_sha256:
+            raise ValueError(
+                "calibration input inventory was already evaluated with different attribution"
+            )
+        return report
     with conn:
         conn.execute(
             """
-            INSERT OR IGNORE INTO postmarket_rank_calibration_runs
+            INSERT INTO postmarket_rank_calibration_runs
                 (calibration_id,experiment_id,split,evaluated_at_utc,code_version,
                  input_digest_sha256,report_json,report_sha256)
             VALUES (?,?,?,?,?,?,?,?)
             """,
             (
                 calibrator.calibration_id, experiment_id, split,
-                _utc(evaluated_at, "evaluated_at").isoformat(), revision, input_digest,
-                raw, hashlib.sha256(raw.encode()).hexdigest(),
+                evaluated.isoformat(), revision, input_digest,
+                raw, report_sha256,
             ),
         )
     return report
@@ -678,7 +721,9 @@ def export_calibration_report(
     row = conn.execute(
         """
         SELECT r.calibration_run_id,r.evaluated_at_utc,r.code_version,r.report_json,
-               r.report_sha256,c.model_sha256
+               r.report_sha256,c.model_sha256,c.model_json,c.fitted_at_utc,
+               c.code_version,c.definitive_labels,c.positive_labels,c.negative_labels,
+               c.training_brier_score,c.training_expected_calibration_error
         FROM postmarket_rank_calibration_runs r
         JOIN postmarket_rank_calibrators c ON c.calibration_id=r.calibration_id
         WHERE r.experiment_id=? AND r.split=? AND r.input_digest_sha256=?
@@ -704,6 +749,16 @@ def export_calibration_report(
         "input_digest_sha256": digest,
         "report_sha256": report_sha,
         "model_sha256": row[5],
+        "model": json.loads(row[6]),
+        "fitted_at_utc": _utc(
+            datetime.fromisoformat(row[7]), "fitted_at_utc"
+        ).isoformat(),
+        "fitting_code_version": _revision(row[8], "fitting code_version"),
+        "development_definitive_labels": int(row[9]),
+        "development_positive_labels": int(row[10]),
+        "development_negative_labels": int(row[11]),
+        "training_brier_score": float(row[12]),
+        "training_expected_calibration_error": float(row[13]),
         "report": json.loads(report_raw),
     }
     raw = (_canonical(payload) + "\n").encode()

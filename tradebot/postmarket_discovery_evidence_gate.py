@@ -282,7 +282,31 @@ CALIBRATION_ARTIFACT_FIELDS = {
     "input_digest_sha256",
     "report_sha256",
     "model_sha256",
+    "model",
+    "fitted_at_utc",
+    "fitting_code_version",
+    "development_definitive_labels",
+    "development_positive_labels",
+    "development_negative_labels",
+    "training_brier_score",
+    "training_expected_calibration_error",
     "report",
+}
+CALIBRATION_MODEL_FIELDS = {
+    "calibration_version",
+    "experiment_id",
+    "method",
+    "scope",
+    "development_input_sha256",
+    "policy",
+    "segments",
+}
+CALIBRATION_SEGMENT_FIELDS = {
+    "minimum_score",
+    "maximum_score",
+    "calibrated_quality",
+    "development_labels",
+    "development_positives",
 }
 CALIBRATION_REPORT_FIELDS = {
     "calibration_version",
@@ -1377,6 +1401,48 @@ def _load_calibration(
     )
     report_digest = _sha256(payload["report_sha256"], "calibration.report_sha256")
     model_digest = _sha256(payload["model_sha256"], "calibration.model_sha256")
+    model = payload["model"]
+    if not isinstance(model, dict):
+        raise ValueError("calibration model must be an object")
+    _exact_fields(model, CALIBRATION_MODEL_FIELDS, "calibration model")
+    canonical_model = json.dumps(model, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(canonical_model.encode()).hexdigest() != model_digest:
+        raise ValueError("calibration model digest does not match embedded model")
+    if (
+        model["calibration_version"] != 1
+        or isinstance(model["calibration_version"], bool)
+        or model["experiment_id"] != campaign.experiment_id
+        or model["method"] != "isotonic_pav"
+        or model["scope"] != "first_rankable_score_same_direction_quality"
+    ):
+        raise ValueError("calibration model identity is invalid")
+    fitted_at = _aware_datetime(payload["fitted_at_utc"], "calibration.fitted_at_utc")
+    fitting_code = _nonempty_string(
+        payload["fitting_code_version"], "calibration.fitting_code_version"
+    )
+    development_definitive = _positive_int(
+        payload["development_definitive_labels"],
+        "calibration.development_definitive_labels",
+    )
+    development_positives = _positive_int(
+        payload["development_positive_labels"],
+        "calibration.development_positive_labels",
+    )
+    development_negatives = _positive_int(
+        payload["development_negative_labels"],
+        "calibration.development_negative_labels",
+    )
+    if development_positives + development_negatives != development_definitive:
+        raise ValueError("calibration development labels do not conserve")
+    training_brier = _optional_ratio(
+        payload["training_brier_score"], "calibration.training_brier_score"
+    )
+    training_ece = _optional_ratio(
+        payload["training_expected_calibration_error"],
+        "calibration.training_expected_calibration_error",
+    )
+    if training_brier is None or training_ece is None:
+        raise ValueError("calibration training metrics cannot be null")
     report = payload["report"]
     if not isinstance(report, dict):
         raise ValueError("calibration report must be an object")
@@ -1402,6 +1468,10 @@ def _load_calibration(
     _sha256(
         report["development_input_sha256"], "calibration.development_input_sha256"
     )
+    if (
+        model["development_input_sha256"] != report["development_input_sha256"]
+    ):
+        raise ValueError("calibration model development input does not match report")
     calibration_policy = report["policy"]
     if not isinstance(calibration_policy, dict):
         raise ValueError("calibration report policy must be an object")
@@ -1433,6 +1503,70 @@ def _load_calibration(
     }
     if any(calibration_policy[key] != value for key, value in expected_policy.items()):
         raise ValueError("calibration locked policy does not match campaign")
+    if model["policy"] != calibration_policy:
+        raise ValueError("calibration model policy does not match report")
+    if (
+        development_definitive < calibration_policy["min_training_labels"]
+        or development_positives
+        < calibration_policy["min_training_positive_labels"]
+        or development_negatives
+        < calibration_policy["min_training_negative_labels"]
+    ):
+        raise ValueError("calibration development sample does not meet locked policy")
+    segments_raw = model["segments"]
+    if not isinstance(segments_raw, list) or not segments_raw:
+        raise ValueError("calibration model segments must be a non-empty list")
+    segments = []
+    previous_maximum: float | None = None
+    previous_quality: float | None = None
+    for index, raw in enumerate(segments_raw):
+        context = f"calibration model.segments[{index}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{context} must be an object")
+        _exact_fields(raw, CALIBRATION_SEGMENT_FIELDS, context)
+        minimum_score = _finite_number(raw["minimum_score"], f"{context}.minimum_score")
+        maximum_score = _finite_number(raw["maximum_score"], f"{context}.maximum_score")
+        quality = _optional_ratio(raw["calibrated_quality"], f"{context}.calibrated_quality")
+        labels = _positive_int(raw["development_labels"], f"{context}.development_labels")
+        positives_in_segment = _nonnegative_int(
+            raw["development_positives"], f"{context}.development_positives"
+        )
+        if (
+            quality is None
+            or not 0 <= minimum_score <= maximum_score <= 100
+            or positives_in_segment > labels
+            or (previous_maximum is not None and minimum_score <= previous_maximum)
+            or (previous_quality is not None and quality < previous_quality)
+            or not _same_number(quality, positives_in_segment / labels)
+        ):
+            raise ValueError(f"{context} violates monotonic model invariants")
+        segments.append({
+            "minimum_score": minimum_score,
+            "maximum_score": maximum_score,
+            "quality": quality,
+            "labels": labels,
+            "positives": positives_in_segment,
+        })
+        previous_maximum = maximum_score
+        previous_quality = quality
+    if sum(item["labels"] for item in segments) != development_definitive or sum(
+        item["positives"] for item in segments
+    ) != development_positives:
+        raise ValueError("calibration model segments do not conserve development labels")
+    expected_training_brier = sum(
+        item["positives"] * (1 - item["quality"]) ** 2
+        + (item["labels"] - item["positives"]) * item["quality"] ** 2
+        for item in segments
+    ) / development_definitive
+    expected_training_ece = sum(
+        item["labels"]
+        * abs(item["quality"] - item["positives"] / item["labels"])
+        for item in segments
+    ) / development_definitive
+    if not _same_number(training_brier, expected_training_brier) or not _same_number(
+        training_ece, expected_training_ece
+    ):
+        raise ValueError("calibration training metrics do not match frozen model")
     definitive = _nonnegative_int(
         report["definitive_labels"], "calibration.definitive_labels"
     )
@@ -1455,6 +1589,10 @@ def _load_calibration(
     if not isinstance(bins_raw, list):
         raise ValueError("calibration reliability_bins must be a list")
     bins = []
+    model_segments = {
+        (item["minimum_score"], item["maximum_score"]): item for item in segments
+    }
+    observed_segment_ranges: set[tuple[float, float]] = set()
     for index, raw in enumerate(bins_raw):
         context = f"calibration reliability_bins[{index}]"
         if not isinstance(raw, dict):
@@ -1480,6 +1618,15 @@ def _load_calibration(
             absolute_error, abs(predicted - observed)
         ):
             raise ValueError(f"{context} observed quality/error does not match counts")
+        segment_key = (minimum_score, maximum_score)
+        segment = model_segments.get(segment_key)
+        if (
+            segment is None
+            or segment_key in observed_segment_ranges
+            or not _same_number(predicted, segment["quality"])
+        ):
+            raise ValueError(f"{context} does not match the frozen model")
+        observed_segment_ranges.add(segment_key)
         expected_lower, expected_upper = _wilson_interval(bin_positives, labels)
         if not _same_number(lower, expected_lower) or not _same_number(
             upper, expected_upper
@@ -1541,12 +1688,18 @@ def _load_calibration(
     last_end = datetime.combine(expected_sessions[-1], time(20, 0), tzinfo=ET).astimezone(
         timezone.utc
     )
+    first_open = CALENDAR.session_open(expected_sessions[0]).to_pydatetime().astimezone(
+        timezone.utc
+    )
+    if fitted_at >= first_open:
+        raise ValueError("calibration model was not frozen before holdout opened")
     if evaluated_at <= last_end:
         raise ValueError("calibration artifact was evaluated before holdout coverage ended")
     return {
-        "code_version": _nonempty_string(
-            payload["code_version"], "calibration.code_version"
-        ),
+        "code_versions": tuple(sorted({
+            _nonempty_string(payload["code_version"], "calibration.code_version"),
+            fitting_code,
+        })),
         "claim_valid": claim,
         "blocking_reasons": blockers,
         "definitive_labels": definitive,
@@ -1636,7 +1789,7 @@ def evaluate_discovery_evidence_gate(
     census_codes = tuple(sorted({row["code_version"] for row in census_rows}))
     provider_codes = tuple(sorted({row["code_version"] for row in provider_rows}))
     empirical_codes = (empirical["code_version"],)
-    calibration_codes = (calibration["code_version"],)
+    calibration_codes = calibration["code_versions"]
     control_codes = tuple(sorted({artifact.revision for artifact in manifest.control_artifacts}))
     data_feeds = tuple(
         sorted(
