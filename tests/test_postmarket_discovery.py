@@ -692,7 +692,7 @@ def test_non_sip_screen_is_rejected_before_persistence(tmp_path):
         ),
         (
             (
-                ("market_movers", NOW + timedelta(seconds=1)),
+                ("market_movers", NOW + timedelta(seconds=2)),
                 ("most_actives_volume", UPDATED),
                 ("most_actives_trades", UPDATED),
             ),
@@ -784,9 +784,48 @@ def test_screener_timestamp_uses_clock_captured_after_fetch(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 1
 
 
+def test_bounded_provider_clock_skew_does_not_drop_a_live_tick(tmp_path):
+    """Sub-second provider/host skew is not future market evidence.
+
+    The screener is only a bounded selector; completed-bar evaluation remains
+    the price-truth boundary.  This reproduces the 2026-09-01 production miss
+    where one source timestamp landed just ahead of the post-fetch host clock.
+    """
+    conn = connect(tmp_path / "shadow.db")
+    response_updated = NOW + timedelta(milliseconds=750)
+    screen = MarketWideScreen(
+        entries=(),
+        requested_top_n=50,
+        provider="alpaca",
+        feed="sip",
+        endpoints=("market_movers", "most_actives_volume", "most_actives_trades"),
+        source_updates=(
+            ("market_movers", response_updated),
+            ("most_actives_volume", response_updated),
+            ("most_actives_trades", response_updated),
+        ),
+    )
+
+    result, _, _ = run_discovery_tick(
+        conn,
+        active_universe=set(),
+        scheduled_earnings=set(),
+        now=NOW,
+        run_id="run-1",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: screen,
+        bars_fetch=lambda symbols, session: {},
+        validation_now_fn=lambda: NOW + timedelta(milliseconds=250),
+    )
+
+    assert result.error_count == 0
+    assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 1
+
+
 def test_genuinely_future_screener_timestamp_still_fails_post_fetch(tmp_path):
     conn = connect(tmp_path / "shadow.db")
-    future = NOW + timedelta(seconds=2)
+    future = NOW + timedelta(seconds=3)
     screen = MarketWideScreen(
         entries=(),
         requested_top_n=50,
@@ -815,6 +854,47 @@ def test_genuinely_future_screener_timestamp_still_fails_post_fetch(tmp_path):
         )
 
     assert conn.execute("SELECT COUNT(*) FROM postmarket_discovery_ticks").fetchone()[0] == 0
+
+
+def test_same_session_new_asset_is_observed_but_not_promoted(tmp_path):
+    """A new listing/ticker/ADS basis stays visible without becoming a signal."""
+    conn = connect(tmp_path / "shadow.db")
+    screen = MarketWideScreen(
+        entries=(_entry("MOVER", "market_gainer", 1, move=900),),
+        requested_top_n=50,
+        provider="alpaca",
+        feed="sip",
+        endpoints=("market_movers", "most_actives_volume", "most_actives_trades"),
+        source_updates=(
+            ("market_movers", UPDATED),
+            ("most_actives_volume", UPDATED),
+            ("most_actives_trades", UPDATED),
+        ),
+    )
+
+    result, _, evaluations = run_discovery_tick(
+        conn,
+        active_universe={"MOVER"},
+        scheduled_earnings=set(),
+        now=NOW,
+        run_id="new-listing",
+        version="abc123",
+        data_feed="sip",
+        screen_fetch=lambda top: screen,
+        bars_fetch=lambda symbols, session: {"MOVER": _bars("MOVER", [900, 900])},
+        identity_quarantine_symbols={"MOVER"},
+    )
+
+    assert evaluations[0].outcome == "IDENTITY_UNVERIFIED"
+    assert "first observed during this session" in evaluations[0].reason
+    assert result.identity_quarantined == 1
+    assert result.candidate_observations == result.new_candidates == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_discovery_candidates"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT outcome FROM postmarket_discovery_observations WHERE symbol='MOVER'"
+    ).fetchone()[0] == "IDENTITY_UNVERIFIED"
 
 
 def test_screen_and_bar_feed_must_match(tmp_path):

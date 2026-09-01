@@ -8,7 +8,7 @@ import os
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -18,6 +18,7 @@ from tradebot.journal import code_version, connect as connect_journal, new_run_i
 from tradebot.marketdata import MarketWideScreen, partition_intraday_bars
 from tradebot.marketwide_screen import SOURCE_ENDPOINT, validate_marketwide_screen
 from tradebot.postmarket import (
+    OUTCOME_IDENTITY_UNVERIFIED,
     OUTCOME_NO_BARS_RETURNED,
     ReactionEvaluation,
     evaluate_postmarket_reaction,
@@ -83,7 +84,11 @@ from tradebot.rth_missed_mover_census import (
     run_rth_missed_mover_census,
     write_rth_missed_mover_census_report,
 )
-from tradebot.universe import active_symbols, connect as connect_universe
+from tradebot.universe import (
+    active_symbols,
+    connect as connect_universe,
+    symbols_first_seen_on,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -115,6 +120,7 @@ class DiscoveryTickResult:
     evaluated_symbols: int
     candidate_observations: int
     new_candidates: int
+    identity_quarantined: int
     error_count: int
     scheduled_lag_ms: int
     missed_cycles: int
@@ -246,6 +252,7 @@ def run_discovery_tick(
     top_n: int = SCREEN_TOP_N,
     clock: Callable[[], float] | None = None,
     validation_now_fn: Callable[[], datetime] | None = None,
+    identity_quarantine_symbols: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[DiscoveryTickResult, DiscoverySelection, list[ReactionEvaluation]]:
     """Union the bounded screen and one universe shard, then conserve every row.
 
@@ -350,16 +357,28 @@ def run_discovery_tick(
             continue
         try:
             snapshot = partition_intraday_bars(bars)
-            evaluations.append(
-                evaluate_postmarket_reaction(
-                    symbol,
-                    session,
-                    snapshot.rth,
-                    snapshot.postmarket,
-                    session_close=session_close,
-                    now=now,
-                )
+            evaluation = evaluate_postmarket_reaction(
+                symbol,
+                session,
+                snapshot.rth,
+                snapshot.postmarket,
+                session_close=session_close,
+                now=now,
             )
+            if (
+                symbol in identity_quarantine_symbols
+                and evaluation.outcome == "CANDIDATE"
+            ):
+                evaluation = replace(
+                    evaluation,
+                    outcome=OUTCOME_IDENTITY_UNVERIFIED,
+                    reason=(
+                        "asset identity was first observed during this session; "
+                        "price adjustment, currency, and security-class basis are "
+                        "not yet established"
+                    ),
+                )
+            evaluations.append(evaluation)
         except Exception as exc:
             logger.exception("postmarket discovery evaluation failed symbol=%s", symbol)
             evaluations.append(fetch_error_evaluation(symbol, session, exc))
@@ -416,6 +435,9 @@ def run_discovery_tick(
         evaluated_symbols=len(evaluations),
         candidate_observations=sum(row.outcome == "CANDIDATE" for row in evaluations),
         new_candidates=new_candidates,
+        identity_quarantined=sum(
+            row.outcome == OUTCOME_IDENTITY_UNVERIFIED for row in evaluations
+        ),
         error_count=sum(row.outcome == "FETCH_ERROR" for row in evaluations),
         scheduled_lag_ms=schedule.scheduled_lag_ms,
         missed_cycles=schedule.missed_cycles,
@@ -1370,6 +1392,9 @@ def main() -> int:
                 scheduled_earnings=set(
                     scheduled_after_hours_earnings_symbols(journal_conn, session)
                 ),
+                identity_quarantine_symbols=set(
+                    symbols_first_seen_on(universe_conn, session)
+                ),
                 now=now,
                 run_id=run_id,
                 version=version,
@@ -1397,6 +1422,7 @@ def main() -> int:
                 "postmarket_discovery_tick tick=%s universe=%s screen_rows=%s "
                 "provider_unique=%s sweep_shard=%s/%s sweep_symbols=%s overlap=%s "
                 "discovered=%s fetched=%s evaluated=%s candidates=%s new=%s "
+                "identity_quarantined=%s "
                 "errors=%s lag_ms=%s missed=%s screen_ms=%s selection_ms=%s "
                 "fetch_ms=%s evaluation_ms=%s persistence_max_s=%s total_ms=%s",
                 result.tick_id,
@@ -1412,6 +1438,7 @@ def main() -> int:
                 result.evaluated_symbols,
                 result.candidate_observations,
                 result.new_candidates,
+                result.identity_quarantined,
                 result.error_count,
                 result.scheduled_lag_ms,
                 result.missed_cycles,

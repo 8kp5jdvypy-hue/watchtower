@@ -21,7 +21,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -303,6 +303,33 @@ def active_symbols(conn: sqlite3.Connection, require_options: bool = False) -> l
         query += " AND options_enabled = 1"
     query += " ORDER BY symbol"
     return [r[0] for r in conn.execute(query).fetchall()]
+
+
+def symbols_first_seen_on(conn: sqlite3.Connection, session: date) -> list[str]:
+    """Return active symbols whose identity first appeared on ``session``.
+
+    A same-session addition may be an IPO, ADS launch, symbol change, or other
+    corporate-action boundary.  Its price history is not yet proven to share
+    one adjustment, currency, and security-class basis, so postmarket
+    discovery records the observation but must not promote it as a candidate
+    until a later session.
+
+    US regular and extended-hours equity sessions finish before midnight UTC,
+    so the ISO UTC date stored by ``refresh_universe`` is the exchange session
+    date for this use.
+    """
+    return [
+        row[0]
+        for row in conn.execute(
+            """
+            SELECT symbol
+            FROM assets
+            WHERE is_active=1 AND substr(first_seen_at,1,10)=?
+            ORDER BY symbol
+            """,
+            (session.isoformat(),),
+        ).fetchall()
+    ]
 
 
 def asset_count(conn: sqlite3.Connection) -> int:

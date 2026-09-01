@@ -3,10 +3,16 @@ scan-eligible market universe from a (faked) asset catalog fetch."""
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from tradebot.marketdata import AssetInfo
-from tradebot.universe import active_symbols, asset_count, connect, refresh_universe
+from tradebot.universe import (
+    active_symbols,
+    asset_count,
+    connect,
+    refresh_universe,
+    symbols_first_seen_on,
+)
 
 NOW = datetime(2026, 8, 8, 14, 0, tzinfo=timezone.utc)
 
@@ -27,6 +33,19 @@ def test_first_refresh_adds_every_fetched_symbol():
     assert result.delisted == ()
     assert result.total_active == 2
     assert active_symbols(conn) == ["AAPL", "NVDA"]
+
+
+def test_symbols_first_seen_on_is_a_narrow_active_identity_quarantine():
+    conn = connect(":memory:")
+    refresh_universe(conn, lambda: [_asset("AAPL")], NOW)
+    next_day = datetime(2026, 8, 9, 14, 0, tzinfo=timezone.utc)
+    refresh_universe(conn, lambda: [_asset("AAPL"), _asset("NEWADS")], next_day)
+
+    assert symbols_first_seen_on(conn, date(2026, 8, 8)) == ["AAPL"]
+    assert symbols_first_seen_on(conn, date(2026, 8, 9)) == ["NEWADS"]
+
+    conn.execute("UPDATE assets SET is_active=0 WHERE symbol='NEWADS'")
+    assert symbols_first_seen_on(conn, date(2026, 8, 9)) == []
 
 
 def test_otc_symbols_are_stored_but_excluded_from_active_by_default():
