@@ -12,7 +12,8 @@ Before the first covered XNYS session opens, create one immutable campaign with
 `python -m tradebot.postmarket_discovery_evidence_campaign`. The campaign pins:
 
 - the exact XNYS date range;
-- the blinded empirical experiment ID, manifest SHA-256, and rank version;
+- the blinded empirical experiment ID, manifest SHA-256, rank version, and
+  exact canonical rank-contract SHA-256;
 - minimum clean-session, label, precision, recall, calibration sample/bin,
   Brier/ECE, provider-comparison, coverage, and latency floors;
 - every allowed feed, provider, dataset, audit/discovery version, and code
@@ -49,6 +50,11 @@ The primary census is intentionally accepted only in the reconciled state
 prove the same census identity and universe using a genuinely different
 provider. This prevents a same-provider comparison or a falsely self-declared
 eligible primary report from satisfying independence.
+
+Both empirical and calibration artifacts must carry the campaign's exact
+rank-contract digest. Matching only the integer rank version is insufficient:
+same-version weights, gates, formulas, or tie semantics cannot be substituted
+after the campaign is locked.
 
 ## Seal the explicit package
 

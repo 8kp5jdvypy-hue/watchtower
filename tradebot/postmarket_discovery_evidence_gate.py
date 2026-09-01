@@ -41,7 +41,7 @@ from tradebot.postmarket_evidence_gate import (
 
 
 EVIDENCE_SCHEMA_VERSION = 2
-CAMPAIGN_SCHEMA_VERSION = 2
+CAMPAIGN_SCHEMA_VERSION = 3
 VERDICT_NOT_READY = "NOT_READY"
 VERDICT_OWNER_REVIEW = "ELIGIBLE_FOR_OWNER_REVIEW"
 REQUIRED_CONTROL_KINDS = {
@@ -77,6 +77,7 @@ CAMPAIGN_FIELDS = {
     "experiment_id",
     "experiment_manifest_sha256",
     "rank_version",
+    "rank_contract_sha256",
     "policy",
 }
 POLICY_FIELDS = {
@@ -238,6 +239,7 @@ EMPIRICAL_REPORT_FIELDS = {
     "experiment_id",
     "split",
     "rank_version",
+    "rank_contract_sha256",
     "sessions",
     "eligibility_rule",
     "selection_rule",
@@ -295,6 +297,7 @@ CALIBRATION_ARTIFACT_FIELDS = {
 CALIBRATION_MODEL_FIELDS = {
     "calibration_version",
     "experiment_id",
+    "rank_contract_sha256",
     "method",
     "scope",
     "development_input_sha256",
@@ -312,6 +315,7 @@ CALIBRATION_REPORT_FIELDS = {
     "calibration_version",
     "calibration_id",
     "experiment_id",
+    "rank_contract_sha256",
     "split",
     "sessions",
     "code_version",
@@ -427,6 +431,7 @@ class CampaignArtifact:
     experiment_id: str
     experiment_manifest_sha256: str
     rank_version: int
+    rank_contract_sha256: str
     path: Path
     sha256: str
 
@@ -520,6 +525,7 @@ class DiscoveryEvidenceGateReport:
     experiment_id: str
     experiment_manifest_sha256: str
     rank_version: int
+    rank_contract_sha256: str
     policy: DiscoveryGatePolicy
     metrics: DiscoveryAggregateMetrics
     checks: tuple[GateCheck, ...]
@@ -819,12 +825,16 @@ def _parse_campaign(
     experiment_digest = _sha256(
         payload["experiment_manifest_sha256"], "campaign.experiment_manifest_sha256"
     )
+    contract_digest = _sha256(
+        payload["rank_contract_sha256"], "campaign.rank_contract_sha256"
+    )
     return CampaignArtifact(
         _nonempty_string(payload["campaign_id"], "campaign.campaign_id"),
         locked_at,
         _nonempty_string(payload["experiment_id"], "campaign.experiment_id"),
         experiment_digest,
         _positive_int(payload["rank_version"], "campaign.rank_version"),
+        contract_digest,
         artifact.path,
         artifact.sha256,
     )
@@ -1301,6 +1311,7 @@ def _load_empirical(
         report["experiment_id"] != campaign.experiment_id
         or report["split"] != "holdout"
         or report["rank_version"] != campaign.rank_version
+        or report["rank_contract_sha256"] != campaign.rank_contract_sha256
         or report["input_digest_sha256"] != input_digest
     ):
         raise ValueError("empirical report identity does not match artifact/campaign")
@@ -1412,6 +1423,7 @@ def _load_calibration(
         model["calibration_version"] != 1
         or isinstance(model["calibration_version"], bool)
         or model["experiment_id"] != campaign.experiment_id
+        or model["rank_contract_sha256"] != campaign.rank_contract_sha256
         or model["method"] != "isotonic_pav"
         or model["scope"] != "first_rankable_score_same_direction_quality"
     ):
@@ -1457,6 +1469,7 @@ def _load_calibration(
         raise ValueError("calibration holdout sessions do not match exact campaign inventory")
     if (
         report["experiment_id"] != campaign.experiment_id
+        or report["rank_contract_sha256"] != campaign.rank_contract_sha256
         or report["split"] != "holdout"
         or report["input_digest_sha256"] != input_digest
         or report["model_sha256"] != model_digest
@@ -2247,6 +2260,7 @@ def evaluate_discovery_evidence_gate(
         manifest.campaign_artifact.experiment_id,
         manifest.campaign_artifact.experiment_manifest_sha256,
         manifest.campaign_artifact.rank_version,
+        manifest.campaign_artifact.rank_contract_sha256,
         policy,
         metrics,
         checks,

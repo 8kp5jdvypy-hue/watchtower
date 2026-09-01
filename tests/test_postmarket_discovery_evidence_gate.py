@@ -41,6 +41,7 @@ CREATED_AT = datetime(2026, 8, 31, 18, tzinfo=timezone.utc)
 CONTROL_COMPLETED = datetime(2026, 8, 31, 17, tzinfo=timezone.utc)
 EXPERIMENT_ID = "marketwide-rank-v1-holdout"
 EXPERIMENT_MANIFEST = "1" * 64
+RANK_CONTRACT = "6" * 64
 INPUT_DIGEST = "2" * 64
 AUDIT_CODE = "a" * 7
 OBSERVER_CODE = "b" * 7
@@ -255,6 +256,7 @@ def _empirical() -> dict:
         "experiment_id": EXPERIMENT_ID,
         "split": "holdout",
         "rank_version": 1,
+        "rank_contract_sha256": RANK_CONTRACT,
         "sessions": [session.isoformat() for session in SESSIONS],
         "eligibility_rule": {
             "move_pct": 8.0,
@@ -318,6 +320,7 @@ def _calibration() -> dict:
     model = {
         "calibration_version": 1,
         "experiment_id": EXPERIMENT_ID,
+        "rank_contract_sha256": RANK_CONTRACT,
         "method": "isotonic_pav",
         "scope": "first_rankable_score_same_direction_quality",
         "development_input_sha256": "5" * 64,
@@ -363,6 +366,7 @@ def _calibration() -> dict:
         "calibration_version": 1,
         "calibration_id": 1,
         "experiment_id": EXPERIMENT_ID,
+        "rank_contract_sha256": RANK_CONTRACT,
         "split": "holdout",
         "sessions": [session.isoformat() for session in SESSIONS],
         "code_version": CALIBRATION_CODE,
@@ -431,6 +435,7 @@ def _package(tmp_path: Path) -> tuple[Path, dict]:
         experiment_id=EXPERIMENT_ID,
         experiment_manifest_sha256=EXPERIMENT_MANIFEST,
         rank_version=1,
+        rank_contract_sha256=RANK_CONTRACT,
         policy=_policy(),
     )
     audits = []
@@ -536,6 +541,7 @@ def test_campaign_is_prospective_immutable_and_binds_empirical_identity(tmp_path
         experiment_id=EXPERIMENT_ID,
         experiment_manifest_sha256=EXPERIMENT_MANIFEST,
         rank_version=1,
+        rank_contract_sha256=RANK_CONTRACT,
         policy=_policy(),
     )
 
@@ -543,6 +549,7 @@ def test_campaign_is_prospective_immutable_and_binds_empirical_identity(tmp_path
     assert payload["experiment_id"] == EXPERIMENT_ID
     assert payload["experiment_manifest_sha256"] == EXPERIMENT_MANIFEST
     assert payload["rank_version"] == 1
+    assert payload["rank_contract_sha256"] == RANK_CONTRACT
     assert stat.S_IMODE(path.stat().st_mode) == 0o444
     with pytest.raises(FileExistsError):
         lock_discovery_evidence_campaign(
@@ -554,6 +561,7 @@ def test_campaign_is_prospective_immutable_and_binds_empirical_identity(tmp_path
             experiment_id=EXPERIMENT_ID,
             experiment_manifest_sha256=EXPERIMENT_MANIFEST,
             rank_version=1,
+            rank_contract_sha256=RANK_CONTRACT,
             policy=_policy(),
         )
 
@@ -570,6 +578,7 @@ def test_campaign_rejects_late_lock_and_permissive_policy(tmp_path):
             experiment_id=EXPERIMENT_ID,
             experiment_manifest_sha256=EXPERIMENT_MANIFEST,
             rank_version=1,
+            rank_contract_sha256=RANK_CONTRACT,
             policy=_policy(),
         )
     policy = _policy()
@@ -784,6 +793,22 @@ def test_empirical_artifact_must_match_prelocked_experiment_digest(tmp_path):
         )
 
 
+def test_empirical_artifact_cannot_substitute_same_version_rank_contract(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+
+    def substitute_contract(payload):
+        payload["report"]["rank_contract_sha256"] = "7" * 64
+        canonical = json.dumps(payload["report"], sort_keys=True, separators=(",", ":"))
+        payload["report_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+
+    _rewrite_artifact(manifest_path, "empirical_artifact", None, substitute_contract)
+
+    with pytest.raises(ValueError, match="identity does not match artifact/campaign"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
+
+
 def test_empirical_per_session_counts_must_reconcile_to_aggregate(tmp_path):
     manifest_path, _ = _package(tmp_path)
 
@@ -852,6 +877,30 @@ def test_calibration_report_cannot_invent_posthoc_predictions(tmp_path):
 
     _rewrite_artifact(manifest_path, "calibration_artifact", None, tamper)
     with pytest.raises(ValueError, match="does not match the frozen model"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
+
+
+def test_calibration_cannot_substitute_same_version_rank_contract(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+
+    def substitute_contract(payload):
+        payload["model"]["rank_contract_sha256"] = "7" * 64
+        payload["report"]["rank_contract_sha256"] = "7" * 64
+        canonical_model = json.dumps(
+            payload["model"], sort_keys=True, separators=(",", ":")
+        )
+        payload["model_sha256"] = hashlib.sha256(canonical_model.encode()).hexdigest()
+        payload["report"]["model_sha256"] = payload["model_sha256"]
+        canonical_report = json.dumps(
+            payload["report"], sort_keys=True, separators=(",", ":")
+        )
+        payload["report_sha256"] = hashlib.sha256(canonical_report.encode()).hexdigest()
+
+    _rewrite_artifact(manifest_path, "calibration_artifact", None, substitute_contract)
+
+    with pytest.raises(ValueError, match="calibration model identity is invalid"):
         evaluate_discovery_evidence_gate(
             load_discovery_evidence_manifest(manifest_path)
         )
@@ -1006,12 +1055,28 @@ def test_cli_exit_codes_distinguish_ready_not_ready_and_invalid(tmp_path, capsys
 def test_schemas_and_runtime_policy_inventory_are_exact():
     root = Path(__file__).parents[1] / "truth"
     campaign = json.loads(
+        (root / "postmarket_discovery_evidence_campaign_v3.schema.json").read_text()
+    )
+    campaign_v2 = json.loads(
         (root / "postmarket_discovery_evidence_campaign_v2.schema.json").read_text()
     )
     evidence = json.loads(
         (root / "postmarket_discovery_evidence_set_v2.schema.json").read_text()
     )
-    assert set(campaign["$defs"]["policy"]["required"]) == POLICY_FIELDS
+    assert set(campaign["required"]) == {
+        "schema_version",
+        "status",
+        "campaign_id",
+        "locked_at_utc",
+        "coverage_start",
+        "coverage_end",
+        "experiment_id",
+        "experiment_manifest_sha256",
+        "rank_version",
+        "rank_contract_sha256",
+        "policy",
+    }
+    assert set(campaign_v2["$defs"]["policy"]["required"]) == POLICY_FIELDS
     assert set(
         evidence["$defs"]["controlArtifact"]["properties"]["kind"]["enum"]
     ) == REQUIRED_CONTROL_KINDS

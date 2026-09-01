@@ -7,8 +7,15 @@ value as float shares. The import is evidence plumbing, not proof of a license:
 the operator remains responsible for verifying that `license_reference`
 identifies a real grant covering Perch's use.
 
-These facts remain shadow evidence and are not rank inputs. A later scoring
-change still requires a locked walk-forward and holdout qualification.
+Context version 2 may use an eligible row to fetch the mapped Select Sector ETF
+through the existing SIP intraday path and record the candidate-minus-sector
+move at the candidate's first knowable completed bar. The context row binds the
+manifest ID, SHA-256 digest, and source observation time. A missing row, a row
+published or observed after detection, or missing causal benchmark bars remains
+explicitly unavailable; Perch does not fall back to an inferred sector.
+
+These facts remain shadow evidence and are not rank-version-1 inputs. A later
+scoring change still requires a locked walk-forward and holdout qualification.
 
 ## Version 1 contract
 

@@ -35,6 +35,7 @@ LIVE = date(2026, 8, 24)
 LOCKED_AT = datetime(2026, 8, 21, 12, tzinfo=timezone.utc)
 FITTED_AT = datetime(2026, 8, 21, 12, 30, tzinfo=timezone.utc)
 POLICY = CalibrationPolicy(6, 3, 3, 6, 3, 3, 2, 0.20, 0.10)
+RANK_CONTRACT = "c" * 64
 
 
 def _conn() -> sqlite3.Connection:
@@ -48,6 +49,7 @@ def _conn() -> sqlite3.Connection:
         created_at=LOCKED_AT,
         created_by="owner",
         rank_version=1,
+        rank_contract_sha256=RANK_CONTRACT,
         label_method="blind_bar_review",
         development_sessions=(DEV,),
         holdout_sessions=(HOLDOUT,),
@@ -63,13 +65,15 @@ def _seed_rank(conn: sqlite3.Connection, session: date, rows: list[tuple[str, fl
     rank_run_id = conn.execute(
         """
         INSERT INTO postmarket_rank_runs
-            (session,rank_version,as_of_utc,recorded_at_utc,code_version,run_id,
+            (session,rank_version,rank_contract_sha256,as_of_utc,
+             recorded_at_utc,code_version,run_id,
              input_digest_sha256,input_candidates,rankable_candidates,status,
              weights_json,thresholds_json)
-        VALUES (?,1,?,?,?,?,?,?,?,'complete','{}','{}')
+        VALUES (?,1,?,?,?,?,?,?,?,?,'complete','{}','{}')
         """,
         (
             session_text,
+            RANK_CONTRACT,
             f"{session_text}T20:10:00+00:00",
             f"{session_text}T20:10:01+00:00",
             "abc1234",
@@ -210,6 +214,7 @@ def test_development_only_isotonic_model_is_frozen_before_holdout_open():
 
     assert first.created is True
     assert second.created is False
+    assert first.rank_contract_sha256 == RANK_CONTRACT
     assert first.model_sha256 == second.model_sha256
     replay = fit_rank_calibrator(
         conn,
@@ -242,6 +247,35 @@ def test_development_only_isotonic_model_is_frozen_before_holdout_open():
             artifact_acquired_at=datetime(2026, 8, 21, 1, tzinfo=timezone.utc),
             recorded_at=datetime(2026, 8, 21, 1, 1, tzinfo=timezone.utc),
         )
+
+
+def test_calibrator_rejects_mixed_rank_contract_development_evidence():
+    conn = _conn()
+    _seed_split(conn, DEV, "D")
+    session_text = DEV.isoformat()
+    conn.execute(
+        """
+        INSERT INTO postmarket_rank_runs
+            (session,rank_version,rank_contract_sha256,as_of_utc,
+             recorded_at_utc,code_version,run_id,input_digest_sha256,
+             input_candidates,rankable_candidates,status,weights_json,
+             thresholds_json)
+        VALUES (?,1,?,?,?,?,?,?,0,0,'complete','{}','{}')
+        """,
+        (
+            session_text,
+            "d" * 64,
+            f"{session_text}T20:20:00+00:00",
+            f"{session_text}T20:20:01+00:00",
+            "abc1234",
+            "mismatched-contract-run",
+            "e" * 64,
+        ),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="mismatched rank contracts"):
+        _fit(conn)
 
 
 def test_calibrator_rejects_late_fit_and_insufficient_development_sample():

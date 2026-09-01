@@ -38,6 +38,7 @@ POLICY = ExperimentPolicy(
     min_definitive_labels=3,
     min_positive_labels=2,
 )
+RANK_CONTRACT = "c" * 64
 
 
 def _conn():
@@ -55,6 +56,7 @@ def _lock(conn):
         created_at=LOCKED_AT,
         created_by="owner",
         rank_version=1,
+        rank_contract_sha256=RANK_CONTRACT,
         label_method="blind_bar_review",
         development_sessions=(DEV,),
         holdout_sessions=(HOLDOUT,),
@@ -114,13 +116,14 @@ def _seed_session(conn, session):
     run = conn.execute(
         """
         INSERT INTO postmarket_rank_runs
-            (session,rank_version,as_of_utc,recorded_at_utc,code_version,run_id,
+            (session,rank_version,rank_contract_sha256,as_of_utc,
+             recorded_at_utc,code_version,run_id,
              input_digest_sha256,input_candidates,rankable_candidates,status,
              weights_json,thresholds_json)
-        VALUES (?,1,?,?,?,?,?,3,3,'complete','{}','{}')
+        VALUES (?,1,?,?,?,?,?,?,3,3,'complete','{}','{}')
         """,
         (
-            session_text, f"{session_text}T20:20:00+00:00",
+            session_text, RANK_CONTRACT, f"{session_text}T20:20:00+00:00",
             f"{session_text}T20:20:01+00:00", "rank-code",
             f"rank-{session_text}", (session_text.replace("-", "") + "0" * 64)[:64],
         ),
@@ -155,14 +158,67 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
         create_locked_experiment(
             conn, experiment_id="rank-v1-exp-1", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
+            rank_contract_sha256=RANK_CONTRACT,
             development_sessions=(DEV,), holdout_sessions=(HOLDOUT,),
             eligibility_rule=ELIGIBILITY,
             selection_rule=SelectionRule(61, 2), policy=POLICY,
+        )
+
+
+def test_legacy_experiment_migrates_but_cannot_claim_empirical_attribution():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE postmarket_rank_experiments (
+          experiment_id TEXT PRIMARY KEY, empirical_version INTEGER NOT NULL,
+          status TEXT NOT NULL, created_at_utc TEXT NOT NULL,
+          created_by TEXT NOT NULL, rank_version INTEGER NOT NULL,
+          label_method TEXT NOT NULL, development_sessions_json TEXT NOT NULL,
+          holdout_sessions_json TEXT NOT NULL, eligibility_rule_json TEXT,
+          selection_rule_json TEXT NOT NULL, policy_json TEXT NOT NULL,
+          manifest_sha256 TEXT NOT NULL UNIQUE
+        );
+        """
+    )
+    ensure_empirical_schema(conn)
+    conn.executescript(DISCOVERY_SCHEMA)
+    conn.executescript(RANK_SCHEMA)
+    conn.execute(
+        """
+        INSERT INTO postmarket_rank_experiments
+          (experiment_id,empirical_version,status,created_at_utc,created_by,
+           rank_version,label_method,development_sessions_json,
+           holdout_sessions_json,eligibility_rule_json,selection_rule_json,
+           policy_json,manifest_sha256)
+        VALUES ('legacy',1,'locked',?,'owner',1,'blind_bar_review',?,?,?,?,?,?)
+        """,
+        (
+            LOCKED_AT.isoformat(),
+            json.dumps([DEV.isoformat()]),
+            json.dumps([HOLDOUT.isoformat()]),
+            json.dumps({"move_pct": 8.0, "min_cumulative_notional": 250000,
+                        "persistence_bars": 2}),
+            json.dumps({"minimum_evidence_score": 60,
+                        "maximum_ordinal_rank": 2}),
+            json.dumps({"min_precision": .9, "min_recall": .95,
+                        "min_definitive_labels": 3, "min_positive_labels": 2}),
+            "a" * 64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="missing an attributable rank contract"):
+        evaluate_rank_experiment(
+            conn,
+            experiment_id="legacy",
+            split="development",
+            evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+            code_version="abc1234",
         )
     with pytest.raises(ValueError, match="disjoint"):
         create_locked_experiment(
             conn, experiment_id="overlap", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
+            rank_contract_sha256=RANK_CONTRACT,
             development_sessions=(DEV,), holdout_sessions=(DEV,),
             eligibility_rule=ELIGIBILITY,
             selection_rule=RULE, policy=POLICY,
@@ -171,10 +227,26 @@ def test_manifest_locks_disjoint_walk_forward_split_and_owner_policy():
         create_locked_experiment(
             conn, experiment_id="weak", created_at=LOCKED_AT,
             created_by="owner", rank_version=1, label_method="blind_bar_review",
+            rank_contract_sha256=RANK_CONTRACT,
             development_sessions=(DEV,), holdout_sessions=(HOLDOUT,),
             eligibility_rule=ELIGIBILITY,
             selection_rule=RULE,
             policy=ExperimentPolicy(.9, .9, 3, 2),
+        )
+    with pytest.raises(ValueError, match="before the first holdout session opens"):
+        create_locked_experiment(
+            conn,
+            experiment_id="late-lock",
+            created_at=datetime(2026, 8, 21, 14, tzinfo=timezone.utc),
+            created_by="owner",
+            rank_version=1,
+            rank_contract_sha256=RANK_CONTRACT,
+            label_method="blind_bar_review",
+            development_sessions=(DEV,),
+            holdout_sessions=(HOLDOUT,),
+            eligibility_rule=ELIGIBILITY,
+            selection_rule=RULE,
+            policy=POLICY,
         )
 
 
@@ -236,6 +308,7 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
     )
 
     assert report.holdout_unblinded is False
+    assert report.rank_contract_sha256 == RANK_CONTRACT
     assert report.baseline.precision == pytest.approx(2 / 3)
     assert report.baseline.recall == 1
     assert report.candidate_rank.precision == 1
@@ -255,6 +328,45 @@ def test_development_report_compares_baseline_to_locked_rank_rule():
     assert conn.execute(
         "SELECT code_version FROM postmarket_rank_empirical_runs"
     ).fetchone()[0] == "abc1234"
+
+
+def test_empirical_report_fails_closed_when_same_version_mixes_rank_contracts():
+    conn = _conn()
+    _lock(conn)
+    _seed_session(conn, DEV)
+    _seed_labels(conn, DEV)
+    session_text = DEV.isoformat()
+    conn.execute(
+        """
+        INSERT INTO postmarket_rank_runs
+            (session,rank_version,rank_contract_sha256,as_of_utc,
+             recorded_at_utc,code_version,run_id,input_digest_sha256,
+             input_candidates,rankable_candidates,status,weights_json,
+             thresholds_json)
+        VALUES (?,1,?,?,?,?,?,?,0,0,'complete','{}','{}')
+        """,
+        (
+            session_text,
+            "d" * 64,
+            f"{session_text}T20:30:00+00:00",
+            f"{session_text}T20:30:01+00:00",
+            "rank-code",
+            "mismatched-contract-run",
+            "e" * 64,
+        ),
+    )
+    conn.commit()
+
+    report = evaluate_rank_experiment(
+        conn,
+        experiment_id="rank-v1-exp-1",
+        split="development",
+        evaluated_at=datetime(2026, 8, 22, 2, tzinfo=timezone.utc),
+        code_version="abc1234",
+    )
+
+    assert report.passed_locked_policy is False
+    assert "RANK_CONTRACT_MISMATCH_PRESENT" in report.blocking_reasons
 
 
 def test_empirical_evaluation_cannot_be_backdated_before_input_evidence():

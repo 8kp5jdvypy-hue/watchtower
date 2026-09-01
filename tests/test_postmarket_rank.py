@@ -23,7 +23,10 @@ from tradebot.postmarket_lifecycle import (
 )
 from tradebot.postmarket_rank import (
     RankEvidence,
+    ensure_rank_schema,
     latest_rank_summary,
+    rank_contract_payload,
+    rank_contract_sha256,
     run_rank_snapshot,
     score_candidate,
 )
@@ -42,11 +45,15 @@ def _rank_evidence(**changes):
         direction="up",
         context_id=1,
         context_status="complete",
+        context_observed_at=AS_OF,
+        context_lifecycle_observation_seq=1,
+        data_confidence_status="HIGH",
         volatility_status="AVAILABLE",
         move_atr_units=3.0,
         market_relative_status="AVAILABLE",
         directional_market_excess_pct=9.0,
         quote_status="AVAILABLE",
+        quote_ts=AS_OF,
         spread_bps=20.0,
         quoted_depth_notional=500_000.0,
         liquidity_status="AVAILABLE",
@@ -90,6 +97,40 @@ def test_score_is_fully_decomposed_and_not_a_probability():
     assert score.exclusion_reasons == ()
 
 
+def test_rank_schema_migrates_legacy_runs_without_rewriting_attribution():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE postmarket_rank_runs (
+          rank_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session TEXT NOT NULL, rank_version INTEGER NOT NULL,
+          as_of_utc TEXT NOT NULL, recorded_at_utc TEXT NOT NULL,
+          code_version TEXT, run_id TEXT NOT NULL,
+          input_digest_sha256 TEXT NOT NULL, input_candidates INTEGER NOT NULL,
+          rankable_candidates INTEGER NOT NULL, status TEXT NOT NULL,
+          weights_json TEXT NOT NULL, thresholds_json TEXT NOT NULL
+        );
+        INSERT INTO postmarket_rank_runs
+          (session,rank_version,as_of_utc,recorded_at_utc,code_version,run_id,
+           input_digest_sha256,input_candidates,rankable_candidates,status,
+           weights_json,thresholds_json)
+        VALUES
+          ('2026-08-27',1,'2026-08-27T20:10:00+00:00',
+           '2026-08-27T20:10:01+00:00','abc1234','legacy','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+           1,1,'complete','{}','{}');
+        """
+    )
+
+    ensure_rank_schema(conn)
+
+    assert "rank_contract_sha256" in {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_rank_runs)")
+    }
+    assert conn.execute(
+        "SELECT rank_contract_sha256 FROM postmarket_rank_runs"
+    ).fetchone()[0] is None
+
+
 def test_stale_fading_temporally_bad_quote_is_unrankable_with_named_penalties():
     score = score_candidate(
         _rank_evidence(
@@ -109,6 +150,22 @@ def test_stale_fading_temporally_bad_quote_is_unrankable_with_named_penalties():
     assert score.penalties["fading"] == -15
     assert score.penalties["unexplained_catalyst"] == -5
     assert score.penalties["stale_observation"] == -25
+
+
+def test_rank_rejects_mismatched_context_future_quote_and_unusable_data():
+    score = score_candidate(
+        _rank_evidence(
+            context_lifecycle_observation_seq=2,
+            data_confidence_status="UNUSABLE",
+            quote_ts=AS_OF + timedelta(seconds=2),
+        ),
+        as_of=AS_OF,
+    )
+
+    assert score.rankable is False
+    assert "CONTEXT_LIFECYCLE_MISMATCH" in score.exclusion_reasons
+    assert "DATA_CONFIDENCE_UNUSABLE" in score.exclusion_reasons
+    assert "QUOTE_FROM_FUTURE" in score.exclusion_reasons
 
 
 def _seed_candidate(conn, candidate_id, symbol):
@@ -132,14 +189,22 @@ def _seed_candidate(conn, candidate_id, symbol):
     conn.commit()
 
 
-def _context(candidate_id, symbol, *, spread, excess, atr_units):
+def _context(
+    candidate_id, symbol, *, spread, excess, atr_units,
+    observation_seq=None, observed_at=AS_OF,
+):
+    observation_seq = candidate_id if observation_seq is None else observation_seq
     return ContextEvidence(
         candidate_id=candidate_id,
         session=SESSION.isoformat(),
         symbol=symbol,
         direction="up",
         candidate_detected_at=(CLOSE + timedelta(minutes=10)).isoformat(),
-        observed_at_utc=(CLOSE + timedelta(minutes=10, seconds=1)).isoformat(),
+        observed_at_utc=observed_at.isoformat(),
+        lifecycle_observation_seq=observation_seq,
+        lifecycle_evidence_bar_open_ts_utc=(
+            observed_at - timedelta(minutes=5)
+        ).isoformat(),
         code_version="context-code",
         bar_data_feed="sip",
         bar_data_provider="alpaca",
@@ -162,8 +227,11 @@ def _context(candidate_id, symbol, *, spread, excess, atr_units):
         sector_symbol=None,
         sector_move_pct=None,
         sector_relative_move_pct=None,
+        sector_reference_manifest_id=None,
+        sector_reference_sha256=None,
+        sector_reference_observed_at_utc=None,
         quote_status="AVAILABLE",
-        quote_ts_utc=(CLOSE + timedelta(minutes=10)).isoformat(),
+        quote_ts_utc=observed_at.isoformat(),
         quote_distance_seconds=0,
         bid=109.9,
         ask=110.1,
@@ -190,6 +258,9 @@ def _context(candidate_id, symbol, *, spread, excess, atr_units):
         catalyst_details=(),
         catalyst_coverage={"earnings": "CONFIGURED"},
         bar_quality_status="PASSED_CANDIDATE_COMPLETED_BAR_GATES",
+        data_confidence_status="HIGH",
+        data_confidence_coverage_pct=100,
+        data_confidence_components={"technical_evidence": True},
         issues=(),
     )
 
@@ -257,6 +328,14 @@ def test_rank_snapshot_orders_deterministically_and_is_digest_idempotent(tmp_pat
     assert second.created is False
     assert second.rank_run_id == first.rank_run_id
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_runs").fetchone()[0] == 1
+    contract, weights, thresholds = conn.execute(
+        "SELECT rank_contract_sha256,weights_json,thresholds_json "
+        "FROM postmarket_rank_runs WHERE rank_run_id=?",
+        (first.rank_run_id,),
+    ).fetchone()
+    assert contract == rank_contract_sha256()
+    assert ast.literal_eval(weights) == rank_contract_payload()["weights"]
+    assert ast.literal_eval(thresholds) == rank_contract_payload()["thresholds"]
     summary = latest_rank_summary(conn)
     assert summary["semantics"] == (
         "heuristic_evidence_ordering_not_probability"
@@ -280,6 +359,18 @@ def test_new_completed_bar_changes_digest_and_creates_new_snapshot(tmp_path):
     )
     _lifecycle(
         conn, 1, "AAA", observation_bar=CLOSE + timedelta(minutes=20)
+    )
+    record_context(
+        conn,
+        _context(
+            1,
+            "AAA",
+            spread=20,
+            excess=9,
+            atr_units=4,
+            observation_seq=2,
+            observed_at=CLOSE + timedelta(minutes=25),
+        ),
     )
     second = run_rank_snapshot(
         conn, session=SESSION.isoformat(), as_of=CLOSE + timedelta(minutes=25),
@@ -326,7 +417,11 @@ def test_freshness_boundary_changes_digest_without_new_market_evidence(tmp_path)
     assert summary["session_runs"] == 2
     assert summary["session_rankable_runs"] == 1
     assert summary["session_peak_rankable_candidates"] == 1
-    assert summary["latest_exclusion_counts"] == {"OBSERVATION_STALE": 1}
+    assert summary["latest_exclusion_counts"] == {
+        "CONTEXT_STALE": 1,
+        "OBSERVATION_STALE": 1,
+        "QUOTE_STALE": 1,
+    }
     assert summary["latest_rankable_snapshot"]["rank_run_id"] == fresh.rank_run_id
     assert summary["latest_rankable_snapshot"]["top"][0]["symbol"] == "AAA"
 

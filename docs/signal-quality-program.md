@@ -102,9 +102,14 @@ entitlement validation, and clean live proofs remain gates.
 Implementation: `tradebot/postmarket_context.py` writes bounded, append-only
 candidate context attempts covering prior-session ATR, SPY-relative movement,
 SIP quote spread/depth, RTH dollar liquidity, asset eligibility, completed-bar
-quality, and verified catalyst-ledger facts. Every source carries point-in-time
-and provider/feed provenance. Unsupported GICS/ETF mapping, float shares,
-guidance, regulatory, and analyst inputs stay explicitly unavailable.
+quality, and verified catalyst-ledger facts. Context version 2 also computes
+sector-relative movement when a locked licensed manifest row and its mapped
+ETF's completed bar were both knowable at detection, preserving the manifest
+ID, digest, and observation time. It refreshes append-only for each completed
+lifecycle bar and records a named technical data-confidence inventory. Every
+source carries point-in-time and provider/feed provenance. Missing licensed
+mapping, float shares, guidance, regulatory, and analyst inputs stay explicitly
+unavailable.
 See `docs/postmarket-context-tradability.md`.
 
 Point-in-time external evidence: `tradebot/postmarket_external_context.py`
@@ -121,8 +126,9 @@ Licensed reference evidence: `tradebot/postmarket_reference_manifest.py`
 strictly ingests operator-reviewed provider manifests for true sector
 classification, sector-benchmark mapping, and optional float shares. The
 append-only digest-bound contract enforces publication/observation causality
-and never scrapes or infers the data. It remains outside rank pending holdout
-evidence. See `docs/postmarket-licensed-reference-manifest.md`.
+and never scrapes or infers the data. Context may materialize these facts as
+shadow evidence, but they remain outside rank pending holdout evidence. See
+`docs/postmarket-licensed-reference-manifest.md`.
 
 ### 5. Lifecycle and rank
 
@@ -139,9 +145,13 @@ stops returning it. It stores distinct completed-bar observations plus
 
 Rank implementation: `tradebot/postmarket_rank.py` writes immutable rank runs
 and per-candidate decompositions bound to exact context, transition, and
-completed-bar observation IDs. Version 1 has named 100-point evidence
-components, explicit penalties and hard exclusions, deterministic tie-breaking,
-freshness-sensitive idempotency, and a stored non-probability semantic label.
+completed-bar observation IDs. Version 2 retains version 1's named 100-point
+weights while adding hard context/lifecycle binding and independent
+context/quote freshness and technical data-confidence exclusions. It has
+explicit penalties and hard exclusions, deterministic tie-breaking,
+freshness-sensitive idempotency, a stored non-probability semantic label, and a
+canonical contract digest covering formulas, weights, gates, upstream context
+version, and ordering. Legacy unbound ranks remain historical only.
 See `docs/postmarket-quality-rank.md`.
 
 ### 6. Empirical qualification
@@ -153,8 +163,10 @@ See `docs/postmarket-quality-rank.md`.
 
 Rank qualification implementation: `tradebot/postmarket_empirical.py` locks
 development/holdout sessions, the ground-truth eligibility definition,
-selection rules, owner precision/sample floors, and the technical recall floor
-before holdout results. Strict digest-bound review manifests atomically append
+selection rules, exact rank-contract digest, owner precision/sample floors, and
+the technical recall floor before holdout results. Evaluation rejects mixed or
+legacy-unbound rank contracts and binds every first-rankable source row into its
+input digest. Strict digest-bound review manifests atomically append
 rank-blind labels, and a digest-confirmed one-way unblind record freezes the
 holdout before baseline-versus-rank evaluation. See
 `docs/postmarket-rank-empirical-qualification.md`.
@@ -181,8 +193,9 @@ See `docs/postmarket-discovery-control-evidence.md`.
 
 Market-wide aggregate gate implementation:
 `tradebot/postmarket_discovery_evidence_campaign.py` prospectively locks the
-session range, empirical identity, policy floors, providers, datasets, and
-eligible revisions. `tradebot/postmarket_discovery_evidence_gate.py` then
+session range, empirical identity, exact canonical rank-contract digest,
+policy floors, providers, datasets, and eligible revisions.
+`tradebot/postmarket_discovery_evidence_gate.py` then
 requires exact clean-session inventories, reconciled full-universe censuses,
 separate independent-provider proofs, the matching empirical holdout, and all
 four operational controls. The explicit-only

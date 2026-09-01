@@ -92,6 +92,7 @@ def _conn():
         created_at=datetime(2026, 8, 21, 12, tzinfo=timezone.utc),
         created_by="owner",
         rank_version=1,
+        rank_contract_sha256="c" * 64,
         label_method="multi_provider_reconciliation",
         development_sessions=(DEV,),
         holdout_sessions=(HOLDOUT,),
