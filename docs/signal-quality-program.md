@@ -208,14 +208,14 @@ with nightly catch-up before encrypted backup and full creation/restore
 verification. It deletes nothing; pruning remains separately gated on real
 archive and restore evidence. See `docs/screening-evidence-archive.md`.
 
-Customer-delivery readiness foundation:
+Customer-readiness dry run:
 `tradebot/postmarket_delivery_readiness.py` provides a pure, default-off,
-evidence-bound policy decision for a future dry-run router. It requires exact
-owner authorization, lifecycle/rank freshness and quality, clean operations,
-allowed provenance, and a disengaged independent kill switch. It imports no
-provider, outbox, alert, or trading path and cannot send anything. The
-remaining router, ledger, rendering, delivery controls, rollback proof, and
-owner activation are explicitly unfinished. See
+evidence-bound policy decision for the isolated dry-run router. Policy v2
+requires exact owner authorization, lifecycle/rank freshness, a candidate-level
+projection through the exact frozen holdout-qualified calibrator, calibrated
+observed-quality and coverage floors, clean operations, allowed provenance, and
+a disengaged independent kill switch. It imports no provider, outbox, alert, or
+trading path and cannot send anything. See
 `docs/postmarket-customer-delivery-readiness.md`.
 
 The companion `tradebot/postmarket_delivery_dry_run.py` ledger atomically
@@ -237,6 +237,15 @@ append-only tick and tick-to-decision tables. Scheduled lag, total latency,
 conservation, operational reasons, exact rank provenance, and cross-release
 link invariants make clean-session coverage independently auditable instead of
 inferring it from a process heartbeat.
+
+Every eligible route also has an append-only calibration link. Daily audit v2
+reproduces that link through the exact projection, frozen model, passing
+canonical holdout report, rank row, and candidate. Blinded review case v2,
+campaign v3, preflight, and the final aggregate gate all bind the same model
+identity. Missing, stale, substituted, or unattributed calibration evidence
+fails closed. Customer delivery remains unimplemented and disabled; prospective
+clean sessions, independent case review, owner activation, and a separate
+delivery release gate remain required.
 
 ## Anti-goals
 
