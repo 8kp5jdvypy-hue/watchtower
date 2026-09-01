@@ -48,7 +48,11 @@ their evidence decomposition for analysis but receive no ordinal rank.
 ## Append-only reproducibility
 
 `postmarket_rank_runs` stores rank version, semantic as-of time, code/run ID,
-input digest, input/rankable counts, component weights, and thresholds.
+input digest, input/rankable counts, component weights, thresholds, and the
+canonical SHA-256 rank-contract identity. The contract covers the exact
+component formulas, penalties, hard gates, context version, and deterministic
+tie-break. The input digest also includes that contract, so a semantic change
+cannot reuse an older run even if its market evidence is identical.
 `postmarket_candidate_ranks` stores the exact context ID, lifecycle transition
 ID, completed-bar observation sequence, named components, named penalties,
 exclusions, explanation, score, coverage, and ordinal.
@@ -59,6 +63,10 @@ freshness states. Identical evidence inside the same freshness states is
 idempotent. A new context, transition, completed bar, or any fresh-to-stale
 boundary creates a new immutable snapshot. Ties resolve deterministically by
 evidence score, coverage, symbol, then candidate ID.
+
+Legacy rows migrate with a NULL contract and remain historical only. They are
+never rewritten or accepted by empirical qualification. A fresh attributable
+snapshot is required before a session can enter a locked experiment.
 
 The observer heartbeat separates current rankability from historical session
 capability. It exposes the newest run, inputs, rankable and unrankable counts,

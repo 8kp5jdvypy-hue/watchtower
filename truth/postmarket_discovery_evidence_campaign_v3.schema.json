@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://perchmarkets.com/schemas/postmarket_discovery_evidence_campaign_v3.schema.json",
+  "title": "Postmarket market-wide discovery evidence campaign v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "campaign_id", "locked_at_utc",
+    "coverage_start", "coverage_end", "experiment_id",
+    "experiment_manifest_sha256", "rank_version", "rank_contract_sha256",
+    "policy"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "status": {"const": "locked"},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "locked_at_utc": {"type": "string", "format": "date-time"},
+    "coverage_start": {"type": "string", "format": "date"},
+    "coverage_end": {"type": "string", "format": "date"},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "experiment_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "rank_version": {"type": "integer", "minimum": 1},
+    "rank_contract_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "policy": {
+      "$ref": "postmarket_discovery_evidence_campaign_v2.schema.json#/$defs/policy"
+    }
+  }
+}

@@ -149,7 +149,9 @@ completed-bar observation IDs. Version 2 retains version 1's named 100-point
 weights while adding hard context/lifecycle binding and independent
 context/quote freshness and technical data-confidence exclusions. It has
 explicit penalties and hard exclusions, deterministic tie-breaking,
-freshness-sensitive idempotency, and a stored non-probability semantic label.
+freshness-sensitive idempotency, a stored non-probability semantic label, and a
+canonical contract digest covering formulas, weights, gates, upstream context
+version, and ordering. Legacy unbound ranks remain historical only.
 See `docs/postmarket-quality-rank.md`.
 
 ### 6. Empirical qualification
@@ -161,8 +163,10 @@ See `docs/postmarket-quality-rank.md`.
 
 Rank qualification implementation: `tradebot/postmarket_empirical.py` locks
 development/holdout sessions, the ground-truth eligibility definition,
-selection rules, owner precision/sample floors, and the technical recall floor
-before holdout results. Strict digest-bound review manifests atomically append
+selection rules, exact rank-contract digest, owner precision/sample floors, and
+the technical recall floor before holdout results. Evaluation rejects mixed or
+legacy-unbound rank contracts and binds every first-rankable source row into its
+input digest. Strict digest-bound review manifests atomically append
 rank-blind labels, and a digest-confirmed one-way unblind record freezes the
 holdout before baseline-versus-rank evaluation. See
 `docs/postmarket-rank-empirical-qualification.md`.
@@ -189,8 +193,9 @@ See `docs/postmarket-discovery-control-evidence.md`.
 
 Market-wide aggregate gate implementation:
 `tradebot/postmarket_discovery_evidence_campaign.py` prospectively locks the
-session range, empirical identity, policy floors, providers, datasets, and
-eligible revisions. `tradebot/postmarket_discovery_evidence_gate.py` then
+session range, empirical identity, exact canonical rank-contract digest,
+policy floors, providers, datasets, and eligible revisions.
+`tradebot/postmarket_discovery_evidence_gate.py` then
 requires exact clean-session inventories, reconciled full-universe censuses,
 separate independent-provider proofs, the matching empirical holdout, and all
 four operational controls. The explicit-only

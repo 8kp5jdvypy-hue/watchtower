@@ -10,8 +10,9 @@ fails closed unless the complete leakage-resistant sequence below succeeds.
 1. Lock the rank experiment after development sessions and before holdout.
 2. Import independent, rank-blind development labels.
 3. Before the first holdout session opens, fit one monotonic isotonic-PAV
-   mapping. The mapping binds the exact latest label revisions, first rankable
-   score rows, policy, code revision, and model with SHA-256.
+   mapping. The mapping binds the exact locked rank contract, latest label
+   revisions, first rankable score rows and their run input digests, policy,
+   code revision, and model with SHA-256.
 4. Once fitted, development labels are frozen by a database trigger. A second
    model for the same experiment is rejected.
 5. Import independent holdout labels while rank output remains sealed.
@@ -35,7 +36,10 @@ profitability, advice, or a customer-delivery authorization.
 A holdout calibration claim is invalid when any locked sample floor is missed,
 labels are ambiguous, rank evidence is missing, any populated reliability bin
 lacks its minimum support, the Brier-score ceiling is exceeded, or expected
-calibration error exceeds its ceiling. Development evaluation always includes
+calibration error exceeds its ceiling. Any same-version rank run carrying a
+different or missing contract is also a named blocker; fitting refuses such a
+development set, and projection refuses a rank run that does not match the
+frozen model's contract. Development evaluation always includes
 `HOLDOUT_VALIDATION_REQUIRED`, even if in-sample fit is perfect.
 
 Each reliability bin reports its frozen score interval, predicted quality,

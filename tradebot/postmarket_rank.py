@@ -24,6 +24,7 @@ from tradebot.postmarket_lifecycle import (
 
 
 RANK_VERSION = 2
+RANK_CONTRACT_VERSION = 1
 REQUIRED_CONTEXT_VERSION = 2
 MAX_OBSERVATION_AGE_SECONDS = 420
 MAX_CONTEXT_AGE_SECONDS = 420
@@ -48,6 +49,7 @@ CREATE TABLE IF NOT EXISTS postmarket_rank_runs (
     rank_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
     session TEXT NOT NULL,
     rank_version INTEGER NOT NULL,
+    rank_contract_sha256 TEXT NOT NULL,
     as_of_utc TEXT NOT NULL,
     recorded_at_utc TEXT NOT NULL,
     code_version TEXT,
@@ -174,6 +176,93 @@ class RankRunResult:
 
 def ensure_rank_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(RANK_SCHEMA)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_rank_runs)")
+    }
+    if "rank_contract_sha256" not in columns:
+        # Historical runs remain explicitly unbound.  They must never be
+        # rewritten because this ledger is append-only; empirical consumers
+        # reject NULL contracts and require a newly recorded snapshot.
+        conn.execute(
+            "ALTER TABLE postmarket_rank_runs ADD COLUMN rank_contract_sha256 TEXT"
+        )
+
+
+def rank_thresholds() -> dict[str, object]:
+    """Return the canonical hard-gate contract persisted with every run."""
+    return {
+        "max_observation_age_seconds": MAX_OBSERVATION_AGE_SECONDS,
+        "max_context_age_seconds": MAX_CONTEXT_AGE_SECONDS,
+        "max_quote_age_seconds": MAX_QUOTE_AGE_SECONDS,
+        "max_evidence_clock_skew_seconds": MAX_EVIDENCE_CLOCK_SKEW_SECONDS,
+        "max_rankable_spread_bps": MAX_RANKABLE_SPREAD_BPS,
+        "required_context_version": REQUIRED_CONTEXT_VERSION,
+        "rankable_data_confidence_statuses": ["HIGH", "MEDIUM"],
+        "score_semantics": "heuristic_evidence_ordering_not_probability",
+    }
+
+
+def rank_contract_payload() -> dict[str, object]:
+    """Describe the exact versioned score and eligibility semantics.
+
+    The digest is deliberately independent of the repository revision.  It
+    changes only when a rank input, formula, tie-break, weight, or hard gate
+    changes, allowing unrelated code fixes during a prospective holdout while
+    preventing silent mixtures of different scoring contracts.
+    """
+    return {
+        "contract_version": RANK_CONTRACT_VERSION,
+        "rank_version": RANK_VERSION,
+        "weights": dict(sorted(COMPONENT_WEIGHTS.items())),
+        "thresholds": rank_thresholds(),
+        "component_formulas": {
+            "volatility_normalized_move": "weight*clamp(move_atr_units/5,0,1)",
+            "market_relative_excess": "clamp(directional_market_excess_pct,0,weight)",
+            "rth_dollar_liquidity": "weight*clamp((log10(value)-6)/3,0,1)",
+            "postmarket_notional": "weight*clamp((log10(value)-5)/3,0,1)",
+            "quote_spread": "weight*clamp(1-spread_bps/max_rankable_spread_bps,0,1)",
+            "quoted_depth": "weight*clamp(quoted_depth_notional/1000000,0,1)",
+            "verified_catalyst": "weight_if_verified_else_zero",
+            "lifecycle": "STRENGTHENING=10,CONFIRMED=8,REQUALIFIED=7,FADING=2",
+        },
+        "penalty_semantics": {
+            "degraded_context": -20.0,
+            "wide_spread": "-min(15,(spread_bps-100)/20)",
+            "thin_rth_liquidity": -10.0,
+            "unexplained_catalyst": -5.0,
+            "fading": -15.0,
+            "requalified_after_failure": -3.0,
+            "volatility_unavailable": -5.0,
+            "benchmark_unavailable": -5.0,
+            "stale_observation": -25.0,
+            "stale_quote": -25.0,
+        },
+        "hard_gate_semantics": {
+            "rankable_lifecycle_states": sorted(RANKABLE_STATES),
+            "requires_complete_context": True,
+            "requires_context_observation_binding": True,
+            "requires_completed_bar_observation": True,
+            "requires_active_tradable_asset": True,
+            "requires_available_sip_quote": True,
+            "requires_fresh_context_observation_and_quote": True,
+            "future_evidence_tolerance_seconds": (
+                MAX_EVIDENCE_CLOCK_SKEW_SECONDS
+            ),
+        },
+        "ordering": [
+            "evidence_score_desc",
+            "evidence_coverage_pct_desc",
+            "symbol_asc",
+            "candidate_id_asc",
+        ],
+    }
+
+
+def rank_contract_sha256() -> str:
+    raw = json.dumps(
+        rank_contract_payload(), separators=(",", ":"), sort_keys=True
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _aware_utc(value: datetime, name: str) -> datetime:
@@ -483,8 +572,12 @@ def _timestamp_freshness_state(
     return "FRESH"
 
 
-def _input_digest(evidence: Sequence[RankEvidence], as_of: datetime) -> str:
-    identity = [
+def _input_digest(
+    evidence: Sequence[RankEvidence], as_of: datetime, contract_sha256: str,
+) -> str:
+    identity = {
+        "rank_contract_sha256": contract_sha256,
+        "evidence": [
         {
             "candidate_id": row.candidate_id,
             "context_id": row.context_id,
@@ -506,8 +599,9 @@ def _input_digest(evidence: Sequence[RankEvidence], as_of: datetime) -> str:
                 max_age_seconds=MAX_QUOTE_AGE_SECONDS,
             ),
         }
-        for row in evidence
-    ]
+            for row in evidence
+        ],
+    }
     payload = json.dumps(identity, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
@@ -525,13 +619,15 @@ def run_rank_snapshot(
     evidence = _load_evidence(conn, session)
     if not evidence:
         return RankRunResult(None, session, False, 0, 0, (), "current")
-    digest = _input_digest(evidence, current)
+    contract_sha256 = rank_contract_sha256()
+    digest = _input_digest(evidence, current, contract_sha256)
     existing = conn.execute(
         """
         SELECT rank_run_id,rankable_candidates,status FROM postmarket_rank_runs
-        WHERE session=? AND rank_version=? AND input_digest_sha256=?
+        WHERE session=? AND rank_version=? AND rank_contract_sha256=?
+          AND input_digest_sha256=?
         """,
-        (session, RANK_VERSION, digest),
+        (session, RANK_VERSION, contract_sha256, digest),
     ).fetchone()
     if existing is not None:
         top = tuple(
@@ -566,29 +662,22 @@ def run_rank_snapshot(
         and row.observation_seq is not None
         for row in evidence
     ) else "degraded"
-    thresholds = {
-        "max_observation_age_seconds": MAX_OBSERVATION_AGE_SECONDS,
-        "max_context_age_seconds": MAX_CONTEXT_AGE_SECONDS,
-        "max_quote_age_seconds": MAX_QUOTE_AGE_SECONDS,
-        "max_evidence_clock_skew_seconds": MAX_EVIDENCE_CLOCK_SKEW_SECONDS,
-        "max_rankable_spread_bps": MAX_RANKABLE_SPREAD_BPS,
-        "required_context_version": REQUIRED_CONTEXT_VERSION,
-        "rankable_data_confidence_statuses": ["HIGH", "MEDIUM"],
-        "score_semantics": "heuristic_evidence_ordering_not_probability",
-    }
+    thresholds = rank_thresholds()
     evidence_by_id = {row.candidate_id: row for row in evidence}
     with conn:
         cursor = conn.execute(
             """
             INSERT INTO postmarket_rank_runs
-                (session,rank_version,as_of_utc,recorded_at_utc,code_version,
+                (session,rank_version,rank_contract_sha256,as_of_utc,
+                 recorded_at_utc,code_version,
                  run_id,input_digest_sha256,input_candidates,rankable_candidates,
                  status,weights_json,thresholds_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                session, RANK_VERSION, current.isoformat(), current.isoformat(),
-                code_version, run_id, digest, len(evidence), len(ordered), status,
+                session, RANK_VERSION, contract_sha256, current.isoformat(),
+                current.isoformat(), code_version, run_id, digest, len(evidence),
+                len(ordered), status,
                 json.dumps(COMPONENT_WEIGHTS, separators=(",", ":"), sort_keys=True),
                 json.dumps(thresholds, separators=(",", ":"), sort_keys=True),
             ),

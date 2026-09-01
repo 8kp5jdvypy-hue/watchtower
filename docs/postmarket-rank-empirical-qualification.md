@@ -8,12 +8,13 @@ labels without allowing the holdout to become another tuning set.
 ## Leakage controls
 
 Every experiment is append-only and locks these facts before the first holdout
-session closes:
+session opens:
 
 - development sessions and strictly later, disjoint holdout sessions;
 - the independent eligibility definition: absolute move, cumulative-notional,
   and persistence-bar floors;
-- rank version, minimum evidence score, and optional maximum ordinal rank;
+- rank version, the exact canonical rank-contract SHA-256, minimum evidence
+  score, and optional maximum ordinal rank;
 - label method, owner precision floor, 95% or higher recall floor, and minimum
   definitive/positive sample counts.
 
@@ -35,15 +36,19 @@ bytes are idempotent.
 ## Evaluation semantics
 
 The baseline selects every first-discovered session/symbol. The candidate rule
-uses the first rankable snapshot for the locked rank version, so a later score
-cannot look backward and improve an earlier decision. It applies the prelocked
-score and ordinal gates, then reports per-session and aggregate confusion
+uses the first rankable snapshot for the locked rank version **and contract**,
+so a later score cannot look backward and improve an earlier decision. The
+input digest includes every first-rankable rank/run ID, source input digest,
+score, ordinal, and timestamp—not merely the symbols that passed selection. It
+applies the prelocked score and ordinal gates, then reports aggregate confusion
 metrics, precision, recall, direction mismatches, duplicate candidate rows, and
 precision/recall deltas from baseline.
 
-Missing samples, ambiguous labels, direction mismatches, or failure to meet the
-locked precision/recall floors are named blockers. Reports and source tables are
-append-only and idempotent for the exact evidence digest.
+Missing samples, ambiguous labels, direction mismatches, mixed/unattributed
+rank contracts, or failure to meet the locked precision/recall floors are named
+blockers. Reports and source tables are append-only and idempotent for the exact
+evidence digest. Legacy experiments without a contract digest fail closed and
+must be replaced rather than backfilled.
 
 Passing this rank experiment does not satisfy the production evidence gate by
 itself. Ten clean sessions, full-universe recall census, independent-provider
@@ -55,12 +60,16 @@ The reviewer must not inspect Perch candidates, ranks, or observer output while
 creating label manifests. Keep manifests in a restricted host directory and
 mount it read-only into the one-off tool container.
 
-Lock the experiment after development ends but before the first holdout closes:
+Lock the experiment after development ends but before the first holdout opens:
 
 ```bash
+RANK_CONTRACT=$(docker compose run --rm runner python3 -c \
+  'from tradebot.postmarket_rank import rank_contract_sha256; print(rank_contract_sha256())')
+
 docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
   python3 scripts/postmarket_empirical.py lock \
-  --experiment-id rank-v1-exp-1 --created-by owner --rank-version 1 \
+  --experiment-id rank-v2-exp-1 --created-by owner --rank-version 2 \
+  --rank-contract-sha256 "$RANK_CONTRACT" \
   --label-method multi_provider_reconciliation \
   --development-session 2026-08-27 --holdout-session 2026-08-31 \
   --eligibility-move-pct 8 --eligibility-min-notional 250000 \
@@ -76,7 +85,7 @@ docker compose run --rm \
   -v /opt/perch/scripts:/app/scripts \
   -v /opt/perch/review-manifests:/app/review-manifests:ro runner \
   python3 scripts/postmarket_empirical.py import-labels \
-  --experiment-id rank-v1-exp-1 \
+  --experiment-id rank-v2-exp-1 \
   /app/review-manifests/postmarket-2026-08-27-v1.json
 ```
 
@@ -87,17 +96,17 @@ same digest to the irreversible unblind command:
 ```bash
 docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
   python3 scripts/postmarket_empirical.py inventory \
-  --experiment-id rank-v1-exp-1
+  --experiment-id rank-v2-exp-1
 
 docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
   python3 scripts/postmarket_empirical.py unblind \
-  --experiment-id rank-v1-exp-1 --unblinded-by owner \
+  --experiment-id rank-v2-exp-1 --unblinded-by owner \
   --reason 'independent holdout review complete' \
   --expected-inventory-sha256 <digest-from-inventory>
 
 docker compose run --rm -v /opt/perch/scripts:/app/scripts runner \
   python3 scripts/postmarket_empirical.py evaluate \
-  --experiment-id rank-v1-exp-1 --split holdout
+  --experiment-id rank-v2-exp-1 --split holdout
 ```
 
 Unblinding freezes holdout labels permanently. A stale or mistyped inventory

@@ -23,7 +23,10 @@ from tradebot.postmarket_lifecycle import (
 )
 from tradebot.postmarket_rank import (
     RankEvidence,
+    ensure_rank_schema,
     latest_rank_summary,
+    rank_contract_payload,
+    rank_contract_sha256,
     run_rank_snapshot,
     score_candidate,
 )
@@ -92,6 +95,40 @@ def test_score_is_fully_decomposed_and_not_a_probability():
     )
     assert score.evidence_coverage_pct == 100
     assert score.exclusion_reasons == ()
+
+
+def test_rank_schema_migrates_legacy_runs_without_rewriting_attribution():
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE postmarket_rank_runs (
+          rank_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session TEXT NOT NULL, rank_version INTEGER NOT NULL,
+          as_of_utc TEXT NOT NULL, recorded_at_utc TEXT NOT NULL,
+          code_version TEXT, run_id TEXT NOT NULL,
+          input_digest_sha256 TEXT NOT NULL, input_candidates INTEGER NOT NULL,
+          rankable_candidates INTEGER NOT NULL, status TEXT NOT NULL,
+          weights_json TEXT NOT NULL, thresholds_json TEXT NOT NULL
+        );
+        INSERT INTO postmarket_rank_runs
+          (session,rank_version,as_of_utc,recorded_at_utc,code_version,run_id,
+           input_digest_sha256,input_candidates,rankable_candidates,status,
+           weights_json,thresholds_json)
+        VALUES
+          ('2026-08-27',1,'2026-08-27T20:10:00+00:00',
+           '2026-08-27T20:10:01+00:00','abc1234','legacy','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+           1,1,'complete','{}','{}');
+        """
+    )
+
+    ensure_rank_schema(conn)
+
+    assert "rank_contract_sha256" in {
+        row[1] for row in conn.execute("PRAGMA table_info(postmarket_rank_runs)")
+    }
+    assert conn.execute(
+        "SELECT rank_contract_sha256 FROM postmarket_rank_runs"
+    ).fetchone()[0] is None
 
 
 def test_stale_fading_temporally_bad_quote_is_unrankable_with_named_penalties():
@@ -291,6 +328,14 @@ def test_rank_snapshot_orders_deterministically_and_is_digest_idempotent(tmp_pat
     assert second.created is False
     assert second.rank_run_id == first.rank_run_id
     assert conn.execute("SELECT COUNT(*) FROM postmarket_rank_runs").fetchone()[0] == 1
+    contract, weights, thresholds = conn.execute(
+        "SELECT rank_contract_sha256,weights_json,thresholds_json "
+        "FROM postmarket_rank_runs WHERE rank_run_id=?",
+        (first.rank_run_id,),
+    ).fetchone()
+    assert contract == rank_contract_sha256()
+    assert ast.literal_eval(weights) == rank_contract_payload()["weights"]
+    assert ast.literal_eval(thresholds) == rank_contract_payload()["thresholds"]
     summary = latest_rank_summary(conn)
     assert summary["semantics"] == (
         "heuristic_evidence_ordering_not_probability"

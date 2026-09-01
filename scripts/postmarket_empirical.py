@@ -49,6 +49,7 @@ def parser() -> argparse.ArgumentParser:
     lock.add_argument("--experiment-id", required=True)
     lock.add_argument("--created-by", required=True)
     lock.add_argument("--rank-version", type=int, required=True)
+    lock.add_argument("--rank-contract-sha256", required=True)
     lock.add_argument("--label-method", required=True)
     lock.add_argument("--development-session", action="append", required=True)
     lock.add_argument("--holdout-session", action="append", required=True)
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
                 created_at=now,
                 created_by=args.created_by,
                 rank_version=args.rank_version,
+                rank_contract_sha256=args.rank_contract_sha256,
                 label_method=args.label_method,
                 development_sessions=_sessions(args.development_session),
                 holdout_sessions=_sessions(args.holdout_session),

@@ -153,6 +153,7 @@ class CalibrationSegment:
 class FrozenCalibrator:
     calibration_id: int
     experiment_id: str
+    rank_contract_sha256: str
     calibration_version: int
     fitted_at_utc: str
     code_version: str
@@ -187,6 +188,7 @@ class CalibrationReport:
     calibration_version: int
     calibration_id: int
     experiment_id: str
+    rank_contract_sha256: str
     split: str
     sessions: tuple[str, ...]
     code_version: str
@@ -345,7 +347,10 @@ def _latest_labels(
 
 
 def _first_rank_rows(
-    conn: sqlite3.Connection, sessions: tuple[str, ...], rank_version: int,
+    conn: sqlite3.Connection,
+    sessions: tuple[str, ...],
+    rank_version: int,
+    rank_contract_sha256: str,
 ) -> dict[tuple[str, str], sqlite3.Row]:
     placeholders = ",".join("?" for _ in sessions)
     previous = conn.row_factory
@@ -356,6 +361,7 @@ def _first_rank_rows(
             WITH ordered AS (
               SELECT c.session,c.symbol,c.direction,r.evidence_score,r.rank_id,
                      x.rank_run_id,x.as_of_utc,x.recorded_at_utc,
+                     x.input_digest_sha256,x.rank_contract_sha256,
                      ROW_NUMBER() OVER (
                        PARTITION BY c.session,c.symbol
                        ORDER BY x.as_of_utc,r.rank_id
@@ -364,15 +370,33 @@ def _first_rank_rows(
               JOIN postmarket_candidate_ranks r ON r.candidate_id=c.candidate_id
               JOIN postmarket_rank_runs x ON x.rank_run_id=r.rank_run_id
               WHERE c.session IN ({placeholders})
-                AND x.rank_version=? AND r.rankable=1
+                AND x.rank_version=? AND x.rank_contract_sha256=?
+                AND r.rankable=1
             )
             SELECT * FROM ordered WHERE ordinal=1 ORDER BY session,symbol
             """,
-            (*sessions, rank_version),
+            (*sessions, rank_version, rank_contract_sha256),
         ).fetchall()
     finally:
         conn.row_factory = previous
     return {(row["session"], row["symbol"]): row for row in rows}
+
+
+def _mismatched_rank_contract_runs(
+    conn: sqlite3.Connection,
+    sessions: tuple[str, ...],
+    rank_version: int,
+    rank_contract_sha256: str,
+) -> int:
+    placeholders = ",".join("?" for _ in sessions)
+    return int(conn.execute(
+        f"""
+        SELECT COUNT(*) FROM postmarket_rank_runs
+        WHERE session IN ({placeholders}) AND rank_version=?
+          AND COALESCE(rank_contract_sha256,'')<>?
+        """,
+        (*sessions, rank_version, rank_contract_sha256),
+    ).fetchone()[0])
 
 
 def _examples(
@@ -380,9 +404,10 @@ def _examples(
     experiment_id: str,
     sessions: tuple[str, ...],
     rank_version: int,
+    rank_contract_sha256: str,
 ) -> tuple[list[dict[str, Any]], int, int, str, datetime | None]:
     labels = _latest_labels(conn, experiment_id, sessions)
-    ranks = _first_rank_rows(conn, sessions, rank_version)
+    ranks = _first_rank_rows(conn, sessions, rank_version, rank_contract_sha256)
     examples: list[dict[str, Any]] = []
     ambiguous = unmatched = 0
     latest_evidence: datetime | None = None
@@ -402,6 +427,8 @@ def _examples(
             "rank": None if rank is None else {
                 "rank_run_id": int(rank["rank_run_id"]),
                 "rank_id": int(rank["rank_id"]),
+                "rank_contract_sha256": rank["rank_contract_sha256"],
+                "rank_input_digest_sha256": rank["input_digest_sha256"],
                 "as_of_utc": rank["as_of_utc"],
                 "recorded_at_utc": rank["recorded_at_utc"],
                 "direction": rank["direction"],
@@ -536,6 +563,13 @@ def fit_rank_calibrator(
     _validate_policy(policy)
     revision = _revision(code_version, "code_version")
     experiment = _experiment(conn, experiment_id)
+    contract_digest = experiment["rank_contract_sha256"]
+    if not isinstance(contract_digest, str) or not SHA256_PATTERN.fullmatch(
+        contract_digest
+    ):
+        raise ValueError(
+            "legacy experiment is missing an attributable rank contract digest"
+        )
     fitted = _utc(fitted_at, "fitted_at")
     created = _utc(datetime.fromisoformat(experiment["created_at_utc"]), "experiment created_at")
     holdout_sessions = tuple(json.loads(experiment["holdout_sessions_json"]))
@@ -545,8 +579,16 @@ def fit_rank_calibrator(
     if fitted >= first_open:
         raise ValueError("calibrator must be frozen before the first holdout session opens")
     development_sessions = tuple(json.loads(experiment["development_sessions_json"]))
+    if _mismatched_rank_contract_runs(
+        conn,
+        development_sessions,
+        int(experiment["rank_version"]),
+        contract_digest,
+    ):
+        raise ValueError("development evidence contains mismatched rank contracts")
     examples, ambiguous, unmatched, input_digest, latest_evidence = _examples(
-        conn, experiment_id, development_sessions, int(experiment["rank_version"])
+        conn, experiment_id, development_sessions, int(experiment["rank_version"]),
+        contract_digest,
     )
     if latest_evidence is None:
         raise ValueError("development calibration requires independently recorded labels")
@@ -570,6 +612,7 @@ def fit_rank_calibrator(
     model = {
         "calibration_version": CALIBRATION_VERSION,
         "experiment_id": experiment_id,
+        "rank_contract_sha256": contract_digest,
         "method": "isotonic_pav",
         "scope": "first_rankable_score_same_direction_quality",
         "development_input_sha256": input_digest,
@@ -605,9 +648,10 @@ def fit_rank_calibrator(
                 ),
             ).lastrowid)
     return FrozenCalibrator(
-        calibration_id, experiment_id, CALIBRATION_VERSION, fitted.isoformat(), revision,
-        "isotonic_pav", input_digest, policy, segments, model_sha256, len(examples),
-        positives, negatives, brier, ece, was_created,
+        calibration_id, experiment_id, contract_digest, CALIBRATION_VERSION,
+        fitted.isoformat(), revision, "isotonic_pav", input_digest, policy,
+        segments, model_sha256, len(examples), positives, negatives, brier, ece,
+        was_created,
     )
 
 
@@ -629,8 +673,17 @@ def _load_calibrator(conn: sqlite3.Connection, experiment_id: str) -> FrozenCali
     model = json.loads(model_raw)
     if _canonical(model) != model_raw:
         raise ValueError("stored calibrator model is not canonical JSON")
+    experiment = _experiment(conn, row["experiment_id"])
+    contract_digest = model.get("rank_contract_sha256")
+    if (
+        not isinstance(contract_digest, str)
+        or not SHA256_PATTERN.fullmatch(contract_digest)
+        or contract_digest != experiment["rank_contract_sha256"]
+    ):
+        raise ValueError("stored calibrator rank contract attribution mismatch")
     return FrozenCalibrator(
-        int(row["calibration_id"]), row["experiment_id"], int(row["calibration_version"]),
+        int(row["calibration_id"]), row["experiment_id"], contract_digest,
+        int(row["calibration_version"]),
         row["fitted_at_utc"], row["code_version"], row["method"],
         row["development_input_sha256"], CalibrationPolicy(**json.loads(row["policy_json"])),
         tuple(CalibrationSegment(**item) for item in model["segments"]),
@@ -728,7 +781,8 @@ def project_rank_calibration(
     try:
         run = conn.execute(
             """
-            SELECT rank_run_id,rank_version,as_of_utc,recorded_at_utc,status
+            SELECT rank_run_id,rank_version,rank_contract_sha256,as_of_utc,
+                   recorded_at_utc,status
             FROM postmarket_rank_runs WHERE rank_run_id=?
             """,
             (rank_run_id,),
@@ -747,6 +801,8 @@ def project_rank_calibration(
         raise ValueError("rank_run_id does not exist")
     if int(run["rank_version"]) <= 0 or run["status"] != "complete":
         raise ValueError("only a complete attributed rank run may be calibrated")
+    if run["rank_contract_sha256"] != calibrator.rank_contract_sha256:
+        raise ValueError("rank run contract does not match frozen calibrator")
     if not rows:
         raise ValueError("rank run has no candidate rows")
     as_of = _utc(datetime.fromisoformat(run["as_of_utc"]), "rank as_of_utc")
@@ -886,6 +942,8 @@ def evaluate_rank_calibration(
     evaluated = _utc(evaluated_at, "evaluated_at")
     calibrator = _load_calibrator(conn, experiment_id)
     experiment = _experiment(conn, experiment_id)
+    if calibrator.rank_contract_sha256 != experiment["rank_contract_sha256"]:
+        raise ValueError("calibrator and experiment rank contracts do not match")
     unblind = conn.execute(
         "SELECT unblinded_at_utc,label_inventory_sha256,holdout_labels "
         "FROM postmarket_holdout_unblinds WHERE experiment_id=?",
@@ -900,7 +958,8 @@ def evaluate_rank_calibration(
             raise ValueError("calibration evaluation cannot predate holdout unblinding")
     sessions = tuple(json.loads(experiment[f"{split}_sessions_json"]))
     examples, ambiguous, unmatched, label_rank_digest, latest_evidence = _examples(
-        conn, experiment_id, sessions, int(experiment["rank_version"])
+        conn, experiment_id, sessions, int(experiment["rank_version"]),
+        calibrator.rank_contract_sha256,
     )
     if latest_evidence is not None and evaluated < latest_evidence:
         raise ValueError("calibration evaluation cannot predate its latest input evidence")
@@ -915,6 +974,13 @@ def evaluate_rank_calibration(
     brier, ece, bins = _scores(examples, calibrator.segments)
     policy = calibrator.policy
     blockers: list[str] = []
+    if _mismatched_rank_contract_runs(
+        conn,
+        sessions,
+        int(experiment["rank_version"]),
+        calibrator.rank_contract_sha256,
+    ):
+        blockers.append("RANK_CONTRACT_MISMATCH_PRESENT")
     minimum_labels = (
         policy.min_holdout_labels if split == "holdout" else policy.min_training_labels
     )
@@ -947,14 +1013,16 @@ def evaluate_rank_calibration(
     inventory = {
         "calibration_id": calibrator.calibration_id,
         "model_sha256": calibrator.model_sha256,
+        "rank_contract_sha256": calibrator.rank_contract_sha256,
         "split": split,
         "sessions": sessions,
         "label_rank_digest": label_rank_digest,
     }
     input_digest = _digest(inventory)
     report = CalibrationReport(
-        CALIBRATION_VERSION, calibrator.calibration_id, experiment_id, split, sessions,
-        revision, calibrator.model_sha256, calibrator.development_input_sha256, policy,
+        CALIBRATION_VERSION, calibrator.calibration_id, experiment_id,
+        calibrator.rank_contract_sha256, split, sessions, revision,
+        calibrator.model_sha256, calibrator.development_input_sha256, policy,
         len(examples), positives, negatives, ambiguous, unmatched, brier, ece, bins,
         split == "holdout" and unblinded, split == "holdout" and not blockers,
         tuple(blockers), input_digest,

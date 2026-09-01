@@ -29,6 +29,7 @@ def lock_discovery_evidence_campaign(
     experiment_id: str,
     experiment_manifest_sha256: str,
     rank_version: int,
+    rank_contract_sha256: str,
     policy: dict,
 ) -> tuple[str, dict]:
     """Create one immutable campaign before its first XNYS session opens."""
@@ -65,6 +66,10 @@ def lock_discovery_evidence_campaign(
             "experiment_manifest_sha256",
         ),
         "rank_version": rank_version,
+        "rank_contract_sha256": _sha256(
+            rank_contract_sha256,
+            "rank_contract_sha256",
+        ),
         "policy": asdict(validated_policy),
     }
     raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -112,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--experiment-manifest-sha256", required=True)
     parser.add_argument("--rank-version", type=int, required=True)
+    parser.add_argument("--rank-contract-sha256", required=True)
     parser.add_argument("--min-clean-sessions", type=int, required=True)
     parser.add_argument("--min-definitive-labels", type=int, required=True)
     parser.add_argument("--min-positive-labels", type=int, required=True)
@@ -201,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         experiment_id=args.experiment_id,
         experiment_manifest_sha256=args.experiment_manifest_sha256,
         rank_version=args.rank_version,
+        rank_contract_sha256=args.rank_contract_sha256,
         policy=policy,
     )
     print(
@@ -211,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
                 "coverage_end": payload["coverage_end"],
                 "experiment_id": payload["experiment_id"],
                 "experiment_manifest_sha256": payload["experiment_manifest_sha256"],
+                "rank_version": payload["rank_version"],
+                "rank_contract_sha256": payload["rank_contract_sha256"],
                 "campaign_sha256": digest,
                 "path": str(args.output),
             },

@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS postmarket_rank_experiments (
     created_at_utc TEXT NOT NULL,
     created_by TEXT NOT NULL,
     rank_version INTEGER NOT NULL,
+    rank_contract_sha256 TEXT NOT NULL,
     label_method TEXT NOT NULL,
     development_sessions_json TEXT NOT NULL,
     holdout_sessions_json TEXT NOT NULL,
@@ -199,6 +200,7 @@ class EmpiricalReport:
     experiment_id: str
     split: str
     rank_version: int
+    rank_contract_sha256: str
     sessions: tuple[str, ...]
     eligibility_rule: EligibilityRule
     selection_rule: SelectionRule
@@ -241,6 +243,14 @@ def ensure_empirical_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE postmarket_rank_experiments ADD COLUMN eligibility_rule_json TEXT"
         )
+    if "rank_contract_sha256" not in columns:
+        # Existing experiments cannot be retroactively attributed to a rank
+        # contract without rewriting locked evidence.  Leave them NULL and
+        # require a new experiment for empirical qualification.
+        conn.execute(
+            "ALTER TABLE postmarket_rank_experiments "
+            "ADD COLUMN rank_contract_sha256 TEXT"
+        )
 
 
 def _utc(value: datetime, name: str) -> datetime:
@@ -279,6 +289,7 @@ def create_locked_experiment(
     created_at: datetime,
     created_by: str,
     rank_version: int,
+    rank_contract_sha256: str,
     label_method: str,
     development_sessions: Iterable[date],
     holdout_sessions: Iterable[date],
@@ -292,6 +303,9 @@ def create_locked_experiment(
         raise ValueError("experiment_id and created_by must be non-empty")
     if rank_version <= 0:
         raise ValueError("rank_version must be positive")
+    contract_digest = rank_contract_sha256.strip().lower()
+    if not SHA256_PATTERN.fullmatch(contract_digest):
+        raise ValueError("rank_contract_sha256 must be a lowercase SHA-256 digest")
     if label_method not in LABEL_METHODS:
         raise ValueError(f"label_method must be one of {sorted(LABEL_METHODS)}")
     dev = _sessions(development_sessions, "development_sessions")
@@ -334,17 +348,20 @@ def create_locked_experiment(
     final_development_close = datetime.combine(
         date.fromisoformat(max(dev)), time(20, 0), tzinfo=ET
     ).astimezone(timezone.utc)
-    first_holdout_close = CALENDAR.session_close(date.fromisoformat(min(holdout))).to_pydatetime()
+    first_holdout_open = CALENDAR.session_open(
+        date.fromisoformat(min(holdout))
+    ).to_pydatetime()
     if created <= final_development_close:
         raise ValueError("experiment must be locked after development sessions complete")
-    if created >= first_holdout_close:
-        raise ValueError("experiment must be locked before the first holdout session closes")
+    if created >= first_holdout_open:
+        raise ValueError("experiment must be locked before the first holdout session opens")
     payload = {
         "empirical_version": EMPIRICAL_VERSION,
         "experiment_id": experiment_id.strip(),
         "created_at_utc": created.isoformat(),
         "created_by": created_by.strip(),
         "rank_version": rank_version,
+        "rank_contract_sha256": contract_digest,
         "label_method": label_method,
         "development_sessions": dev,
         "holdout_sessions": holdout,
@@ -367,13 +384,15 @@ def create_locked_experiment(
             INSERT INTO postmarket_rank_experiments
                 (experiment_id,empirical_version,status,created_at_utc,created_by,
                  rank_version,label_method,development_sessions_json,
+                 rank_contract_sha256,
                  holdout_sessions_json,eligibility_rule_json,selection_rule_json,
                  policy_json,manifest_sha256)
-            VALUES (?,?, 'locked',?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?, 'locked',?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 payload["experiment_id"], EMPIRICAL_VERSION, payload["created_at_utc"],
                 payload["created_by"], rank_version, label_method, _canonical(dev),
+                contract_digest,
                 _canonical(holdout), _canonical(asdict(eligibility_rule)),
                 _canonical(asdict(selection_rule)),
                 _canonical(asdict(policy)), manifest_digest,
@@ -637,8 +656,14 @@ def _selected_symbols(
     conn: sqlite3.Connection,
     sessions: tuple[str, ...],
     rank_version: int,
+    rank_contract_sha256: str,
     rule: SelectionRule,
-) -> tuple[dict[tuple[str, str], str], dict[tuple[str, str], str], dict[str, tuple[int, int]]]:
+) -> tuple[
+    dict[tuple[str, str], str],
+    dict[tuple[str, str], str],
+    dict[str, tuple[int, int]],
+    tuple[dict[str, object], ...],
+]:
     placeholders = ",".join("?" for _ in sessions)
     previous = conn.row_factory
     conn.row_factory = sqlite3.Row
@@ -650,11 +675,14 @@ def _selected_symbols(
         ).fetchall()
         ranks = conn.execute(
             f"""
-            SELECT r.*,x.as_of_utc FROM postmarket_candidate_ranks r
+            SELECT r.*,x.as_of_utc,x.recorded_at_utc,x.input_digest_sha256,
+                   x.rank_contract_sha256
+            FROM postmarket_candidate_ranks r
             JOIN postmarket_rank_runs x ON x.rank_run_id=r.rank_run_id
-            WHERE r.session IN ({placeholders}) AND x.rank_version=? AND r.rankable=1
+            WHERE r.session IN ({placeholders}) AND x.rank_version=?
+              AND x.rank_contract_sha256=? AND r.rankable=1
             ORDER BY x.as_of_utc,r.rank_id
-            """, (*sessions, rank_version),
+            """, (*sessions, rank_version, rank_contract_sha256),
         ).fetchall()
     finally:
         conn.row_factory = previous
@@ -669,6 +697,7 @@ def _selected_symbols(
     chosen: dict[tuple[str, str], str] = {}
     rankable_keys: set[tuple[str, str]] = set()
     seen_candidates: set[int] = set()
+    first_rankable_evidence: list[dict[str, object]] = []
     for row in ranks:
         candidate_id = int(row["candidate_id"])
         if candidate_id in seen_candidates or candidate_id not in candidate_ids:
@@ -677,6 +706,22 @@ def _selected_symbols(
         session, symbol, direction = candidate_ids[candidate_id]
         key = (session, symbol)
         rankable_keys.add(key)
+        first_rankable_evidence.append({
+            "candidate_id": candidate_id,
+            "session": session,
+            "symbol": symbol,
+            "direction": direction,
+            "rank_run_id": int(row["rank_run_id"]),
+            "rank_id": int(row["rank_id"]),
+            "rank_contract_sha256": row["rank_contract_sha256"],
+            "rank_input_digest_sha256": row["input_digest_sha256"],
+            "as_of_utc": row["as_of_utc"],
+            "recorded_at_utc": row["recorded_at_utc"],
+            "ordinal_rank": (
+                None if row["ordinal_rank"] is None else int(row["ordinal_rank"])
+            ),
+            "evidence_score": float(row["evidence_score"]),
+        })
         if float(row["evidence_score"]) < rule.minimum_evidence_score:
             continue
         if rule.maximum_ordinal_rank is not None and (
@@ -690,7 +735,7 @@ def _selected_symbols(
         session: (len({key for key in baseline if key[0] == session}), values[1])
         for session, values in counts.items()
     }
-    return baseline, chosen, stats
+    return baseline, chosen, stats, tuple(first_rankable_evidence)
 
 
 def evaluate_rank_experiment(
@@ -707,6 +752,13 @@ def evaluate_rank_experiment(
     if split not in SPLITS:
         raise ValueError(f"split must be one of {sorted(SPLITS)}")
     experiment = _experiment(conn, experiment_id)
+    contract_digest = experiment["rank_contract_sha256"]
+    if not isinstance(contract_digest, str) or not SHA256_PATTERN.fullmatch(
+        contract_digest
+    ):
+        raise ValueError(
+            "legacy experiment is missing an attributable rank contract digest"
+        )
     unblind = conn.execute(
         "SELECT unblinded_at_utc,label_inventory_sha256,holdout_labels "
         "FROM postmarket_holdout_unblinds WHERE experiment_id=?",
@@ -740,8 +792,9 @@ def evaluate_rank_experiment(
         FROM postmarket_rank_runs x
         JOIN postmarket_candidate_ranks r ON r.rank_run_id=x.rank_run_id
         WHERE r.session IN ({placeholders}) AND x.rank_version=?
+          AND x.rank_contract_sha256=?
         """,
-        (*sessions, int(experiment["rank_version"])),
+        (*sessions, int(experiment["rank_version"]), contract_digest),
     ).fetchone()
     for value, name in zip(rank_times, ("rank as_of_utc", "rank recorded_at_utc")):
         if value is not None and evaluated < _utc(datetime.fromisoformat(value), name):
@@ -749,8 +802,8 @@ def evaluate_rank_experiment(
     eligibility_rule = EligibilityRule(**json.loads(experiment["eligibility_rule_json"]))
     rule = SelectionRule(**json.loads(experiment["selection_rule_json"]))
     policy = ExperimentPolicy(**json.loads(experiment["policy_json"]))
-    baseline_selected, rank_selected, stats = _selected_symbols(
-        conn, sessions, int(experiment["rank_version"]), rule
+    baseline_selected, rank_selected, stats, first_rankable_evidence = _selected_symbols(
+        conn, sessions, int(experiment["rank_version"]), contract_digest, rule
     )
     baseline = _classify(labels, baseline_selected)
     ranked = _classify(labels, rank_selected)
@@ -768,13 +821,25 @@ def evaluate_rank_experiment(
         ))
     inventory = {
         "manifest_sha256": experiment["manifest_sha256"],
+        "rank_contract_sha256": contract_digest,
         "split": split,
         "labels": [{key: row[key] for key in row.keys()} for row in labels],
         "baseline": sorted((*key, value) for key, value in baseline_selected.items()),
         "ranked": sorted((*key, value) for key, value in rank_selected.items()),
+        "first_rankable_evidence": first_rankable_evidence,
     }
     input_digest = _digest(inventory)
     blockers = []
+    mismatched_contract_runs = int(conn.execute(
+        f"""
+        SELECT COUNT(*) FROM postmarket_rank_runs
+        WHERE session IN ({placeholders}) AND rank_version=?
+          AND COALESCE(rank_contract_sha256,'')<>?
+        """,
+        (*sessions, int(experiment["rank_version"]), contract_digest),
+    ).fetchone()[0])
+    if mismatched_contract_runs:
+        blockers.append("RANK_CONTRACT_MISMATCH_PRESENT")
     if ranked.definitive_labels < policy.min_definitive_labels:
         blockers.append("MIN_DEFINITIVE_LABELS_NOT_MET")
     if ranked.positive_labels < policy.min_positive_labels:
@@ -788,7 +853,8 @@ def evaluate_rank_experiment(
     if ranked.recall is None or ranked.recall < policy.min_recall:
         blockers.append("RECALL_FLOOR_NOT_MET")
     report = EmpiricalReport(
-        EMPIRICAL_VERSION, experiment_id, split, int(experiment["rank_version"]), sessions,
+        EMPIRICAL_VERSION, experiment_id, split, int(experiment["rank_version"]),
+        contract_digest, sessions,
         eligibility_rule, rule, policy, baseline, ranked, tuple(per_session),
         (ranked.precision - baseline.precision if ranked.precision is not None and baseline.precision is not None else None),
         (ranked.recall - baseline.recall if ranked.recall is not None and baseline.recall is not None else None),
