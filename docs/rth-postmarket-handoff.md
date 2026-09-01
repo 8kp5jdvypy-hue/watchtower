@@ -80,3 +80,11 @@ The report is created atomically, made read-only, and never overwritten. Audit
 exceptions are explicit discovery-health failures. A clean operational report
 only proves this contract ran correctly; it does not satisfy empirical recall,
 precision, independent-provider, holdout, or customer-readiness gates.
+
+## Replay boundary
+
+`docs/rth-momentum-replay.md` defines the versioned offline regression and
+contract-holdout suite for this lane. The GPRO incident is tuning-only and
+cannot score the thresholds it motivated. Synthetic holdout success remains
+separate from the intentionally empty, independently labeled empirical
+holdout. No replay result authorizes customer delivery.

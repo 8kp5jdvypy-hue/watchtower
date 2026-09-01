@@ -44,6 +44,7 @@ DISCOVERY_HEALTH_SOURCE_PATH = REPO_ROOT / "tradebot" / "postmarket_discovery_he
 RTH_MOMENTUM_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum.py"
 RTH_AUDIT_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum_audit.py"
 RTH_CENSUS_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_missed_mover_census.py"
+RTH_REPLAY_SOURCE_PATH = REPO_ROOT / "tradebot" / "rth_momentum_replay.py"
 SESSION_CLOSE = datetime(2026, 8, 27, 20, 0, tzinfo=timezone.utc)
 NOW = SESSION_CLOSE + timedelta(minutes=10)
 UPDATED = NOW - timedelta(minutes=1)
@@ -502,6 +503,7 @@ def run_discovery_delivery_isolation(
     rth_source_path: Path = RTH_MOMENTUM_SOURCE_PATH,
     rth_audit_source_path: Path = RTH_AUDIT_SOURCE_PATH,
     rth_census_source_path: Path = RTH_CENSUS_SOURCE_PATH,
+    rth_replay_source_path: Path = RTH_REPLAY_SOURCE_PATH,
 ) -> DiscoveryControlEvidence:
     """Prove the discovery service has no alert, broker, or order dependency."""
     revision = _revision(revision, "revision")
@@ -511,12 +513,14 @@ def run_discovery_delivery_isolation(
     rth_raw = rth_source_path.read_bytes()
     rth_audit_raw = rth_audit_source_path.read_bytes()
     rth_census_raw = rth_census_source_path.read_bytes()
+    rth_replay_raw = rth_replay_source_path.read_bytes()
     compose = compose_raw.decode("utf-8")
     source = source_raw.decode("utf-8")
     store = store_raw.decode("utf-8")
     rth_source = rth_raw.decode("utf-8")
     rth_audit_source = rth_audit_raw.decode("utf-8")
     rth_census_source = rth_census_raw.decode("utf-8")
+    rth_replay_source = rth_replay_raw.decode("utf-8")
     service = _compose_service_block(compose, "postmarket-discovery")
     imports = (
         _imported_modules(source)
@@ -524,6 +528,7 @@ def run_discovery_delivery_isolation(
         | _imported_modules(rth_source)
         | _imported_modules(rth_audit_source)
         | _imported_modules(rth_census_source)
+        | _imported_modules(rth_replay_source)
     )
     delivery_imports = sorted(
         module
@@ -536,6 +541,7 @@ def run_discovery_delivery_isolation(
         if token in source or token in store or token in rth_source
         or token in rth_audit_source
         or token in rth_census_source
+        or token in rth_replay_source
     )
     checks = (
         DiscoveryControlCheck(
@@ -546,7 +552,8 @@ def run_discovery_delivery_isolation(
             f"store_sha256={hashlib.sha256(store_raw).hexdigest()}; "
             f"rth_sha256={hashlib.sha256(rth_raw).hexdigest()}; "
             f"rth_audit_sha256={hashlib.sha256(rth_audit_raw).hexdigest()}; "
-            f"rth_census_sha256={hashlib.sha256(rth_census_raw).hexdigest()}",
+            f"rth_census_sha256={hashlib.sha256(rth_census_raw).hexdigest()}; "
+            f"rth_replay_sha256={hashlib.sha256(rth_replay_raw).hexdigest()}",
         ),
         DiscoveryControlCheck(
             "discovery_modules_have_no_delivery_or_order_callsite",

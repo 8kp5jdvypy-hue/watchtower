@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "truth_set_version": "rth-final-handoff-v1",
+  "momentum_version": 1,
+  "thresholds": {
+    "move_pct": 8.0,
+    "persistence_bars": 2,
+    "minimum_cumulative_notional": 1000000.0,
+    "maximum_data_age_seconds": 420,
+    "bar_timeframe": "5Min",
+    "window_lead_minutes": 30
+  },
+  "policy": {
+    "tuning": "Named incidents such as GPRO are regression fixtures only.",
+    "contract_holdout": "Synthetic cases test behavior, not live accuracy.",
+    "empirical_holdout": "Intentionally empty pending independently labeled live cases."
+  },
+  "cases": [
+    {
+      "id": "tuning_gpro_2026_08_31",
+      "cohort": "tuning",
+      "label": "positive",
+      "symbol": "GPRO",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [-5, 0],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 0,
+      "eligible_offset_min": 0,
+      "prior_close": 1.0,
+      "bars": [
+        {"offset_min": -10, "close": 1.45, "volume": 10000000},
+        {"offset_min": -5, "close": 1.5, "volume": 10000000}
+      ],
+      "provenance": "user-supplied GPRO screenshot dated 2026-08-31; production-shaped synthetic bars",
+      "notes": "Regression fixture only. It is not production database proof and is excluded from holdout scoring."
+    },
+    {
+      "id": "holdout_upside_persistent",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "HOLDUP",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [-5, 0],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 0,
+      "eligible_offset_min": 0,
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 109.0, "volume": 10000},
+        {"offset_min": -5, "close": 110.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Persistent liquid upside move should qualify only after the second bar completes."
+    },
+    {
+      "id": "holdout_downside_persistent",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "HOLDDN",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [-5, 0],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 0,
+      "eligible_offset_min": 0,
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 91.0, "volume": 10000},
+        {"offset_min": -5, "close": 90.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Persistent liquid downside move should qualify symmetrically."
+    },
+    {
+      "id": "holdout_exact_move_boundary",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "BOUNDARY",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 0,
+      "eligible_offset_min": 0,
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 108.0, "volume": 10000},
+        {"offset_min": -5, "close": 108.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Exactly eight percent is inclusive."
+    },
+    {
+      "id": "holdout_early_close",
+      "cohort": "contract_holdout",
+      "label": "positive",
+      "symbol": "EARLY",
+      "event_date": "2026-11-27",
+      "session_open_utc": "2026-11-27T14:30:00+00:00",
+      "session_close_utc": "2026-11-27T18:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": true,
+      "expected_final_outcome": "CANDIDATE",
+      "expected_first_candidate_offset_min": 0,
+      "eligible_offset_min": 0,
+      "prior_close": 50.0,
+      "bars": [
+        {"offset_min": -10, "close": 54.0, "volume": 20000},
+        {"offset_min": -5, "close": 54.5, "volume": 20000}
+      ],
+      "provenance": "synthetic XNYS early-close contract fixture",
+      "notes": "The evaluator must use the exchange close rather than a hard-coded 4 PM close."
+    },
+    {
+      "id": "holdout_quiet",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "QUIET",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "BELOW_MOVE",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 104.0, "volume": 10000},
+        {"offset_min": -5, "close": 105.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "A liquid move below threshold must remain quiet."
+    },
+    {
+      "id": "holdout_one_bar",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "ONEBAR",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "AWAITING_PERSISTENCE",
+      "prior_close": 100.0,
+      "bars": [{"offset_min": -5, "close": 110.0, "volume": 10000}],
+      "provenance": "synthetic contract fixture",
+      "notes": "One completed threshold-crossing bar is insufficient."
+    },
+    {
+      "id": "holdout_thin",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "THIN",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "BELOW_NOTIONAL",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10},
+        {"offset_min": -5, "close": 111.0, "volume": 10}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Persistent percentage motion without minimum notional must not qualify."
+    },
+    {
+      "id": "holdout_bar_gap",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "GAPPED",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "BAR_GAP",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -15, "close": 110.0, "volume": 10000},
+        {"offset_min": -5, "close": 111.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Noncontiguous persistence evidence fails closed."
+    },
+    {
+      "id": "holdout_stale",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "STALE",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "STALE",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -25, "close": 110.0, "volume": 10000},
+        {"offset_min": -20, "close": 111.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Old completed bars cannot fabricate a current candidate."
+    },
+    {
+      "id": "holdout_zero_volume",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "ZERO",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "INVALID_DATA",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10000},
+        {"offset_min": -5, "close": 111.0, "volume": 0}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Zero-volume evidence is invalid."
+    },
+    {
+      "id": "holdout_duplicate_timestamp",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "DUPES",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "INVALID_DATA",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10000},
+        {"offset_min": -10, "close": 111.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Duplicate bar identities fail closed."
+    },
+    {
+      "id": "holdout_out_of_order",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "ORDER",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "INVALID_DATA",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -5, "close": 111.0, "volume": 10000},
+        {"offset_min": -10, "close": 110.0, "volume": 10000}
+      ],
+      "provenance": "synthetic regression fixture",
+      "notes": "Out-of-order provider data must be rejected rather than silently sorted."
+    },
+    {
+      "id": "holdout_naive_timestamp",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "NAIVE",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "INVALID_DATA",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10000},
+        {"offset_min": -5, "close": 111.0, "volume": 10000}
+      ],
+      "fault": "naive_timestamp",
+      "provenance": "synthetic contract fixture",
+      "notes": "Timezone-naive data is rejected."
+    },
+    {
+      "id": "holdout_no_prior_close",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "NOPRIOR",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "NO_PRIOR_CLOSE",
+      "prior_close": null,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10000},
+        {"offset_min": -5, "close": 111.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "A missing baseline is explicit and cannot qualify."
+    },
+    {
+      "id": "holdout_malformed_ohlc",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "BADBAR",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "INVALID_DATA",
+      "prior_close": 100.0,
+      "bars": [
+        {"offset_min": -10, "close": 110.0, "volume": 10000},
+        {"offset_min": -5, "open": 110.0, "high": 105.0, "low": 100.0, "close": 110.0, "volume": 10000}
+      ],
+      "provenance": "synthetic contract fixture",
+      "notes": "Impossible OHLC geometry fails closed."
+    },
+    {
+      "id": "holdout_no_bars",
+      "cohort": "contract_holdout",
+      "label": "negative",
+      "symbol": "NOBARS",
+      "event_date": "2026-08-31",
+      "session_open_utc": "2026-08-31T13:30:00+00:00",
+      "session_close_utc": "2026-08-31T20:00:00+00:00",
+      "evaluation_offsets_min": [0],
+      "expected_candidate": false,
+      "expected_final_outcome": "NO_COMPLETED_RTH_BAR",
+      "prior_close": 100.0,
+      "bars": [],
+      "provenance": "synthetic contract fixture",
+      "notes": "No completed data has an explicit rejection outcome."
+    }
+  ]
+}

@@ -174,6 +174,29 @@ def test_delivery_artifact_covers_rth_census_module(tmp_path):
     ].evidence
 
 
+def test_delivery_artifact_covers_rth_replay_module(tmp_path):
+    source = Path(controls_module.RTH_REPLAY_SOURCE_PATH).read_text(
+        encoding="utf-8"
+    )
+    bad = tmp_path / "rth_momentum_replay.py"
+    bad.write_text(source + "\nimport tradebot.telegram_bot\n", encoding="utf-8")
+
+    artifact = run_discovery_delivery_isolation(
+        REVISION,
+        completed_at=COMPLETED,
+        rth_replay_source_path=bad,
+    )
+
+    assert artifact.status == "failed"
+    checks = {check.name: check for check in artifact.checks}
+    assert checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].passed is False
+    assert "tradebot.telegram_bot" in checks[
+        "discovery_modules_have_no_delivery_or_order_import"
+    ].evidence
+
+
 def test_artifact_contract_and_schema_inventory_are_exact():
     artifact = _artifact(
         "discovery_kill_switch",

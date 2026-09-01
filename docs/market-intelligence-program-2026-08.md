@@ -259,8 +259,16 @@ evidence.
   outage, bounded-selection omission, or exact live rejection outcomes. Runs,
   per-symbol events, universe identity, failures, and reports are append-only.
   Because the live lane and census both use Alpaca, the report explicitly
-  remains ineligible as independent quality evidence. Five-minute replay,
-  holdout labels, and second-provider proof remain open.
+  remains ineligible as independent quality evidence. Independently labeled
+  empirical holdout cases and second-provider proof remain open.
+- Final-RTH truth replay: implemented on the stacked review branch, not merged,
+  deployed, or enabled. A versioned offline suite keeps the named GPRO incident
+  in a tuning-only cohort and scores 16 symbol-disjoint synthetic holdout cases
+  spanning upside/downside persistence, exact thresholds, early closes,
+  liquidity, freshness, gaps, missing evidence, malformed OHLC, and duplicate,
+  naive, or out-of-order timestamps. Threshold drift is explicit. The empirical
+  holdout remains intentionally empty and fails closed; synthetic success does
+  not count as live precision, recall, profitability, or customer readiness.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a
