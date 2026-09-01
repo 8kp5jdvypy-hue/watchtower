@@ -8,6 +8,12 @@ from tradebot.marketdata import MarketWideScreen
 
 
 MAX_SCREEN_AGE_SECONDS = 180
+# Alpaca's screener source timestamps are assigned on the provider side.  A
+# response can therefore arrive a fraction of a second ahead of this host's
+# wall clock even though it was produced by the request we just completed.
+# Keep the allowance narrow: completed-bar evaluation still prevents future
+# price evidence, while timestamps beyond this bound fail closed.
+MAX_SCREEN_FUTURE_SKEW_SECONDS = 1.0
 EXPECTED_ENDPOINTS = {
     "market_movers",
     "most_actives_volume",
@@ -28,12 +34,15 @@ def validate_marketwide_screen(
     data_feed: str,
     top_n: int,
     max_age_seconds: int = MAX_SCREEN_AGE_SECONDS,
+    max_future_skew_seconds: float = MAX_SCREEN_FUTURE_SKEW_SECONDS,
 ) -> None:
     """Fail closed unless every bounded-screen provenance invariant holds."""
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("market-wide screen validation time must be timezone-aware")
     if max_age_seconds <= 0:
         raise ValueError("market-wide screen maximum age must be positive")
+    if max_future_skew_seconds < 0:
+        raise ValueError("market-wide screen future-skew allowance must not be negative")
     if screen.provider != "alpaca":
         raise ValueError(f"unexpected market-wide screen provider: {screen.provider!r}")
     if screen.feed != "sip":
@@ -63,8 +72,11 @@ def validate_marketwide_screen(
         if updated.tzinfo is None or updated.utcoffset() is None:
             raise ValueError(f"market-wide screen timestamp is naive for {source}")
         age = (now - updated).total_seconds()
-        if age < 0:
-            raise ValueError(f"market-wide screen timestamp is in the future for {source}")
+        if age < -max_future_skew_seconds:
+            raise ValueError(
+                f"market-wide screen timestamp is in the future for {source}: "
+                f"{-age:.3f}s"
+            )
         if age > max_age_seconds:
             raise ValueError(
                 f"market-wide screen timestamp is stale for {source}: {age:.0f}s"
