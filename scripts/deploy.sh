@@ -123,6 +123,7 @@ APP_SERVICES=(
   postmarket-discovery
   postmarket-external-context
   postmarket-customer-dry-run
+  postmarket-operator
   api
 )
 for service in "${APP_SERVICES[@]}"; do

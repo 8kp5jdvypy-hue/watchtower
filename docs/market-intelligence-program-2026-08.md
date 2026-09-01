@@ -285,6 +285,13 @@ evidence.
   and delivered facts and refuses to translate absent evidence into a broad
   caught/missed claim. It performs no vendor call, alert, broker, or order
   action.
+- Owner visibility bridge: implemented as a separate default-off service that
+  reads the shadow ledger in SQLite read-only mode and can enqueue a fresh,
+  already-qualified candidate to one explicit administrator chat. Discovery
+  retains its no-delivery boundary. Deterministic identities, age/provenance
+  guards, bounded cycles, a health probe, and revision-bound failure/kill-
+  switch/owner-isolation exercises protect this path. It is not customer
+  routing and does not alter the empirical customer-readiness gate.
 - Public status failure-family disclosure: implemented behind the existing
   static status-page generation path. All current runner failure/suppression
   counter families are selected by stable family semantics rather than a

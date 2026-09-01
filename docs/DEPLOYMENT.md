@@ -14,7 +14,7 @@ backup.
 |---|---|
 | `Dockerfile` | One image for worker/bot/runner/postmarket shadows/api (they share code/deps; only the command differs) |
 | `requirements.txt` | Pinned direct dependencies for the image |
-| `docker-compose.yml` | worker / bot / runner / postmarket shadows / default-off customer-readiness dry run / api / caddy services with restart policies and market-aware healthchecks |
+| `docker-compose.yml` | worker / bot / runner / postmarket shadows / default-off owner-operator bridge / default-off customer-readiness dry run / api / caddy services with restart policies and market-aware healthchecks |
 | `docs/postmarket-discovery-daily-audit.md` | Immutable daily coverage, provenance, lifecycle, and conservation audit for market-wide discovery |
 | `docs/postmarket-signal-quality-preflight.md` | Read-only exact-revision, database, backup, control, credential, and licensed-reference preflight before the complete shadow stack is deployed |
 | `Caddyfile` | Reverse proxy + automatic TLS for `api.perchmarkets.com`, proxying to the `api` service |
@@ -45,6 +45,16 @@ Routine deployment must leave `POSTMARKET_CUSTOMER_DRY_RUN_ENABLED=0` until the
 evidence campaign, policy, and dry-run authorization have been separately
 reviewed. Even enabled mode records readiness decisions only and cannot contact
 customers.
+
+The `postmarket-operator` bridge is independently default-off. It is the only
+postmarket shadow component allowed to import the Telegram outbox, and it can
+enqueue only to one explicitly configured `is_admin=1` chat. It never selects
+subscribers or customers and has no broker/order path. Enabling it requires
+`POSTMARKET_OPERATOR_ALERTS_ENABLED=1`, an explicit
+`POSTMARKET_OPERATOR_CHAT_ID`, exact-revision control evidence, and the
+verification/rollback procedure in
+`docs/postmarket-owner-operator-shadow.md`. Its existence does not change the
+customer-readiness gate.
 
 Before deploying the complete signal-quality stack, run the fail-closed
 preflight in `docs/postmarket-signal-quality-preflight.md`. A safe shadow
