@@ -105,9 +105,11 @@ SIP quote spread/depth, RTH dollar liquidity, asset eligibility, completed-bar
 quality, and verified catalyst-ledger facts. Context version 2 also computes
 sector-relative movement when a locked licensed manifest row and its mapped
 ETF's completed bar were both knowable at detection, preserving the manifest
-ID, digest, and observation time. Every source carries point-in-time and
-provider/feed provenance. Missing licensed mapping, float shares, guidance,
-regulatory, and analyst inputs stay explicitly unavailable.
+ID, digest, and observation time. It refreshes append-only for each completed
+lifecycle bar and records a named technical data-confidence inventory. Every
+source carries point-in-time and provider/feed provenance. Missing licensed
+mapping, float shares, guidance, regulatory, and analyst inputs stay explicitly
+unavailable.
 See `docs/postmarket-context-tradability.md`.
 
 Point-in-time external evidence: `tradebot/postmarket_external_context.py`
@@ -143,8 +145,10 @@ stops returning it. It stores distinct completed-bar observations plus
 
 Rank implementation: `tradebot/postmarket_rank.py` writes immutable rank runs
 and per-candidate decompositions bound to exact context, transition, and
-completed-bar observation IDs. Version 1 has named 100-point evidence
-components, explicit penalties and hard exclusions, deterministic tie-breaking,
+completed-bar observation IDs. Version 2 retains version 1's named 100-point
+weights while adding hard context/lifecycle binding and independent
+context/quote freshness and technical data-confidence exclusions. It has
+explicit penalties and hard exclusions, deterministic tie-breaking,
 freshness-sensitive idempotency, and a stored non-probability semantic label.
 See `docs/postmarket-quality-rank.md`.
 

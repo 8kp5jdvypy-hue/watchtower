@@ -5,9 +5,10 @@ not confidence, probability, expected return, profitability, advice, or a
 delivery decision. The exact semantic label stored with every run is
 `heuristic_evidence_ordering_not_probability`.
 
-## Version 1 decomposition
+## Version 2 decomposition
 
-The maximum raw component score is 100:
+Version 2 retains version 1's maximum raw component score of 100; no component
+weight or outcome threshold changed:
 
 | Component | Maximum | Evidence |
 |---|---:|---|
@@ -32,10 +33,14 @@ inputs are not treated as zero-valued favorable facts.
 Ordinal rank requires all of the following:
 
 - a completed, non-degraded context row;
+- that exact context row is no more than 420 seconds old and is bound to the
+  same lifecycle observation sequence being ranked;
+- technical data-confidence status `HIGH` or `MEDIUM`;
 - lifecycle state `CONFIRMED`, `STRENGTHENING`, or `REQUALIFIED`;
 - a completed-bar lifecycle observation no more than 420 seconds old;
 - an available, active, tradable asset fact;
-- an available temporally matched SIP quote and spread no wider than 300 bps.
+- an available SIP quote no more than 420 seconds old, not from the future, and
+  a spread no wider than 300 bps.
 
 Every failure is stored in `exclusion_reasons_json`. Unrankable candidates keep
 their evidence decomposition for analysis but receive no ordinal rank.
@@ -48,11 +53,12 @@ input digest, input/rankable counts, component weights, and thresholds.
 ID, completed-bar observation sequence, named components, named penalties,
 exclusions, explanation, score, coverage, and ordinal.
 
-The digest contains each candidate's source IDs and freshness state. Identical
-evidence inside the same freshness state is idempotent. A new context,
-transition, completed bar, or fresh-to-stale boundary creates a new immutable
-snapshot. Ties resolve deterministically by evidence score, coverage, symbol,
-then candidate ID.
+The digest contains each candidate's source IDs, context-to-lifecycle binding,
+technical data-confidence status, and independent observation/context/quote
+freshness states. Identical evidence inside the same freshness states is
+idempotent. A new context, transition, completed bar, or any fresh-to-stale
+boundary creates a new immutable snapshot. Ties resolve deterministically by
+evidence score, coverage, symbol, then candidate ID.
 
 The observer heartbeat separates current rankability from historical session
 capability. It exposes the newest run, inputs, rankable and unrankable counts,

@@ -944,6 +944,7 @@ def context_backfill_heartbeat_fields(
     intraday_fetch: Callable[[list[str], date], dict] = _bars_fetch,
     daily_fetch: Callable[[list[str]], dict] = _daily_bars_fetch,
     quote_fetch: Callable[[list[str]], dict] = _quotes_fetch,
+    observation_clock: Callable[[], datetime] = _utc_now,
 ) -> dict:
     """Enrich a bounded candidate batch without affecting qualification."""
     try:
@@ -956,6 +957,7 @@ def context_backfill_heartbeat_fields(
             intraday_fetch=intraday_fetch,
             daily_fetch=daily_fetch,
             quote_fetch=quote_fetch,
+            observation_clock=observation_clock,
         )
         if result.candidates_planned:
             logger.info(
@@ -1329,7 +1331,7 @@ def main() -> int:
                 version=version,
             )
             rank_fields = rank_heartbeat_fields(
-                now,
+                _utc_now(),
                 shadow_conn,
                 version=version,
                 run_id=run_id,
@@ -1466,7 +1468,7 @@ def main() -> int:
                 version=version,
             )
             rank_fields = rank_heartbeat_fields(
-                completed_now,
+                _utc_now(),
                 shadow_conn,
                 version=version,
                 run_id=run_id,

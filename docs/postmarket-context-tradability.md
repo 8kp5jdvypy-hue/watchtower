@@ -24,13 +24,18 @@ Each candidate receives a versioned row in `postmarket_candidate_context`:
   eligibility, and overnight eligibility;
 - verified scheduled-earnings, SEC-filing, and macro ledger facts, including
   their source and ingestion timestamp; or `UNEXPLAINED` when none exists; and
-- the completed-bar quality gate that the candidate already passed.
+- the completed-bar quality gate that the candidate already passed; and
+- a named technical data-confidence inventory covering completed-bar quality,
+  SIP provenance, operational fetches, quote timing, volatility history,
+  market benchmark, RTH liquidity, and point-in-time asset evidence. Its
+  `HIGH`/`MEDIUM`/`LOW`/`UNUSABLE` status describes input integrity only—not
+  probability, expected return, or signal quality.
 
 Bars retain provider, feed, and timeframe provenance. Quotes separately retain
 their provider, SIP feed, and timestamp. A quote more than 180 seconds from the
-candidate detection is stored as `TEMPORALLY_MISMATCHED`; its spread is
-historical evidence about the fetched quote, not claimed as the signal-time
-spread.
+context snapshot boundary is stored as `TEMPORALLY_MISMATCHED`; a quote more
+than one second beyond that boundary is `FUTURE`. Neither can supply an
+actionable spread.
 
 ## Missing-data boundaries
 
@@ -48,17 +53,20 @@ used to invent a catalyst or sector.
 fetch failure; it does not mean every desired feature was available. Named
 status fields and `issues_json` carry feature completeness. Provider failures or
 missing required bar/benchmark/quote/asset responses produce append-only
-`degraded` attempts and may retry up to three times.
+`degraded` attempts and may retry up to three times for the same lifecycle bar.
 
 The service processes at most 100 pending candidates per pass. It bulk-fetches
 only candidate daily bars, candidate/SPY intraday bars, any mapped sector ETF
-named by an eligible licensed row, and candidate quotes. The latest-session
-heartbeat summary exposes missing, complete, and degraded context counts and
-per-feature availability, including sector-relative coverage.
+named by an eligible licensed row, and candidate quotes. A new completed
+lifecycle bar causes a new immutable context snapshot tied to that exact
+observation sequence; a complete row is never updated in place. The
+latest-session heartbeat summary exposes missing, complete, and degraded
+context counts and per-feature availability, including sector-relative and
+usable technical data-confidence coverage.
 
 ## Safety and future use
 
-This ledger is evidence for empirical qualification. Rank version 1 does not
+This ledger is evidence for empirical qualification. Rank version 2 does not
 consume the sector-relative or float fields; adding them to a score requires a
 locked walk-forward/holdout result and a separate reviewed version change.
 Ranking must penalize or reject unusable critical inputs and may not reinterpret

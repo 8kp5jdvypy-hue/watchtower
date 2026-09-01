@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from tradebot.detectors import Bar, atr, bar_close_ts
 from tradebot.marketdata import Quote, partition_intraday_bars
+from tradebot.postmarket_lifecycle import ensure_lifecycle_schema
 from tradebot.postmarket_reference_manifest import (
     CandidateReference,
     SECTOR_BENCHMARKS,
@@ -27,9 +28,10 @@ from tradebot.postmarket_reference_manifest import (
 
 
 CONTEXT_VERSION = 2
-MAX_CONTEXT_ATTEMPTS = 3
+MAX_CONTEXT_RETRIES_PER_OBSERVATION = 3
 MAX_CONTEXT_BATCH = 100
 MAX_QUOTE_DISTANCE_SECONDS = 180
+MAX_EVIDENCE_CLOCK_SKEW_SECONDS = 1
 BENCHMARK_SYMBOL = "SPY"
 ET = ZoneInfo("America/New_York")
 
@@ -45,6 +47,8 @@ CREATE TABLE IF NOT EXISTS postmarket_candidate_context (
     direction TEXT NOT NULL,
     candidate_detected_at TEXT NOT NULL,
     observed_at_utc TEXT NOT NULL,
+    lifecycle_observation_seq INTEGER,
+    lifecycle_evidence_bar_open_ts_utc TEXT,
     code_version TEXT,
     bar_data_feed TEXT NOT NULL,
     bar_data_provider TEXT NOT NULL,
@@ -98,6 +102,9 @@ CREATE TABLE IF NOT EXISTS postmarket_candidate_context (
     catalyst_details_json TEXT NOT NULL,
     catalyst_coverage_json TEXT NOT NULL,
     bar_quality_status TEXT NOT NULL,
+    data_confidence_status TEXT NOT NULL,
+    data_confidence_coverage_pct REAL NOT NULL,
+    data_confidence_components_json TEXT NOT NULL,
     issues_json TEXT NOT NULL,
     UNIQUE(candidate_id,context_version,attempt),
     CHECK (status IN ('complete','degraded'))
@@ -133,6 +140,8 @@ class CandidateFact:
     bar_data_feed: str
     bar_data_provider: str
     bar_timeframe: str
+    lifecycle_observation_seq: int | None = None
+    lifecycle_evidence_bar_open_ts: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +170,8 @@ class ContextEvidence:
     direction: str
     candidate_detected_at: str
     observed_at_utc: str
+    lifecycle_observation_seq: int | None
+    lifecycle_evidence_bar_open_ts_utc: str | None
     code_version: str | None
     bar_data_feed: str
     bar_data_provider: str
@@ -214,6 +225,9 @@ class ContextEvidence:
     catalyst_details: tuple[dict, ...]
     catalyst_coverage: dict[str, str]
     bar_quality_status: str
+    data_confidence_status: str
+    data_confidence_coverage_pct: float
+    data_confidence_components: dict[str, bool]
     issues: tuple[str, ...]
 
 
@@ -232,9 +246,14 @@ def ensure_context_schema(conn: sqlite3.Connection) -> None:
         row[1] for row in conn.execute("PRAGMA table_info(postmarket_candidate_context)")
     }
     additions = {
+        "lifecycle_observation_seq": "INTEGER",
+        "lifecycle_evidence_bar_open_ts_utc": "TEXT",
         "sector_reference_manifest_id": "INTEGER",
         "sector_reference_sha256": "TEXT",
         "sector_reference_observed_at_utc": "TEXT",
+        "data_confidence_status": "TEXT",
+        "data_confidence_coverage_pct": "REAL",
+        "data_confidence_components_json": "TEXT",
     }
     for column, column_type in additions.items():
         if column not in existing:
@@ -350,12 +369,13 @@ def _sector_relative_features(
 
 
 def _quote_features(
-    quote: Quote | None, *, detected_at: datetime,
+    quote: Quote | None, *, known_at: datetime,
 ) -> tuple[str, dict, tuple[str, ...]]:
     if quote is None:
         return "UNAVAILABLE", {}, ("QUOTE_UNAVAILABLE",)
     quote_ts = _aware_utc(quote.ts, "quote.ts")
-    distance = abs((quote_ts - detected_at).total_seconds())
+    signed_distance = (quote_ts - known_at).total_seconds()
+    distance = abs(signed_distance)
     common = {
         "quote_ts_utc": quote_ts.isoformat(),
         "quote_distance_seconds": distance,
@@ -364,6 +384,8 @@ def _quote_features(
         "bid_size": quote.bid_size,
         "ask_size": quote.ask_size,
     }
+    if signed_distance > MAX_EVIDENCE_CLOCK_SKEW_SECONDS:
+        return "FUTURE", common, ("QUOTE_FROM_FUTURE",)
     if not _finite_positive(quote.bid) or not _finite_positive(quote.ask):
         return "INVALID", common, ("QUOTE_INVALID",)
     if quote.bid > quote.ask:
@@ -379,6 +401,57 @@ def _quote_features(
         return "TEMPORALLY_MISMATCHED", common, ("QUOTE_TEMPORALLY_MISMATCHED",)
     issues = () if depth is not None else ("QUOTE_DEPTH_UNAVAILABLE",)
     return "AVAILABLE", common, issues
+
+
+def _data_confidence(
+    *,
+    candidate: CandidateFact,
+    observed_at: datetime,
+    volatility_status: str,
+    benchmark_status: str,
+    quote_status: str,
+    liquidity_status: str,
+    asset: AssetFact,
+    operational_errors: Sequence[str],
+) -> tuple[str, float, dict[str, bool]]:
+    """Describe technical evidence integrity, never outcome probability."""
+    asset_observed = None
+    if asset.observed_at_utc:
+        try:
+            asset_observed = _aware_utc(
+                datetime.fromisoformat(asset.observed_at_utc),
+                "asset.observed_at_utc",
+            )
+        except ValueError:
+            asset_observed = None
+    components = {
+        "completed_bar_gate": True,
+        "sip_bar_provenance": (
+            candidate.bar_data_feed == "sip"
+            and bool(candidate.bar_data_provider)
+            and candidate.bar_timeframe == "5Min"
+        ),
+        "operational_fetches": not operational_errors,
+        "quote_temporal_integrity": quote_status == "AVAILABLE",
+        "volatility_history": volatility_status == "AVAILABLE",
+        "market_benchmark": benchmark_status == "AVAILABLE",
+        "rth_liquidity": liquidity_status == "AVAILABLE",
+        "asset_point_in_time": (
+            asset.status == "AVAILABLE"
+            and asset_observed is not None
+            and asset_observed <= observed_at
+        ),
+    }
+    coverage = round(sum(components.values()) / len(components) * 100, 6)
+    if not components["sip_bar_provenance"] or not components["operational_fetches"]:
+        status = "UNUSABLE"
+    elif coverage == 100:
+        status = "HIGH"
+    elif coverage >= 75:
+        status = "MEDIUM"
+    else:
+        status = "LOW"
+    return status, coverage, components
 
 
 def _volatility_features(
@@ -444,7 +517,7 @@ def build_context_evidence(
         knowable_at=knowable_at,
     )
     quote_status, quote_values, quote_issues = _quote_features(
-        quote, detected_at=detected
+        quote, known_at=observed
     )
     snapshot = partition_intraday_bars(intraday_bars)
     session_rth = [
@@ -489,6 +562,16 @@ def build_context_evidence(
         "regulatory": "UNCONFIGURED",
         "analyst": "UNCONFIGURED",
     }
+    data_confidence = _data_confidence(
+        candidate=candidate,
+        observed_at=observed,
+        volatility_status=volatility[0],
+        benchmark_status=benchmark_status,
+        quote_status=quote_status,
+        liquidity_status=liquidity_status,
+        asset=asset,
+        operational_errors=operational_errors,
+    )
     issues = list(operational_errors)
     issues.extend(quote_issues)
     if volatility[0] != "AVAILABLE":
@@ -518,6 +601,14 @@ def build_context_evidence(
         direction=candidate.direction,
         candidate_detected_at=detected.isoformat(),
         observed_at_utc=observed.isoformat(),
+        lifecycle_observation_seq=candidate.lifecycle_observation_seq,
+        lifecycle_evidence_bar_open_ts_utc=(
+            _aware_utc(
+                candidate.lifecycle_evidence_bar_open_ts,
+                "candidate.lifecycle_evidence_bar_open_ts",
+            ).isoformat()
+            if candidate.lifecycle_evidence_bar_open_ts is not None else None
+        ),
         code_version=code_version,
         bar_data_feed=candidate.bar_data_feed,
         bar_data_provider=candidate.bar_data_provider,
@@ -575,6 +666,9 @@ def build_context_evidence(
         catalyst_details=details,
         catalyst_coverage=coverage,
         bar_quality_status="PASSED_CANDIDATE_COMPLETED_BAR_GATES",
+        data_confidence_status=data_confidence[0],
+        data_confidence_coverage_pct=data_confidence[1],
+        data_confidence_components=data_confidence[2],
         issues=unique_issues,
     )
 
@@ -585,26 +679,50 @@ def _json(value) -> str:
 
 def _candidate_rows(conn: sqlite3.Connection, limit: int) -> list[CandidateFact]:
     ensure_context_schema(conn)
+    ensure_lifecycle_schema(conn)
     rows = conn.execute(
         """
         WITH latest AS (
             SELECT candidate_id,MAX(attempt) AS attempt
             FROM postmarket_candidate_context
             WHERE context_version=? GROUP BY candidate_id
+        ), latest_observation AS (
+            SELECT candidate_id,MAX(seq) AS seq
+            FROM postmarket_candidate_lifecycle_observations
+            GROUP BY candidate_id
         )
         SELECT c.candidate_id,c.session,c.symbol,c.direction,c.first_detected_at,
                c.bar_open_ts_utc,c.rth_close,c.close,c.move_pct,
                c.cumulative_notional,c.data_feed,c.market_data_provider,
-               c.bar_timeframe,COALESCE(x.attempt,0),ctx.status
+               c.bar_timeframe,obs.seq,obs.evidence_bar_open_ts_utc
         FROM postmarket_discovery_candidates c
         LEFT JOIN latest x ON x.candidate_id=c.candidate_id
         LEFT JOIN postmarket_candidate_context ctx
           ON ctx.candidate_id=c.candidate_id AND ctx.context_version=?
          AND ctx.attempt=x.attempt
-        WHERE x.attempt IS NULL OR (ctx.status='degraded' AND x.attempt<?)
+        LEFT JOIN latest_observation lo ON lo.candidate_id=c.candidate_id
+        LEFT JOIN postmarket_candidate_lifecycle_observations obs
+          ON obs.candidate_id=c.candidate_id AND obs.seq=lo.seq
+        WHERE x.attempt IS NULL
+           OR ctx.lifecycle_observation_seq IS NOT obs.seq
+           OR (
+                ctx.status='degraded' AND (
+                    SELECT COUNT(*)
+                    FROM postmarket_candidate_context retry
+                    WHERE retry.candidate_id=c.candidate_id
+                      AND retry.context_version=?
+                      AND retry.lifecycle_observation_seq IS obs.seq
+                ) < ?
+           )
         ORDER BY c.first_detected_at,c.candidate_id LIMIT ?
         """,
-        (CONTEXT_VERSION, CONTEXT_VERSION, MAX_CONTEXT_ATTEMPTS, limit),
+        (
+            CONTEXT_VERSION,
+            CONTEXT_VERSION,
+            CONTEXT_VERSION,
+            MAX_CONTEXT_RETRIES_PER_OBSERVATION,
+            limit,
+        ),
     ).fetchall()
     return [
         CandidateFact(
@@ -621,6 +739,16 @@ def _candidate_rows(conn: sqlite3.Connection, limit: int) -> list[CandidateFact]
             bar_data_feed=row[10],
             bar_data_provider=row[11],
             bar_timeframe=row[12],
+            lifecycle_observation_seq=(
+                int(row[13]) if row[13] is not None else None
+            ),
+            lifecycle_evidence_bar_open_ts=(
+                _aware_utc(
+                    datetime.fromisoformat(row[14]),
+                    "lifecycle evidence bar",
+                )
+                if row[14] is not None else None
+            ),
         )
         for row in rows
     ]
@@ -701,12 +829,12 @@ def record_context(
 ) -> int:
     ensure_context_schema(conn)
     attempt = _next_attempt(conn, evidence.candidate_id)
-    if attempt > MAX_CONTEXT_ATTEMPTS:
-        raise ValueError("maximum context attempts reached")
     values = (
         evidence.candidate_id, CONTEXT_VERSION, attempt, evidence.session,
         evidence.symbol, evidence.direction, evidence.candidate_detected_at,
-        evidence.observed_at_utc, evidence.code_version, evidence.bar_data_feed,
+        evidence.observed_at_utc, evidence.lifecycle_observation_seq,
+        evidence.lifecycle_evidence_bar_open_ts_utc,
+        evidence.code_version, evidence.bar_data_feed,
         evidence.bar_data_provider, evidence.bar_timeframe,
         evidence.quote_data_provider, evidence.quote_data_feed, evidence.status,
         evidence.volatility_status, evidence.prior_daily_bars, evidence.atr14,
@@ -732,6 +860,8 @@ def record_context(
         evidence.catalyst_status, evidence.catalyst_category,
         _json(evidence.catalyst_sources), _json(evidence.catalyst_details),
         _json(evidence.catalyst_coverage), evidence.bar_quality_status,
+        evidence.data_confidence_status, evidence.data_confidence_coverage_pct,
+        _json(evidence.data_confidence_components),
         _json(evidence.issues),
     )
     with conn:
@@ -739,7 +869,9 @@ def record_context(
             """
             INSERT INTO postmarket_candidate_context
                 (candidate_id,context_version,attempt,session,symbol,direction,
-                 candidate_detected_at,observed_at_utc,code_version,bar_data_feed,
+                 candidate_detected_at,observed_at_utc,
+                 lifecycle_observation_seq,lifecycle_evidence_bar_open_ts_utc,
+                 code_version,bar_data_feed,
                  bar_data_provider,bar_timeframe,quote_data_provider,
                  quote_data_feed,status,
                  volatility_status,prior_daily_bars,atr14,atr_pct_of_rth_close,
@@ -757,7 +889,9 @@ def record_context(
                  tradable,options_enabled,overnight_eligible,float_status,
                  market_cap_status,halt_status,catalyst_status,catalyst_category,
                  catalyst_sources_json,catalyst_details_json,
-                 catalyst_coverage_json,bar_quality_status,issues_json)
+                 catalyst_coverage_json,bar_quality_status,
+                 data_confidence_status,data_confidence_coverage_pct,
+                 data_confidence_components_json,issues_json)
             VALUES ({})
             """.format(",".join("?" for _ in values)),
             values,
@@ -798,7 +932,8 @@ def latest_context_summary(conn: sqlite3.Connection) -> dict | None:
             SUM(sector_relative_status='AVAILABLE'),
             SUM(quote_status='AVAILABLE'),
             SUM(liquidity_status='AVAILABLE'),
-            SUM(catalyst_status='VERIFIED')
+            SUM(catalyst_status='VERIFIED'),
+            SUM(data_confidence_status IN ('HIGH','MEDIUM'))
         FROM current
         """,
         (session, CONTEXT_VERSION, CONTEXT_VERSION),
@@ -818,6 +953,7 @@ def latest_context_summary(conn: sqlite3.Connection) -> dict | None:
         "quote_available": int(row[7] or 0),
         "liquidity_available": int(row[8] or 0),
         "verified_catalysts": int(row[9] or 0),
+        "usable_data_confidence": int(row[10] or 0),
     }
 
 
@@ -831,6 +967,7 @@ def run_context_backfill(
     intraday_fetch: Callable[[list[str], date], Mapping[str, Sequence[Bar]]],
     daily_fetch: Callable[[list[str]], Mapping[str, Sequence[Bar]]],
     quote_fetch: Callable[[list[str]], Mapping[str, Quote]],
+    observation_clock: Callable[[], datetime] | None = None,
     limit: int = MAX_CONTEXT_BATCH,
 ) -> ContextBackfillResult:
     """Enrich a bounded set of candidates; provider failures stay explicit."""
@@ -886,6 +1023,12 @@ def run_context_backfill(
             intraday_errors[session] = (
                 f"INTRADAY_FETCH_{session}_{type(exc).__name__}"
             )
+    observed = (
+        _aware_utc(observation_clock(), "observation_clock")
+        if observation_clock is not None else current
+    )
+    if observed < current:
+        raise ValueError("observation clock preceded context backfill start")
     written = 0
     degraded = 0
     for candidate in candidates:
@@ -908,7 +1051,7 @@ def run_context_backfill(
             candidate_errors.append("ASSET_UNAVAILABLE")
         evidence = build_context_evidence(
             candidate,
-            observed_at=current,
+            observed_at=observed,
             code_version=code_version,
             daily_bars=daily.get(candidate.symbol, ()),
             intraday_bars=session_bars.get(candidate.symbol, ()),

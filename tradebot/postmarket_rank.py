@@ -23,8 +23,12 @@ from tradebot.postmarket_lifecycle import (
 )
 
 
-RANK_VERSION = 1
+RANK_VERSION = 2
+REQUIRED_CONTEXT_VERSION = 2
 MAX_OBSERVATION_AGE_SECONDS = 420
+MAX_CONTEXT_AGE_SECONDS = 420
+MAX_QUOTE_AGE_SECONDS = 420
+MAX_EVIDENCE_CLOCK_SKEW_SECONDS = 1
 MAX_RANKABLE_SPREAD_BPS = 300
 COMPONENT_WEIGHTS = {
     "volatility_normalized_move": 20.0,
@@ -115,11 +119,15 @@ class RankEvidence:
     direction: str
     context_id: int | None
     context_status: str | None
+    context_observed_at: datetime | None
+    context_lifecycle_observation_seq: int | None
+    data_confidence_status: str | None
     volatility_status: str | None
     move_atr_units: float | None
     market_relative_status: str | None
     directional_market_excess_pct: float | None
     quote_status: str | None
+    quote_ts: datetime | None
     spread_bps: float | None
     quoted_depth_notional: float | None
     liquidity_status: str | None
@@ -272,6 +280,18 @@ def score_candidate(evidence: RankEvidence, *, as_of: datetime) -> RankScore:
         exclusions.append("MISSING_CONTEXT")
     elif evidence.context_status != "complete":
         exclusions.append("CONTEXT_DEGRADED")
+    if evidence.context_observed_at is None:
+        exclusions.append("CONTEXT_TIMESTAMP_MISSING")
+    else:
+        context_age = (current - evidence.context_observed_at).total_seconds()
+        if context_age < -MAX_EVIDENCE_CLOCK_SKEW_SECONDS:
+            exclusions.append("CONTEXT_FROM_FUTURE")
+        elif context_age > MAX_CONTEXT_AGE_SECONDS:
+            exclusions.append("CONTEXT_STALE")
+    if evidence.data_confidence_status not in {"HIGH", "MEDIUM"}:
+        exclusions.append(
+            f"DATA_CONFIDENCE_{evidence.data_confidence_status or 'MISSING'}"
+        )
     if evidence.transition_id is None or evidence.lifecycle_state is None:
         exclusions.append("MISSING_LIFECYCLE")
     elif evidence.lifecycle_state not in RANKABLE_STATES:
@@ -288,16 +308,31 @@ def score_candidate(evidence: RankEvidence, *, as_of: datetime) -> RankScore:
         elif observation_age > MAX_OBSERVATION_AGE_SECONDS:
             exclusions.append("OBSERVATION_STALE")
             penalties["stale_observation"] = -25.0
+    if (
+        evidence.observation_seq is not None
+        and evidence.context_lifecycle_observation_seq != evidence.observation_seq
+    ):
+        exclusions.append("CONTEXT_LIFECYCLE_MISMATCH")
     if evidence.asset_status != "AVAILABLE":
         exclusions.append("ASSET_UNAVAILABLE")
     elif evidence.tradable is not True:
         exclusions.append("ASSET_NOT_TRADABLE")
     if evidence.quote_status != "AVAILABLE":
         exclusions.append(f"QUOTE_{evidence.quote_status or 'MISSING'}")
-    elif evidence.spread_bps is None:
-        exclusions.append("SPREAD_MISSING")
-    elif evidence.spread_bps > MAX_RANKABLE_SPREAD_BPS:
-        exclusions.append("SPREAD_TOO_WIDE")
+    else:
+        if evidence.quote_ts is None:
+            exclusions.append("QUOTE_TIMESTAMP_MISSING")
+        else:
+            quote_age = (current - evidence.quote_ts).total_seconds()
+            if quote_age < -MAX_EVIDENCE_CLOCK_SKEW_SECONDS:
+                exclusions.append("QUOTE_FROM_FUTURE")
+            elif quote_age > MAX_QUOTE_AGE_SECONDS:
+                exclusions.append("QUOTE_STALE")
+                penalties["stale_quote"] = -25.0
+        if evidence.spread_bps is None:
+            exclusions.append("SPREAD_MISSING")
+        elif evidence.spread_bps > MAX_RANKABLE_SPREAD_BPS:
+            exclusions.append("SPREAD_TOO_WIDE")
 
     rounded_components = {key: round(value, 6) for key, value in components.items()}
     rounded_penalties = {key: round(value, 6) for key, value in penalties.items()}
@@ -332,7 +367,8 @@ def _load_evidence(conn: sqlite3.Connection, session: str) -> tuple[RankEvidence
             """
             WITH latest_context AS (
                 SELECT candidate_id,MAX(context_id) AS context_id
-                FROM postmarket_candidate_context GROUP BY candidate_id
+                FROM postmarket_candidate_context
+                WHERE context_version=? GROUP BY candidate_id
             ), latest_transition AS (
                 SELECT candidate_id,MAX(transition_id) AS transition_id
                 FROM postmarket_candidate_lifecycle GROUP BY candidate_id
@@ -342,9 +378,13 @@ def _load_evidence(conn: sqlite3.Connection, session: str) -> tuple[RankEvidence
             )
             SELECT c.candidate_id,c.session,c.symbol,c.direction,
                    ctx.context_id,ctx.status AS context_status,
+                   ctx.observed_at_utc AS context_observed_at,
+                   ctx.lifecycle_observation_seq AS context_observation_seq,
+                   ctx.data_confidence_status,
                    ctx.volatility_status,ctx.move_atr_units,
                    ctx.market_relative_status,ctx.directional_market_excess_pct,
-                   ctx.quote_status,ctx.spread_bps,ctx.quoted_depth_notional,
+                   ctx.quote_status,ctx.quote_ts_utc,ctx.spread_bps,
+                   ctx.quoted_depth_notional,
                    ctx.liquidity_status,ctx.rth_dollar_volume,
                    COALESCE(ctx.postmarket_notional,c.cumulative_notional) AS pm_notional,
                    ctx.asset_status,ctx.tradable,ctx.catalyst_status,
@@ -360,7 +400,7 @@ def _load_evidence(conn: sqlite3.Connection, session: str) -> tuple[RankEvidence
             LEFT JOIN postmarket_candidate_lifecycle_observations obs ON obs.seq=lo.seq
             WHERE c.session=? ORDER BY c.candidate_id
             """,
-            (session,),
+            (REQUIRED_CONTEXT_VERSION, session),
         ).fetchall()
     finally:
         conn.row_factory = original
@@ -372,11 +412,24 @@ def _load_evidence(conn: sqlite3.Connection, session: str) -> tuple[RankEvidence
             direction=row["direction"],
             context_id=row["context_id"],
             context_status=row["context_status"],
+            context_observed_at=(
+                _aware_utc(
+                    datetime.fromisoformat(row["context_observed_at"]),
+                    "context_observed_at",
+                )
+                if row["context_observed_at"] else None
+            ),
+            context_lifecycle_observation_seq=row["context_observation_seq"],
+            data_confidence_status=row["data_confidence_status"],
             volatility_status=row["volatility_status"],
             move_atr_units=row["move_atr_units"],
             market_relative_status=row["market_relative_status"],
             directional_market_excess_pct=row["directional_market_excess_pct"],
             quote_status=row["quote_status"],
+            quote_ts=(
+                _aware_utc(datetime.fromisoformat(row["quote_ts_utc"]), "quote_ts")
+                if row["quote_ts_utc"] else None
+            ),
             spread_bps=row["spread_bps"],
             quoted_depth_notional=row["quoted_depth_notional"],
             liquidity_status=row["liquidity_status"],
@@ -417,14 +470,41 @@ def _freshness_state(row: RankEvidence, as_of: datetime) -> str:
     return "FRESH"
 
 
+def _timestamp_freshness_state(
+    value: datetime | None, *, as_of: datetime, max_age_seconds: int,
+) -> str:
+    if value is None:
+        return "MISSING"
+    age = (as_of - value).total_seconds()
+    if age < -MAX_EVIDENCE_CLOCK_SKEW_SECONDS:
+        return "FUTURE"
+    if age > max_age_seconds:
+        return "STALE"
+    return "FRESH"
+
+
 def _input_digest(evidence: Sequence[RankEvidence], as_of: datetime) -> str:
     identity = [
         {
             "candidate_id": row.candidate_id,
             "context_id": row.context_id,
+            "context_lifecycle_observation_seq": (
+                row.context_lifecycle_observation_seq
+            ),
+            "context_freshness_state": _timestamp_freshness_state(
+                row.context_observed_at,
+                as_of=as_of,
+                max_age_seconds=MAX_CONTEXT_AGE_SECONDS,
+            ),
+            "data_confidence_status": row.data_confidence_status,
             "transition_id": row.transition_id,
             "observation_seq": row.observation_seq,
             "freshness_state": _freshness_state(row, as_of),
+            "quote_freshness_state": _timestamp_freshness_state(
+                row.quote_ts,
+                as_of=as_of,
+                max_age_seconds=MAX_QUOTE_AGE_SECONDS,
+            ),
         }
         for row in evidence
     ]
@@ -488,7 +568,12 @@ def run_rank_snapshot(
     ) else "degraded"
     thresholds = {
         "max_observation_age_seconds": MAX_OBSERVATION_AGE_SECONDS,
+        "max_context_age_seconds": MAX_CONTEXT_AGE_SECONDS,
+        "max_quote_age_seconds": MAX_QUOTE_AGE_SECONDS,
+        "max_evidence_clock_skew_seconds": MAX_EVIDENCE_CLOCK_SKEW_SECONDS,
         "max_rankable_spread_bps": MAX_RANKABLE_SPREAD_BPS,
+        "required_context_version": REQUIRED_CONTEXT_VERSION,
+        "rankable_data_confidence_statuses": ["HIGH", "MEDIUM"],
         "score_semantics": "heuristic_evidence_ordering_not_probability",
     }
     evidence_by_id = {row.candidate_id: row for row in evidence}
