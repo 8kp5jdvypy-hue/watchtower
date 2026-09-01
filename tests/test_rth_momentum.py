@@ -204,6 +204,22 @@ def test_gap_stale_and_missing_prior_close_fail_closed():
     ).outcome == OUTCOME_NO_PRIOR_CLOSE
 
 
+def test_out_of_order_and_naive_rth_timestamps_fail_closed():
+    out_of_order = _rth_bars()
+    out_of_order[-2], out_of_order[-1] = out_of_order[-1], out_of_order[-2]
+    naive = _rth_bars()
+    naive[-1] = replace(naive[-1], ts=naive[-1].ts.replace(tzinfo=None))
+
+    assert evaluate_rth_momentum(
+        "GPRO", SESSION, out_of_order, _daily(),
+        session_open=OPEN, session_close=CLOSE, now=NOW,
+    ).outcome == "INVALID_DATA"
+    assert evaluate_rth_momentum(
+        "GPRO", SESSION, naive, _daily(),
+        session_open=OPEN, session_close=CLOSE, now=NOW,
+    ).outcome == "INVALID_DATA"
+
+
 def test_tick_conserves_rows_persists_candidate_and_deduplicates(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     first, selection, evaluations = _run(conn, scheduled=("SCHEDULED",))
