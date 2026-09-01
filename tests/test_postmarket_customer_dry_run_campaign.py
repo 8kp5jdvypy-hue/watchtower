@@ -3,9 +3,11 @@ import json
 import stat
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from tradebot import postmarket_customer_dry_run_campaign as campaign_module
 from tradebot.postmarket_customer_dry_run_campaign import (
     POLICY_FIELDS,
     lock_customer_dry_run_campaign,
@@ -20,6 +22,21 @@ LOCKED = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
 START = date(2026, 8, 31)
 END = date(2026, 9, 18)
 REVISION = "abc1234"
+
+
+@pytest.fixture(autouse=True)
+def _verified_upstream(monkeypatch):
+    monkeypatch.setattr(
+        campaign_module,
+        "verify_discovery_gate_artifact",
+        lambda evidence_set, evidence_gate: SimpleNamespace(
+            evidence_set_sha256="1" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
 
 
 def _delivery_policy():
@@ -79,6 +96,10 @@ def _campaign_policy(**changes):
 
 
 def _lock(path, **changes):
+    upstream_set = path.parent / "upstream-evidence-set.json"
+    upstream_gate = path.parent / "upstream-evidence-gate.json"
+    upstream_set.touch(exist_ok=True)
+    upstream_gate.touch(exist_ok=True)
     values = {
         "campaign_id": "customer-dry-run-campaign-1",
         "locked_at": LOCKED,
@@ -86,6 +107,8 @@ def _lock(path, **changes):
         "coverage_end": END,
         "delivery_policy_payload": _delivery_policy(),
         "owner_authorization_payload": _authorization(),
+        "upstream_discovery_evidence_set_path": upstream_set,
+        "upstream_discovery_evidence_gate_path": upstream_gate,
         "control_evidence_sha256s": (
             "3" * 64, "4" * 64, "5" * 64, "6" * 64
         ),
@@ -113,7 +136,7 @@ def test_campaign_is_prospectively_locked_read_only_and_digest_bound(tmp_path):
 def test_campaign_contract_matches_truth_schema_shape(tmp_path):
     _, payload = _lock(tmp_path / "campaign.json")
     schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_campaign_v1.schema.json"
+        "truth/postmarket_customer_dry_run_campaign_v2.schema.json"
     ).read_text())
     assert set(payload) == set(schema["required"])
     assert set(payload["policy"]) == set(
@@ -147,6 +170,36 @@ def test_authorization_must_be_exact_and_cover_complete_campaign(tmp_path):
             tmp_path / "mismatch.json",
             owner_authorization_payload=_authorization(policy_sha256="f" * 64),
         )
+
+
+def test_campaign_rejects_unverified_or_late_upstream_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        campaign_module,
+        "verify_discovery_gate_artifact",
+        lambda evidence_set, evidence_gate: SimpleNamespace(
+            evidence_set_sha256="f" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 26, 12, tzinfo=timezone.utc),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    with pytest.raises(ValueError, match="verified upstream evidence set"):
+        _lock(tmp_path / "mismatched-upstream.json")
+
+    monkeypatch.setattr(
+        campaign_module,
+        "verify_discovery_gate_artifact",
+        lambda evidence_set, evidence_gate: SimpleNamespace(
+            evidence_set_sha256="1" * 64,
+            gate_artifact_sha256="2" * 64,
+            gate_code_version=REVISION,
+            evaluated_at_utc=datetime(2026, 8, 28, 12, tzinfo=timezone.utc),
+            report=SimpleNamespace(rank_version=1),
+        ),
+    )
+    with pytest.raises(ValueError, match="predates the verified upstream"):
+        _lock(tmp_path / "late-upstream.json")
 
 
 def test_campaign_quality_floors_and_fail_closed_flags_cannot_be_weakened(tmp_path):

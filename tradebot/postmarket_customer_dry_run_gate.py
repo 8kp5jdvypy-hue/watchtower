@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_FIELDS,
     CAMPAIGN_VERSION,
     _campaign_settled_at,
     _sessions,
@@ -36,9 +37,12 @@ from tradebot.postmarket_delivery_dry_run_audit import (
     audit_dry_run_session,
     connect_readonly,
 )
+from tradebot.postmarket_discovery_gate_artifact import (
+    verify_discovery_gate_artifact,
+)
 
 
-GATE_VERSION = 1
+GATE_VERSION = 2
 VERDICT_NOT_READY = "NOT_READY"
 VERDICT_REVIEW = "ELIGIBLE_FOR_SEPARATE_CUSTOMER_DELIVERY_REVIEW"
 REQUIRED_CONTROL_KINDS = {
@@ -47,15 +51,6 @@ REQUIRED_CONTROL_KINDS = {
     "customer_dry_run_delivery_isolation",
     "customer_dry_run_rollback_runbook",
 }
-CAMPAIGN_FIELDS = {
-    "schema_version", "status", "campaign_id", "locked_at_utc",
-    "coverage_start", "coverage_end", "expected_sessions",
-    "delivery_policy_sha256", "owner_authorization_sha256",
-    "owner_authorization_expires_at_utc", "release_id", "router_version",
-    "rank_version", "control_evidence_sha256s", "policy",
-}
-
-
 @dataclass(frozen=True)
 class GateCheck:
     code: str
@@ -99,6 +94,7 @@ class CustomerDryRunGateReport:
     evidence_package_sha256: str
     metrics: CustomerDryRunGateMetrics
     checks: tuple[GateCheck, ...]
+    upstream_digests: tuple[dict[str, str], ...]
     audit_digests: tuple[dict[str, str], ...]
     control_digests: tuple[dict[str, str], ...]
 
@@ -173,6 +169,22 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         raise ValueError("campaign cannot meet its clean-session floor")
     _sha(payload["delivery_policy_sha256"], "delivery_policy_sha256")
     _sha(payload["owner_authorization_sha256"], "owner_authorization_sha256")
+    _sha(
+        payload["upstream_discovery_evidence_set_sha256"],
+        "upstream_discovery_evidence_set_sha256",
+    )
+    _sha(
+        payload["upstream_discovery_evidence_gate_sha256"],
+        "upstream_discovery_evidence_gate_sha256",
+    )
+    _revision(
+        payload["upstream_discovery_gate_code_version"],
+        "upstream_discovery_gate_code_version",
+    )
+    _aware(
+        payload["upstream_discovery_gate_evaluated_at_utc"],
+        "upstream_discovery_gate_evaluated_at_utc",
+    )
     controls = tuple(_sha(value, "control_evidence_sha256s") for value in payload["control_evidence_sha256s"])
     if len(controls) != 4 or len(set(controls)) != 4:
         raise ValueError("campaign must bind four unique controls")
@@ -246,6 +258,8 @@ def _review_rows(conn: sqlite3.Connection, campaign_sha256: str) -> list[sqlite3
 def evaluate_customer_dry_run_gate(
     *,
     campaign_path: Path | str,
+    upstream_discovery_evidence_set_path: Path | str,
+    upstream_discovery_evidence_gate_path: Path | str,
     audit_dir: Path | str,
     control_paths: tuple[Path | str, ...],
     db_path: Path | str,
@@ -258,9 +272,45 @@ def evaluate_customer_dry_run_gate(
     revision = _revision(gate_code_version, "gate_code_version")
     campaign_payload, campaign_digest = _load_json(Path(campaign_path), "campaign")
     campaign = _parse_campaign(campaign_payload, campaign_digest)
+    upstream = verify_discovery_gate_artifact(
+        upstream_discovery_evidence_set_path,
+        upstream_discovery_evidence_gate_path,
+    )
     policy = campaign["parsed_policy"]
     expected_sessions = campaign["expected_session_tuple"]
     checks: list[GateCheck] = []
+
+    upstream_exact = (
+        upstream.evidence_set_sha256
+        == campaign["upstream_discovery_evidence_set_sha256"]
+        and upstream.gate_artifact_sha256
+        == campaign["upstream_discovery_evidence_gate_sha256"]
+        and upstream.gate_code_version
+        == campaign["upstream_discovery_gate_code_version"]
+        and upstream.evaluated_at_utc.isoformat()
+        == campaign["upstream_discovery_gate_evaluated_at_utc"]
+        and upstream.report.rank_version == campaign["rank_version"]
+    )
+    checks.append(_check(
+        "UPSTREAM_DISCOVERY_EVIDENCE_EXACT",
+        {
+            "evidence_set_sha256": upstream.evidence_set_sha256,
+            "evidence_gate_sha256": upstream.gate_artifact_sha256,
+            "gate_code_version": upstream.gate_code_version,
+        },
+        {
+            "evidence_set_sha256": campaign[
+                "upstream_discovery_evidence_set_sha256"
+            ],
+            "evidence_gate_sha256": campaign[
+                "upstream_discovery_evidence_gate_sha256"
+            ],
+            "gate_code_version": campaign[
+                "upstream_discovery_gate_code_version"
+            ],
+        },
+        upstream_exact,
+    ))
 
     campaign_complete = generated > _campaign_settled_at(campaign["coverage_end_date"])
     checks.append(_check("CAMPAIGN_COMPLETE", campaign_complete, True, campaign_complete))
@@ -485,6 +535,10 @@ def evaluate_customer_dry_run_gate(
         )
         package_payload = {
             "campaign": campaign_digest,
+            "upstream": [
+                upstream.evidence_set_sha256,
+                upstream.gate_artifact_sha256,
+            ],
             "audits": sorted(item["sha256"] for item in audit_digests),
             "controls": list(control_digests),
             "eligible_routes": sorted(row["decision_fingerprint_sha256"] for row in route_rows),
@@ -508,6 +562,10 @@ def evaluate_customer_dry_run_gate(
         customer_delivery_enabled=False,
         evidence_package_sha256=package_digest,
         metrics=metrics, checks=tuple(checks),
+        upstream_digests=(
+            {"kind": "discovery_evidence_set", "sha256": upstream.evidence_set_sha256},
+            {"kind": "discovery_evidence_gate", "sha256": upstream.gate_artifact_sha256},
+        ),
         audit_digests=tuple(sorted(audit_digests, key=lambda item: item["session"])),
         control_digests=tuple(sorted(
             ({"kind": payload["kind"], "sha256": digest} for payload, digest, _ in controls),
@@ -552,6 +610,8 @@ def write_gate_report_atomic(path: Path | str, report: CustomerDryRunGateReport)
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--campaign", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-set", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-gate", required=True, type=Path)
     parser.add_argument("--audit-dir", required=True, type=Path)
     parser.add_argument("--control", required=True, action="append", type=Path)
     parser.add_argument("--db", required=True, type=Path)
@@ -559,7 +619,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     report = evaluate_customer_dry_run_gate(
-        campaign_path=args.campaign, audit_dir=args.audit_dir,
+        campaign_path=args.campaign,
+        upstream_discovery_evidence_set_path=args.upstream_discovery_evidence_set,
+        upstream_discovery_evidence_gate_path=args.upstream_discovery_evidence_gate,
+        audit_dir=args.audit_dir,
         control_paths=tuple(args.control), db_path=args.db,
         now=datetime.now(timezone.utc), gate_code_version=args.gate_code_version,
     )

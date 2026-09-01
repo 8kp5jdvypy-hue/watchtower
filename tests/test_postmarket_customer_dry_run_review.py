@@ -97,7 +97,7 @@ def _assessment(**changes):
 
 def _campaign():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "locked",
         "campaign_id": "campaign-1",
         "locked_at_utc": "2026-08-27T12:00:00+00:00",
@@ -111,6 +111,10 @@ def _campaign():
         "router_version": 1,
         "rank_version": 1,
         "control_evidence_sha256s": [str(index) * 64 for index in range(1, 5)],
+        "upstream_discovery_evidence_set_sha256": "5" * 64,
+        "upstream_discovery_evidence_gate_sha256": "6" * 64,
+        "upstream_discovery_gate_code_version": "abc1234",
+        "upstream_discovery_gate_evaluated_at_utc": "2026-08-26T12:00:00+00:00",
         "policy": {
             "min_clean_sessions": 10,
             "min_eligible_decisions": 20,

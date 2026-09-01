@@ -36,6 +36,13 @@ from scripts.postmarket_signal_quality_preflight import (
     _run_git,
 )
 from scripts.verify_backup import _parse_manifest, validate_artifact_archive
+from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_FIELDS,
+    CAMPAIGN_VERSION,
+)
+from tradebot.postmarket_discovery_gate_artifact import (
+    verify_discovery_gate_artifact,
+)
 
 
 PREFLIGHT_VERSION = 1
@@ -55,13 +62,6 @@ REQUIRED_CONTROL_KINDS = {
     "customer_dry_run_kill_switch",
     "customer_dry_run_delivery_isolation",
     "customer_dry_run_rollback_runbook",
-}
-CAMPAIGN_FIELDS = {
-    "schema_version", "status", "campaign_id", "locked_at_utc",
-    "coverage_start", "coverage_end", "expected_sessions",
-    "delivery_policy_sha256", "owner_authorization_sha256",
-    "owner_authorization_expires_at_utc", "release_id", "router_version",
-    "rank_version", "control_evidence_sha256s", "policy",
 }
 CAMPAIGN_POLICY_FIELDS = {
     "min_clean_sessions", "min_eligible_decisions",
@@ -299,7 +299,7 @@ def _parse_authorization(payload: dict[str, object]) -> dict[str, object]:
 def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object]:
     if set(payload) != CAMPAIGN_FIELDS:
         raise ValueError("campaign fields are not exact")
-    if payload["schema_version"] != 1 or payload["status"] != "locked":
+    if payload["schema_version"] != CAMPAIGN_VERSION or payload["status"] != "locked":
         raise ValueError("campaign is not a locked supported contract")
     if not isinstance(payload["campaign_id"], str) or not payload["campaign_id"].strip():
         raise ValueError("campaign_id must be non-empty")
@@ -377,6 +377,22 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
     if len(controls) != 4 or len(set(controls)) != 4:
         raise ValueError("campaign must bind four unique controls")
     _aware(payload["locked_at_utc"], "locked_at_utc")
+    _digest(
+        payload["upstream_discovery_evidence_set_sha256"],
+        "upstream_discovery_evidence_set_sha256",
+    )
+    _digest(
+        payload["upstream_discovery_evidence_gate_sha256"],
+        "upstream_discovery_evidence_gate_sha256",
+    )
+    _revision(
+        payload["upstream_discovery_gate_code_version"],
+        "upstream_discovery_gate_code_version",
+    )
+    upstream_evaluated = _aware(
+        payload["upstream_discovery_gate_evaluated_at_utc"],
+        "upstream_discovery_gate_evaluated_at_utc",
+    )
     expires = _aware(
         payload["owner_authorization_expires_at_utc"],
         "owner_authorization_expires_at_utc",
@@ -389,6 +405,7 @@ def _parse_campaign(payload: dict[str, object], digest: str) -> dict[str, object
         "allowed_runtime_router_revisions": tuple(router_revisions),
         "control_evidence_sha256s": controls,
         "authorization_expires_at": expires,
+        "upstream_discovery_gate_evaluated_at": upstream_evaluated,
         "campaign_sha256": digest,
     }
 
@@ -448,6 +465,8 @@ def evaluate_customer_dry_run_preflight(
     env_file: Path,
     compose_file: Path,
     campaign_path: Path,
+    upstream_discovery_evidence_set_path: Path,
+    upstream_discovery_evidence_gate_path: Path,
     delivery_policy_path: Path,
     owner_authorization_path: Path,
     control_paths: tuple[Path, ...],
@@ -515,6 +534,10 @@ def evaluate_customer_dry_run_preflight(
     try:
         payload, campaign_digest = _load_json(campaign_path, "campaign")
         campaign = _parse_campaign(payload, campaign_digest)
+        upstream = verify_discovery_gate_artifact(
+            upstream_discovery_evidence_set_path,
+            upstream_discovery_evidence_gate_path,
+        )
         policy_payload, _ = _load_json(delivery_policy_path, "delivery policy")
         authorization_payload, _ = _load_json(
             owner_authorization_path, "owner authorization"
@@ -538,6 +561,23 @@ def evaluate_customer_dry_run_preflight(
             and authorization["evidence_gate_sha256"]
             == policy["evidence_gate_sha256"]
         )
+        upstream_exact = (
+            upstream.evidence_set_sha256
+            == campaign["upstream_discovery_evidence_set_sha256"]
+            == policy["evidence_set_sha256"]
+            and upstream.gate_artifact_sha256
+            == campaign["upstream_discovery_evidence_gate_sha256"]
+            == policy["evidence_gate_sha256"]
+            and upstream.gate_code_version
+            == campaign["upstream_discovery_gate_code_version"]
+            and upstream.gate_code_version in policy["allowed_evidence_revisions"]
+            and upstream.report.rank_version
+            == campaign["rank_version"]
+            == policy["rank_version"]
+            and upstream.evaluated_at_utc
+            == campaign["upstream_discovery_gate_evaluated_at"]
+            and upstream.evaluated_at_utc <= authorization["approved_at"]
+        )
         first_session = date.fromisoformat(campaign["expected_session_tuple"][0])
         first_open = datetime.combine(
             first_session, time(9, 30), tzinfo=ET
@@ -551,6 +591,11 @@ def evaluate_customer_dry_run_preflight(
                    f"campaign_id={campaign['campaign_id']} sha256={campaign_digest}"),
             _check("contracts_match_campaign", contract_match,
                    f"policy_match={policy['sha256'] == campaign['delivery_policy_sha256']} authorization_match={authorization['sha256'] == campaign['owner_authorization_sha256']}"),
+            _check(
+                "upstream_discovery_evidence_exact",
+                upstream_exact,
+                "exact evidence set and reproducible passing gate artifact bound to policy, authorization, and campaign",
+            ),
             _check("campaign_revision_exact", revision_match,
                    f"campaign_revision={revision} actual={actual_revision}"),
             _check("campaign_not_started", timing_safe,
@@ -626,6 +671,14 @@ def evaluate_customer_dry_run_preflight(
             "postmarket_customer_delivery_authorization.json": owner_authorization_path,
             "postmarket_customer_dry_run_campaign.json": campaign_path,
         }
+        upstream_expected = {
+            hashlib.sha256(
+                upstream_discovery_evidence_set_path.read_bytes()
+            ).hexdigest(),
+            hashlib.sha256(
+                upstream_discovery_evidence_gate_path.read_bytes()
+            ).hexdigest(),
+        }
         archived_digests: set[str] = set()
         contract_matches = True
         with tarfile.open(archive_path, "r:gz") as archive:
@@ -646,11 +699,17 @@ def evaluate_customer_dry_run_preflight(
             hashlib.sha256(path.read_bytes()).hexdigest() in archived_digests
             for path in control_paths
         )
-        backup_bound = contract_inventory and contract_matches and control_inventory
+        upstream_inventory = upstream_expected <= archived_digests
+        backup_bound = (
+            contract_inventory
+            and contract_matches
+            and control_inventory
+            and upstream_inventory
+        )
         checks.append(_check(
-            "backup_binds_campaign_contracts_and_controls",
+            "backup_binds_campaign_contracts_controls_and_upstream",
             backup_bound,
-            f"contracts_present={contract_inventory} contracts_match={contract_matches} controls_present={control_inventory}",
+            f"contracts_present={contract_inventory} contracts_match={contract_matches} controls_present={control_inventory} upstream_present={upstream_inventory}",
         ))
     except (
         OSError, ValueError, StopIteration, tarfile.TarError, tarfile.ExtractError
@@ -713,6 +772,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env-file", required=True, type=Path)
     parser.add_argument("--compose-file", required=True, type=Path)
     parser.add_argument("--campaign", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-set", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-gate", required=True, type=Path)
     parser.add_argument("--delivery-policy", required=True, type=Path)
     parser.add_argument("--owner-authorization", required=True, type=Path)
     parser.add_argument("--control", required=True, action="append", type=Path)
@@ -724,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=args.repo_root, expected_revision=args.expected_revision,
         env_file=args.env_file, compose_file=args.compose_file,
         campaign_path=args.campaign, delivery_policy_path=args.delivery_policy,
+        upstream_discovery_evidence_set_path=args.upstream_discovery_evidence_set,
+        upstream_discovery_evidence_gate_path=args.upstream_discovery_evidence_gate,
         owner_authorization_path=args.owner_authorization,
         control_paths=tuple(args.control), database_path=args.database,
         backup_manifest=args.backup_manifest, now=datetime.now(timezone.utc),

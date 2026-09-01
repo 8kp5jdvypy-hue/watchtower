@@ -16,6 +16,10 @@ from tradebot.postmarket_discovery_evidence_campaign import (
 from tradebot.postmarket_discovery_evidence_set import (
     seal_discovery_evidence_set,
 )
+from tradebot.postmarket_discovery_gate_artifact import (
+    verify_discovery_gate_artifact,
+    write_discovery_gate_artifact,
+)
 from tradebot.postmarket_discovery_evidence_gate import (
     CALENDAR,
     POLICY_FIELDS,
@@ -866,6 +870,64 @@ def test_calibration_model_must_be_frozen_before_holdout_opens(tmp_path):
         evaluate_discovery_evidence_gate(
             load_discovery_evidence_manifest(manifest_path)
         )
+
+
+def test_passing_gate_artifact_is_immutable_and_independently_reproducible(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+    output = tmp_path / "discovery-gate.json"
+    digest = write_discovery_gate_artifact(
+        manifest_path,
+        output,
+        evaluated_at=datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+        gate_code_version="8" * 7,
+    )
+    verified = verify_discovery_gate_artifact(manifest_path, output)
+
+    assert digest == hashlib.sha256(output.read_bytes()).hexdigest()
+    assert verified.gate_artifact_sha256 == digest
+    assert verified.evidence_set_sha256 == hashlib.sha256(
+        manifest_path.read_bytes()
+    ).hexdigest()
+    assert verified.gate_code_version == "8" * 7
+    assert verified.report.verdict == VERDICT_OWNER_REVIEW
+    assert stat.S_IMODE(output.stat().st_mode) == 0o444
+    schema = json.loads(Path(
+        "truth/postmarket_discovery_gate_artifact_v1.schema.json"
+    ).read_text())
+    assert set(json.loads(output.read_text())) == set(schema["required"])
+    with pytest.raises(FileExistsError):
+        write_discovery_gate_artifact(
+            manifest_path,
+            output,
+            evaluated_at=datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+            gate_code_version="8" * 7,
+        )
+
+
+def test_gate_artifact_rejects_backdating_and_embedded_report_tampering(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+    with pytest.raises(ValueError, match="cannot predate"):
+        write_discovery_gate_artifact(
+            manifest_path,
+            tmp_path / "backdated.json",
+            evaluated_at=datetime(2026, 8, 31, 17, tzinfo=timezone.utc),
+            gate_code_version="8" * 7,
+        )
+    output = tmp_path / "gate.json"
+    write_discovery_gate_artifact(
+        manifest_path,
+        output,
+        evaluated_at=datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+        gate_code_version="8" * 7,
+    )
+    output.chmod(0o644)
+    payload = json.loads(output.read_text())
+    payload["report"]["verdict"] = VERDICT_NOT_READY
+    canonical = json.dumps(payload["report"], sort_keys=True, separators=(",", ":"))
+    payload["report_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    output.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(ValueError, match="not reproducible"):
+        verify_discovery_gate_artifact(manifest_path, output)
 
 
 def test_calibration_wilson_interval_is_independently_recomputed(tmp_path):

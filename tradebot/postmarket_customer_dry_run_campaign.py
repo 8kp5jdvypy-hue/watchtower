@@ -26,15 +26,29 @@ from tradebot.postmarket_delivery_readiness import (
     parse_delivery_policy,
     parse_owner_authorization,
 )
+from tradebot.postmarket_discovery_gate_artifact import (
+    verify_discovery_gate_artifact,
+)
 
 
-CAMPAIGN_VERSION = 1
+CAMPAIGN_VERSION = 2
 ET = ZoneInfo("America/New_York")
 CALENDAR = ecals.get_calendar("XNYS")
 FINAL_BAR_GRACE = timedelta(minutes=5)
 AUDIT_SETTLE_GRACE = timedelta(seconds=90)
 REVISION_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+CAMPAIGN_FIELDS = frozenset({
+    "schema_version", "status", "campaign_id", "locked_at_utc",
+    "coverage_start", "coverage_end", "expected_sessions",
+    "delivery_policy_sha256", "owner_authorization_sha256",
+    "owner_authorization_expires_at_utc", "release_id", "router_version",
+    "rank_version", "control_evidence_sha256s", "policy",
+    "upstream_discovery_evidence_set_sha256",
+    "upstream_discovery_evidence_gate_sha256",
+    "upstream_discovery_gate_code_version",
+    "upstream_discovery_gate_evaluated_at_utc",
+})
 
 
 @dataclass(frozen=True)
@@ -218,6 +232,8 @@ def lock_customer_dry_run_campaign(
     coverage_end: date,
     delivery_policy_payload: Mapping[str, object],
     owner_authorization_payload: Mapping[str, object],
+    upstream_discovery_evidence_set_path: Path | str,
+    upstream_discovery_evidence_gate_path: Path | str,
     control_evidence_sha256s: tuple[str, ...],
     policy: Mapping[str, object],
 ) -> tuple[str, dict[str, object]]:
@@ -244,6 +260,10 @@ def lock_customer_dry_run_campaign(
 
     delivery_policy = parse_delivery_policy(delivery_policy_payload)
     authorization = parse_owner_authorization(owner_authorization_payload)
+    upstream = verify_discovery_gate_artifact(
+        upstream_discovery_evidence_set_path,
+        upstream_discovery_evidence_gate_path,
+    )
     if authorization.acknowledgement != ACKNOWLEDGEMENT:
         raise ValueError("owner authorization acknowledgement is not exact")
     if authorization.policy_sha256 != delivery_policy.sha256:
@@ -254,6 +274,16 @@ def lock_customer_dry_run_campaign(
         raise ValueError("owner authorization evidence gate does not match policy")
     if authorization.router_revision != delivery_policy.router_revision:
         raise ValueError("owner authorization router revision does not match policy")
+    if upstream.evidence_set_sha256 != delivery_policy.evidence_set_sha256:
+        raise ValueError("delivery policy does not bind the verified upstream evidence set")
+    if upstream.gate_artifact_sha256 != delivery_policy.evidence_gate_sha256:
+        raise ValueError("delivery policy does not bind the verified upstream evidence gate")
+    if upstream.report.rank_version != delivery_policy.rank_version:
+        raise ValueError("upstream discovery rank version does not match delivery policy")
+    if upstream.gate_code_version not in delivery_policy.allowed_evidence_revisions:
+        raise ValueError("upstream discovery gate revision is not allowed by delivery policy")
+    if upstream.evaluated_at_utc > authorization.approved_at:
+        raise ValueError("owner authorization predates the verified upstream evidence gate")
     if authorization.approved_at > locked:
         raise ValueError("owner authorization was approved after campaign lock")
     if authorization.expires_at <= _campaign_settled_at(sessions[-1]):
@@ -286,6 +316,10 @@ def lock_customer_dry_run_campaign(
         "router_version": 1,
         "rank_version": delivery_policy.rank_version,
         "control_evidence_sha256s": list(controls),
+        "upstream_discovery_evidence_set_sha256": upstream.evidence_set_sha256,
+        "upstream_discovery_evidence_gate_sha256": upstream.gate_artifact_sha256,
+        "upstream_discovery_gate_code_version": upstream.gate_code_version,
+        "upstream_discovery_gate_evaluated_at_utc": upstream.evaluated_at_utc.isoformat(),
         "policy": asdict(campaign_policy),
     }
     raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -323,6 +357,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coverage-end", required=True, type=date.fromisoformat)
     parser.add_argument("--delivery-policy", required=True, type=Path)
     parser.add_argument("--owner-authorization", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-set", required=True, type=Path)
+    parser.add_argument("--upstream-discovery-evidence-gate", required=True, type=Path)
     parser.add_argument("--control-evidence-sha256", action="append", required=True)
     parser.add_argument("--min-clean-sessions", type=int, default=10)
     parser.add_argument("--min-eligible-decisions", type=int, default=20)
@@ -364,6 +400,8 @@ def main(argv: list[str] | None = None) -> int:
         owner_authorization_payload=_read_json_contract(
             args.owner_authorization, "owner authorization"
         ),
+        upstream_discovery_evidence_set_path=args.upstream_discovery_evidence_set,
+        upstream_discovery_evidence_gate_path=args.upstream_discovery_evidence_gate,
         control_evidence_sha256s=tuple(args.control_evidence_sha256),
         policy=requirements,
     )

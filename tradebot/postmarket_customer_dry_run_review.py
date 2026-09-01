@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Mapping
 
 from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_FIELDS,
     CAMPAIGN_VERSION,
     parse_campaign_policy,
 )
@@ -141,14 +142,7 @@ def _read_json_file(path: Path, context: str) -> tuple[dict[str, object], bytes]
 def _campaign_scope(
     campaign: Mapping[str, object], campaign_sha256: str,
 ) -> tuple[tuple[str, ...], str, str, str]:
-    required = {
-        "schema_version", "status", "campaign_id", "locked_at_utc",
-        "coverage_start", "coverage_end", "expected_sessions",
-        "delivery_policy_sha256", "owner_authorization_sha256",
-        "owner_authorization_expires_at_utc", "release_id", "router_version",
-        "rank_version", "control_evidence_sha256s", "policy",
-    }
-    if set(campaign) != required or campaign["schema_version"] != CAMPAIGN_VERSION:
+    if set(campaign) != CAMPAIGN_FIELDS or campaign["schema_version"] != CAMPAIGN_VERSION:
         raise ValueError("campaign contract is not exact")
     if campaign["status"] != "locked":
         raise ValueError("campaign must be locked")
