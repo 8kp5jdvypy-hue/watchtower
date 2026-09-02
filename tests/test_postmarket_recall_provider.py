@@ -27,12 +27,46 @@ from tradebot.vendors.historical_reference import (
     HistoricalReferenceConfigurationError,
     HistoricalReferenceSource,
 )
+from tradebot.vendors.historical_reference_qualification import (
+    REFERENCE_PROVIDER_QUALIFICATION_ENV,
+    REQUIRED_QUALIFICATION_PROOFS,
+)
 
 
 SESSION = date(2026, 8, 27)
 CLOSE = datetime(2026, 8, 27, 20, tzinfo=timezone.utc)
 END = datetime(2026, 8, 28, 0, tzinfo=timezone.utc)
 PROOF_NOW = datetime(2026, 8, 28, 17, 6, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _qualified_default_provider(monkeypatch, tmp_path):
+    manifest = tmp_path / "provider-qualification.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "qualified",
+                "provider": "massive",
+                "dataset": "us_stocks_sip/minute_aggs_v1",
+                "approved_at_utc": "2026-08-28T01:00:00+00:00",
+                "approved_by": "operator",
+                "license_reference": "agreement-2026-001",
+                "proofs": [
+                    {
+                        "kind": kind,
+                        "reference": f"archive/{kind}.pdf",
+                        "sha256": hashlib.sha256(kind.encode()).hexdigest(),
+                    }
+                    for kind in sorted(REQUIRED_QUALIFICATION_PROOFS)
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(REFERENCE_PROVIDER_QUALIFICATION_ENV, str(manifest))
 
 
 def _bar(symbol, ts, close, volume=10_000):
@@ -478,3 +512,42 @@ def test_service_heartbeat_reports_unconfigured_without_fetching(monkeypatch, tm
         "provider_proof_status": "unconfigured",
         "latest_provider_proof": None,
     }
+
+
+def test_service_heartbeat_reports_unqualified_without_fetching_or_schema(
+    monkeypatch, tmp_path,
+):
+    conn = connect(tmp_path / "shadow.db")
+    _seed(conn)
+    monkeypatch.setattr(discovery_shadow, "AUDIT_DIR", tmp_path / "audits")
+    reference = HistoricalReferenceSource(
+        provider="massive",
+        feed="sip",
+        dataset="us_stocks_sip/minute_aggs_v1",
+        capabilities=HistoricalReferenceCapabilities(
+            completed_intraday_bars=True,
+            full_universe_snapshot=True,
+            postmarket_coverage=True,
+            immutable_object_provenance=True,
+            production_qualified=False,
+        ),
+        configured=lambda: True,
+        expected_available_at=lambda session: PROOF_NOW,
+        object_key=lambda session: "us_stocks_sip/minute_aggs_v1/2026/08/2026-08-27.csv.gz",
+        fetch=lambda *args: pytest.fail("must not fetch"),
+    )
+    fields = discovery_shadow.provider_proof_heartbeat_fields(
+        PROOF_NOW,
+        conn,
+        version="proof-code",
+        provider_configured=lambda: True,
+        independent_source=reference,
+        independent_fetch=lambda *args: pytest.fail("must not fetch"),
+    )
+    assert fields["provider_proof_status"] == "unqualified"
+    assert "production_qualified" in fields["provider_proof_error"]
+    assert fields["latest_provider_proof"] is None
+    assert conn.execute(
+        """SELECT COUNT(*) FROM sqlite_master
+           WHERE type='table' AND name='postmarket_recall_provider_runs'"""
+    ).fetchone()[0] == 0

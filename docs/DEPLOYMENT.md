@@ -131,6 +131,11 @@ Optional shadow-evidence credentials:
   backward compatibility. Known future values (`tiingo`, `databento`) fail
   closed until their adapters are implemented and reviewed; selection alone
   can never make the evidence campaign ready.
+- `POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST` — relative path to the strict
+  operator-reviewed provider qualification under `data/postmarket_evidence/`.
+  The adapter remains `production_qualified=false` until the manifest proves
+  every RFQ acceptance row and matches the selected provider and exact dataset.
+  Credentials, a provider name, or implemented code never substitute for it.
 - `MASSIVE_API_KEY` — candidate-level Massive REST price/reference context.
 - `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` — dedicated
   Massive flat-file credentials for the next-day full-universe provider proof.
@@ -138,14 +143,15 @@ Optional shadow-evidence credentials:
   absent, the proof reports `unconfigured`; it does not silently reuse Alpaca.
 
 The signal-quality preflight evaluates only the credential group belonging to
-the selected provider, plus separate adapter-implemented and recall-proof
-capability checks. The latter requires completed intraday bars, full-universe
-snapshot delivery, postmarket coverage, immutable object provenance, and
-production qualification. This avoids claiming that Massive is the only
-possible vendor without weakening the gate: an unknown provider, an unfinished
-or EOD-only adapter, a beta per-symbol source, or missing selected-provider
-credentials keeps `evidence_campaign_ready=false` while leaving an otherwise
-safe shadow deployment unaffected.
+the selected provider, plus separate adapter-implemented, qualification-
+manifest, and recall-proof capability checks. The latter requires completed
+intraday bars, full-universe snapshot delivery, postmarket coverage, immutable
+object provenance, and manifest-backed production qualification. This avoids
+claiming that Massive is the only possible vendor without weakening the gate:
+an unknown provider, an unfinished or EOD-only adapter, a beta per-symbol
+source, missing selected-provider credentials, or a missing/incomplete
+qualification manifest keeps `evidence_campaign_ready=false` while leaving an
+otherwise safe shadow deployment unaffected.
 
 Two more, needed once the web dashboard's magic-link login goes live
 (`tradebot/email_sender.py`) — until both are set, magic links are

@@ -1,6 +1,10 @@
 # Independent recall-provider RFQ — September 2026
 
-**Status:** Draft only; not sent and not purchasing authority
+**Status:** Sent 2026-09-02; not purchasing authority
+
+**Outbound evidence:** Massive Resend message
+`1dec35f7-8a10-422a-b90f-9169baf61cda`; Databento Resend message
+`7487c014-ef1c-420e-8ef1-38103324b802`
 
 **Owner/approver:** Perch Markets operator
 
@@ -94,6 +98,18 @@ archived the quote or agreement and recorded each item below.
 | Correction semantics | Written version/replacement schedule and replay behavior | Pending |
 | Production qualification | Adapter test, bounded production dry run, and operator sign-off | Pending |
 | Startup price | Written monthly/evaluation quote and cancellation terms | Pending |
+
+The checklist is enforced by an immutable qualification manifest. Adapter
+implementation and credentials alone never set `production_qualified=true`.
+After every row above is archived and reviewed, place a strict version-1 JSON
+manifest under `data/postmarket_evidence/provider-qualification/` and set
+`POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST` to that relative path. The
+manifest contains the selected provider and exact adapter dataset, approval
+identity/time, license reference, and exactly one `{kind,reference,sha256}`
+proof for each checklist row. The parser rejects missing/duplicate proof kinds,
+future approval times, foreign providers/datasets, malformed digests, and
+symlinks. Its SHA-256 is reported by preflight and the normal evidence backup
+archives the source file off-box.
 
 ## Fail-closed rollout
 

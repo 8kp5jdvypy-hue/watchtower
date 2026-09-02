@@ -63,6 +63,12 @@ from tradebot.postmarket_recall_provider import (
     run_provider_proof,
     write_provider_proof_report,
 )
+from tradebot.vendors.historical_reference import (
+    HistoricalReferenceConfigurationError,
+    HistoricalReferenceSource,
+    require_recall_proof_capabilities,
+    source as historical_reference_source,
+)
 from tradebot.postmarket_shadow import idle_sleep_seconds, postmarket_is_active, postmarket_window
 from tradebot.rth_momentum import (
     FULL_UNIVERSE_RTH_SWEEP_CYCLE_TICKS,
@@ -910,15 +916,35 @@ def provider_proof_heartbeat_fields(
     primary_fetch: Callable[[list[str], datetime, datetime], dict] = _census_bars_fetch,
     independent_fetch: Callable = _provider_flatfile_fetch,
     provider_configured: Callable[[], bool] = _provider_flatfile_configured,
+    independent_source: HistoricalReferenceSource | None = None,
 ) -> dict:
     """Run at most one next-day full-universe provider proof per idle cycle."""
     try:
-        if not provider_configured():
+        try:
+            configured = provider_configured()
+        except HistoricalReferenceConfigurationError as exc:
+            return {
+                "provider_proof_status": "unqualified",
+                "provider_proof_error": f"{type(exc).__name__}: {exc}"[:1000],
+                "latest_provider_proof": latest_provider_proof_summary(AUDIT_DIR),
+            }
+        if not configured:
             return {
                 "provider_proof_status": "unconfigured",
                 "latest_provider_proof": latest_provider_proof_summary(AUDIT_DIR),
             }
-        due = next_due_provider_proof(shadow_conn, now=now)
+        try:
+            reference = independent_source or historical_reference_source()
+            require_recall_proof_capabilities(reference)
+        except HistoricalReferenceConfigurationError as exc:
+            return {
+                "provider_proof_status": "unqualified",
+                "provider_proof_error": f"{type(exc).__name__}: {exc}"[:1000],
+                "latest_provider_proof": latest_provider_proof_summary(AUDIT_DIR),
+            }
+        due = next_due_provider_proof(
+            shadow_conn, now=now, independent_source=reference,
+        )
         if due is None:
             return {
                 "provider_proof_status": "current",
@@ -934,6 +960,7 @@ def provider_proof_heartbeat_fields(
             code_version=version,
             primary_fetch=primary_fetch,
             independent_fetch=independent_fetch,
+            independent_source=reference,
         )
         report, written = write_provider_proof_report(
             shadow_conn, AUDIT_DIR, result.comparison_id,

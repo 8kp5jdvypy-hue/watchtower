@@ -7,17 +7,25 @@ known-but-unimplemented providers remain explicit preflight failures.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
+from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from tradebot.detectors import Bar
+from tradebot.vendors.historical_reference_qualification import (
+    REFERENCE_PROVIDER_QUALIFICATION_ENV,
+    load_historical_reference_qualification,
+)
 
 
 REFERENCE_PROVIDER_ENV = "POSTMARKET_REFERENCE_PROVIDER"
 DEFAULT_REFERENCE_PROVIDER = "massive"
 KNOWN_REFERENCE_PROVIDERS = frozenset({"massive", "tiingo", "databento"})
 IMPLEMENTED_REFERENCE_PROVIDERS = frozenset({"massive"})
+REFERENCE_PROVIDER_DATASETS = {
+    "massive": "us_stocks_sip/minute_aggs_v1",
+}
 
 
 @dataclass(frozen=True)
@@ -64,7 +72,10 @@ REFERENCE_PROVIDER_CAPABILITIES = {
         full_universe_snapshot=True,
         postmarket_coverage=True,
         immutable_object_provenance=True,
-        production_qualified=True,
+        # Adapter implementation is not legal or production qualification.
+        # This becomes true only after a strict operator-reviewed manifest is
+        # supplied and validated by provider_capabilities().
+        production_qualified=False,
     ),
     # Tiingo is approved for a derived-only EOD evaluation. Its documented
     # per-symbol intraday endpoint is beta and is not an immutable bulk
@@ -119,8 +130,40 @@ def selected_provider(raw: str | None = None) -> str:
     return normalized
 
 
-def provider_capabilities(raw: str | None = None) -> HistoricalReferenceCapabilities:
-    return REFERENCE_PROVIDER_CAPABILITIES[selected_provider(raw)]
+def provider_capabilities(
+    raw: str | None = None,
+    *,
+    qualification_manifest: str | Path | None = None,
+    observed_at: datetime | None = None,
+) -> HistoricalReferenceCapabilities:
+    provider = selected_provider(raw)
+    capabilities = REFERENCE_PROVIDER_CAPABILITIES[provider]
+    manifest_value = (
+        os.environ.get(REFERENCE_PROVIDER_QUALIFICATION_ENV, "")
+        if qualification_manifest is None
+        else str(qualification_manifest)
+    ).strip()
+    if not manifest_value:
+        return capabilities
+    try:
+        qualification = load_historical_reference_qualification(
+            manifest_value,
+            observed_at=observed_at,
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise HistoricalReferenceConfigurationError(
+            f"historical reference qualification is invalid: {exc}"
+        ) from exc
+    expected_dataset = REFERENCE_PROVIDER_DATASETS.get(provider)
+    if qualification.provider != provider:
+        raise HistoricalReferenceConfigurationError(
+            "historical reference qualification provider does not match selection"
+        )
+    if expected_dataset is None or qualification.dataset != expected_dataset:
+        raise HistoricalReferenceConfigurationError(
+            "historical reference qualification dataset does not match adapter"
+        )
+    return replace(capabilities, production_qualified=True)
 
 
 def require_recall_proof_capabilities(
@@ -148,7 +191,7 @@ def source(raw: str | None = None) -> HistoricalReferenceSource:
             provider="massive",
             feed="sip",
             dataset=massive_flatfiles.DATASET,
-            capabilities=REFERENCE_PROVIDER_CAPABILITIES["massive"],
+            capabilities=provider_capabilities(provider),
             configured=massive_flatfiles.configured,
             expected_available_at=massive_flatfiles.expected_available_at,
             object_key=massive_flatfiles.object_key,
