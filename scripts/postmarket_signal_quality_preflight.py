@@ -27,6 +27,12 @@ if __package__ in {None, ""}:
 
 from scripts.verify_backup import _parse_manifest, _verify_files, validate_artifact_archive
 from tradebot.postmarket_reference_manifest import parse_reference_manifest
+from tradebot.vendors.historical_reference import (
+    DEFAULT_REFERENCE_PROVIDER,
+    IMPLEMENTED_REFERENCE_PROVIDERS,
+    KNOWN_REFERENCE_PROVIDERS,
+    REFERENCE_PROVIDER_ENV,
+)
 
 
 SCHEMA_VERSION = 1
@@ -42,11 +48,15 @@ REQUIRED_SHADOW_SWITCHES = (
     "POSTMARKET_DISCOVERY_ENABLED",
 )
 REQUIRED_MARKET_DATA_KEYS = ("ALPACA_KEY_ID", "ALPACA_SECRET_KEY")
-REQUIRED_CAMPAIGN_KEYS = (
-    "MASSIVE_API_KEY",
-    "MASSIVE_S3_ACCESS_KEY_ID",
-    "MASSIVE_S3_SECRET_ACCESS_KEY",
-)
+REFERENCE_PROVIDER_KEYS = {
+    "massive": (
+        "MASSIVE_API_KEY",
+        "MASSIVE_S3_ACCESS_KEY_ID",
+        "MASSIVE_S3_SECRET_ACCESS_KEY",
+    ),
+    "tiingo": ("TIINGO_API_KEY",),
+    "databento": ("DATABENTO_API_KEY",),
+}
 REQUIRED_CONTROL_KINDS = {
     "discovery_failure_injection",
     "discovery_kill_switch",
@@ -385,7 +395,36 @@ def evaluate_signal_quality_preflight(
                 ),
             )
         )
-        for key in REQUIRED_CAMPAIGN_KEYS:
+        reference_provider = env.get(
+            REFERENCE_PROVIDER_ENV, DEFAULT_REFERENCE_PROVIDER
+        ).strip().lower() or DEFAULT_REFERENCE_PROVIDER
+        known_provider = reference_provider in KNOWN_REFERENCE_PROVIDERS
+        implemented_provider = reference_provider in IMPLEMENTED_REFERENCE_PROVIDERS
+        checks.extend(
+            (
+                _check(
+                    "campaign",
+                    "selected_postmarket_reference_provider",
+                    known_provider,
+                    (
+                        f"provider={reference_provider}"
+                        if known_provider
+                        else f"unsupported={reference_provider}"
+                    ),
+                ),
+                _check(
+                    "campaign",
+                    "implemented_postmarket_reference_provider_adapter",
+                    implemented_provider,
+                    (
+                        f"provider={reference_provider} adapter=implemented"
+                        if implemented_provider
+                        else f"provider={reference_provider} adapter=not_implemented"
+                    ),
+                ),
+            )
+        )
+        for key in REFERENCE_PROVIDER_KEYS.get(reference_provider, ()):
             checks.append(
                 _check(
                     "campaign",

@@ -57,13 +57,19 @@ Alpaca SIP bar provider as the live evaluator. Its immutable report therefore
 continues to carry `PROVIDER_COMPARISON_NOT_CONFIGURED`; later evidence never
 rewrites that historical fact.
 
-When dedicated `MASSIVE_S3_ACCESS_KEY_ID` and
-`MASSIVE_S3_SECRET_ACCESS_KEY` credentials are configured, a separate next-day
-proof downloads one finalized `us_stocks_sip/minute_aggs_v1` object after a
-two-hour publication safety lag. It streams the gzip CSV, keeps only the frozen
-census universe and final-RTH/postmarket window, and resamples observed
-one-minute aggregates into exact five-minute buckets without filling empty
-intervals. It then replays both providers over the same universe and thresholds.
+The next-day proof is wired through the provider-neutral historical-reference
+contract selected by `POSTMARKET_REFERENCE_PROVIDER`. The contract owns the
+provider/feed/dataset identity, documented availability time, immutable object
+identity, configuration check, and fetch implementation. Unknown providers and
+known providers without a shipped adapter fail closed.
+
+The currently implemented `massive` adapter requires dedicated
+`MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` credentials. It
+downloads one finalized `us_stocks_sip/minute_aggs_v1` object after a two-hour
+publication safety lag, streams the gzip CSV, keeps only the frozen census
+universe and final-RTH/postmarket window, and resamples observed one-minute
+aggregates into exact five-minute buckets without filling empty intervals. The
+proof then replays both providers over the same universe and thresholds.
 
 The append-only proof stores object key, ETag, last-modified time, byte count,
 selected-row SHA-256, source row counts, provider/feed/dataset identity,

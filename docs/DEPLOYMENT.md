@@ -115,11 +115,23 @@ Four required today (`tradebot/vendors/alpaca.py`,
 
 Optional shadow-evidence credentials:
 
+- `POSTMARKET_REFERENCE_PROVIDER` — independent historical provider selected
+  for the append-only next-day recall proof. It defaults to `massive` for
+  backward compatibility. Known future values (`tiingo`, `databento`) fail
+  closed until their adapters are implemented and reviewed; selection alone
+  can never make the evidence campaign ready.
 - `MASSIVE_API_KEY` — candidate-level Massive REST price/reference context.
 - `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` — dedicated
   Massive flat-file credentials for the next-day full-universe provider proof.
   These are distinct from the REST key and from ordinary AWS credentials. If
   absent, the proof reports `unconfigured`; it does not silently reuse Alpaca.
+
+The signal-quality preflight evaluates only the credential group belonging to
+the selected provider, plus a separate adapter-implemented check. This avoids
+claiming that Massive is the only possible vendor without weakening the gate:
+an unknown provider, an unfinished adapter, or missing selected-provider
+credentials keeps `evidence_campaign_ready=false` while leaving an otherwise
+safe shadow deployment unaffected.
 
 Two more, needed once the web dashboard's magic-link login goes live
 (`tradebot/email_sender.py`) — until both are set, magic links are

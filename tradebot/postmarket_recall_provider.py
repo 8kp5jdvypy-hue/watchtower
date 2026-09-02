@@ -1,7 +1,7 @@
 """Append-only full-universe second-provider recall proof.
 
 The same frozen universe and completed postmarket window are replayed from
-Alpaca SIP and Massive's next-day SIP minute-aggregate flat file.  The proof is
+Alpaca SIP and a configured independent historical source.  The proof is
 published separately from the original census: immutable evidence is extended,
 never rewritten after an independent source becomes available.
 """
@@ -26,10 +26,10 @@ from tradebot.postmarket_recall_census import (
     ensure_census_schema,
     evaluate_census_symbol,
 )
-from tradebot.vendors.massive_flatfiles import (
-    FlatFileSnapshot,
-    expected_available_at,
-    object_key as massive_object_key,
+from tradebot.vendors.historical_reference import (
+    HistoricalReferenceSnapshot,
+    HistoricalReferenceSource,
+    source as historical_reference_source,
 )
 
 
@@ -222,9 +222,11 @@ def next_due_provider_proof(
     conn: sqlite3.Connection,
     *,
     now: datetime,
+    independent_source: HistoricalReferenceSource | None = None,
 ) -> tuple[int, date] | None:
-    """Return the newest primary census whose next-day bulk proof is due."""
+    """Return the newest primary census whose independent proof is due."""
     current = _aware_utc(now, "now")
+    reference = independent_source or historical_reference_source()
     ensure_provider_proof_schema(conn)
     rows = conn.execute(
         """
@@ -241,7 +243,7 @@ def next_due_provider_proof(
         if census_status != "success":
             continue
         session = date.fromisoformat(raw_session)
-        if current < expected_available_at(session):
+        if current < reference.expected_available_at(session):
             continue
         latest = conn.execute(
             """
@@ -339,13 +341,15 @@ def run_provider_proof(
     code_version: str | None,
     primary_fetch: Callable[[list[str], datetime, datetime], Mapping[str, Sequence[Bar]]],
     independent_fetch: Callable[
-        [date, Sequence[str], datetime, datetime], FlatFileSnapshot
+        [date, Sequence[str], datetime, datetime], HistoricalReferenceSnapshot
     ],
+    independent_source: HistoricalReferenceSource | None = None,
     chunk_size: int = CHUNK_SIZE,
 ) -> tuple[ProviderProofResult, tuple[ProviderSymbolResult, ...]]:
     current = _aware_utc(now, "now")
-    if current < expected_available_at(session):
-        raise ValueError("provider proof cannot precede documented flat-file availability")
+    reference = independent_source or historical_reference_source()
+    if current < reference.expected_available_at(session):
+        raise ValueError("provider proof cannot precede documented source availability")
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     ensure_provider_proof_schema(conn)
@@ -384,8 +388,8 @@ def run_provider_proof(
         snapshot = independent_fetch(session, symbols, request_start, postmarket_end)
         if snapshot.session != session:
             raise ValueError("flat-file session did not match request")
-        if snapshot.object_key != massive_object_key(session):
-            raise ValueError("flat-file object key did not match request")
+        if snapshot.object_key != reference.object_key(session):
+            raise ValueError("historical source object key did not match request")
         if not snapshot.object_etag or snapshot.object_bytes is None:
             raise ValueError("flat-file object provenance was incomplete")
         if snapshot.object_last_modified_utc is None:
@@ -401,8 +405,8 @@ def run_provider_proof(
     except Exception as exc:
         independent_failed = True
         errors.append({"source": "independent_flat_file", "error_type": type(exc).__name__})
-        snapshot = FlatFileSnapshot(
-            session, massive_object_key(session), None, None, None,
+        snapshot = HistoricalReferenceSnapshot(
+            session, reference.object_key(session), None, None, None,
             hashlib.sha256(b"").hexdigest(), 0, 0, 0, {},
         )
     stage1 = _stage1_candidates(conn, session)
@@ -539,8 +543,8 @@ def run_provider_proof(
             (
                 census_id, session.isoformat(), PROVIDER_PROOF_VERSION, attempt,
                 run_id, current.isoformat(), completed.isoformat(), code_version,
-                census[1], len(symbols), "alpaca", "sip", "massive", "sip",
-                "us_stocks_sip/minute_aggs_v1", snapshot.object_key,
+                census[1], len(symbols), "alpaca", "sip", reference.provider,
+                reference.feed, reference.dataset, snapshot.object_key,
                 snapshot.object_etag, snapshot.object_last_modified_utc,
                 snapshot.object_bytes, snapshot.selected_rows_sha256,
                 snapshot.rows_read, snapshot.selected_rows, primary_evaluated,

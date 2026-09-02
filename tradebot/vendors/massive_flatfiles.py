@@ -13,9 +13,8 @@ import hashlib
 import io
 import math
 import os
-from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from typing import BinaryIO, Mapping, Sequence
+from typing import BinaryIO, Sequence
 from zoneinfo import ZoneInfo
 
 import boto3
@@ -23,6 +22,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from tradebot.detectors import Bar
+from tradebot.vendors.historical_reference import HistoricalReferenceSnapshot
 
 
 ET = ZoneInfo("America/New_York")
@@ -39,18 +39,8 @@ class MassiveFlatFileError(RuntimeError):
     """Credential-safe bulk-provider error."""
 
 
-@dataclass(frozen=True)
-class FlatFileSnapshot:
-    session: date
-    object_key: str
-    object_etag: str | None
-    object_last_modified_utc: str | None
-    object_bytes: int | None
-    selected_rows_sha256: str
-    rows_read: int
-    selected_rows: int
-    selected_symbols: int
-    bars_by_symbol: Mapping[str, tuple[Bar, ...]]
+# Backward-compatible public name for existing callers and archived tests.
+FlatFileSnapshot = HistoricalReferenceSnapshot
 
 
 def access_key_id() -> str | None:
