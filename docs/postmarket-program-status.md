@@ -55,6 +55,11 @@ The report reconciles these ordered requirements:
 
 Counts are intersected with the clean-session set where applicable. Evidence
 from a dirty or unrelated session does not improve progress.
+Customer reviews are scoped to the exact SHA-256 of a locked campaign and count
+distinct blinded cases and symbols against that campaign's locked floors. A
+single review, duplicate reviews of one case, or reviews from another campaign
+cannot complete the milestone. The final gate still reconstructs and validates
+every review payload before customer-delivery review can become eligible.
 
 ## Fail-closed rules
 

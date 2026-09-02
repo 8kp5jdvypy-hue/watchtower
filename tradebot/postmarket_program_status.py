@@ -19,6 +19,11 @@ from typing import Any, Iterable
 from tradebot.postmarket_customer_dry_run_gate import (
     evaluate_customer_dry_run_gate,
 )
+from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_FIELDS,
+    CAMPAIGN_VERSION,
+    parse_campaign_policy,
+)
 
 
 STATUS_VERSION = 1
@@ -239,6 +244,82 @@ def _holdout_label_progress(conn: sqlite3.Connection) -> tuple[int, int, bool]:
             best_observed, best_required = observed, required
         any_passed = any_passed or observed >= required
     return best_observed, best_required, any_passed
+
+
+def _customer_review_progress(
+    conn: sqlite3.Connection,
+    evidence_dir: Path,
+) -> tuple[dict[str, object], object, bool]:
+    """Count distinct independent cases against their exact locked campaign."""
+    if not _table_exists(conn, "postmarket_customer_dry_run_reviews"):
+        return (
+            {"reviewed_cases": 0, "distinct_symbols": 0},
+            "locked customer campaign floor unavailable",
+            False,
+        )
+    campaigns: list[tuple[bool, float, dict[str, object], dict[str, int]]] = []
+    if evidence_dir.exists():
+        for path in sorted(evidence_dir.rglob("*.json")):
+            payload = _regular_json(path)
+            campaign_markers = {"campaign_id", "expected_sessions", "policy"}
+            if not campaign_markers <= set(payload):
+                continue
+            if (
+                set(payload) != CAMPAIGN_FIELDS
+                or payload.get("schema_version") != CAMPAIGN_VERSION
+                or payload.get("status") != "locked"
+            ):
+                raise ValueError(f"customer campaign contract is invalid: {path}")
+            policy = parse_campaign_policy(payload["policy"])
+            digest = hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest()
+            reviewed_cases, distinct_symbols = conn.execute(
+                """
+                SELECT COUNT(DISTINCT case_evidence_sha256),
+                       COUNT(DISTINCT symbol)
+                FROM postmarket_customer_dry_run_reviews
+                WHERE campaign_sha256=?
+                  AND reviewer_role='independent_market_reviewer'
+                  AND independent_of_implementation=1
+                  AND blinded_to_future_outcomes=1
+                """,
+                (digest,),
+            ).fetchone()
+            required = {
+                "reviewed_cases": policy.min_independently_reviewed_cases,
+                "distinct_symbols": policy.min_distinct_reviewed_symbols,
+            }
+            observed = {
+                "campaign_id": payload["campaign_id"],
+                "campaign_sha256": digest,
+                "reviewed_cases": int(reviewed_cases),
+                "distinct_symbols": int(distinct_symbols),
+            }
+            passed = (
+                int(reviewed_cases) >= required["reviewed_cases"]
+                and int(distinct_symbols) >= required["distinct_symbols"]
+            )
+            progress = min(
+                int(reviewed_cases) / required["reviewed_cases"],
+                int(distinct_symbols) / required["distinct_symbols"],
+            )
+            campaigns.append((passed, progress, observed, required))
+    if not campaigns:
+        return (
+            {"reviewed_cases": 0, "distinct_symbols": 0},
+            "locked customer campaign floor unavailable",
+            False,
+        )
+    passed, _, observed, required = max(
+        campaigns,
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2]["reviewed_cases"],
+            item[2]["distinct_symbols"],
+            item[2]["campaign_sha256"],
+        ),
+    )
+    return observed, required, passed
 
 
 def _verified_ready_customer_gates(
@@ -502,17 +583,17 @@ def build_program_status(
                 "holdout calibration with a valid quality claim and no blockers",
             ))
 
-            independent_reviews = _count(
-                conn,
-                "postmarket_customer_dry_run_reviews",
-                "reviewer_role='independent_market_reviewer'",
+            review_progress, review_floor, reviews_pass = _customer_review_progress(
+                conn, evidence
             )
             milestones.append(_milestone(
                 "INDEPENDENT_CUSTOMER_CASE_REVIEWS",
-                independent_reviews,
-                ">= locked customer campaign floor",
-                independent_reviews > 0,
-                "inventory only; the locked customer campaign policy remains authoritative",
+                review_progress,
+                review_floor,
+                reviews_pass,
+                "distinct blinded independent cases and symbols are compared with "
+                "their exact locked customer campaign floors; final gate still "
+                "revalidates every review payload",
             ))
         finally:
             conn.close()
