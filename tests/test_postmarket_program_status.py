@@ -37,10 +37,17 @@ def _database(
           experiment_id TEXT, holdout_sessions_json TEXT, policy_json TEXT
         );
         CREATE TABLE postmarket_independent_labels (
-          experiment_id TEXT, session TEXT, classification TEXT
+          experiment_id TEXT, session TEXT, symbol TEXT, revision INTEGER,
+          classification TEXT
         );
-        CREATE TABLE postmarket_rank_empirical_runs (split TEXT, report_json TEXT);
-        CREATE TABLE postmarket_rank_calibration_runs (split TEXT, report_json TEXT);
+        CREATE TABLE postmarket_rank_empirical_runs (
+          experiment_id TEXT, split TEXT, input_digest_sha256 TEXT,
+          report_json TEXT, report_sha256 TEXT
+        );
+        CREATE TABLE postmarket_rank_calibration_runs (
+          experiment_id TEXT, split TEXT, input_digest_sha256 TEXT,
+          report_json TEXT, report_sha256 TEXT
+        );
         CREATE TABLE postmarket_customer_dry_run_reviews (
           campaign_sha256 TEXT, case_evidence_sha256 TEXT, symbol TEXT,
           reviewer_role TEXT, independent_of_implementation INTEGER,
@@ -61,38 +68,54 @@ def _database(
             ),
         )
         conn.executemany(
-            "INSERT INTO postmarket_independent_labels VALUES (?,?,?)",
+            "INSERT INTO postmarket_independent_labels VALUES (?,?,?,?,?)",
             [
-                ("campaign-1", SESSIONS[0], "eligible"),
-                ("campaign-1", SESSIONS[1], "ineligible"),
+                ("campaign-1", SESSIONS[0], "AAA", 1, "eligible"),
+                ("campaign-1", SESSIONS[1], "BBB", 1, "ineligible"),
             ],
         )
-        conn.execute(
-            "INSERT INTO postmarket_rank_empirical_runs VALUES (?,?)",
-            (
-                "holdout",
-                json.dumps(
-                    {
-                        "split": "holdout",
-                        "holdout_unblinded": True,
-                        "passed_locked_policy": True,
-                        "blocking_reasons": [],
-                    }
-                ),
-            ),
+        empirical = json.dumps(
+            {
+                "experiment_id": "campaign-1",
+                "split": "holdout",
+                "input_digest_sha256": "b" * 64,
+                "holdout_unblinded": True,
+                "passed_locked_policy": True,
+                "blocking_reasons": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
         )
         conn.execute(
-            "INSERT INTO postmarket_rank_calibration_runs VALUES (?,?)",
+            "INSERT INTO postmarket_rank_empirical_runs VALUES (?,?,?,?,?)",
             (
+                "campaign-1",
                 "holdout",
-                json.dumps(
-                    {
-                        "split": "holdout",
-                        "holdout_unblinded": True,
-                        "calibrated_quality_claim_valid": True,
-                        "blocking_reasons": [],
-                    }
-                ),
+                "b" * 64,
+                empirical,
+                hashlib.sha256(empirical.encode()).hexdigest(),
+            ),
+        )
+        calibration = json.dumps(
+            {
+                "experiment_id": "campaign-1",
+                "split": "holdout",
+                "input_digest_sha256": "c" * 64,
+                "holdout_unblinded": True,
+                "calibrated_quality_claim_valid": True,
+                "blocking_reasons": [],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_rank_calibration_runs VALUES (?,?,?,?,?)",
+            (
+                "campaign-1",
+                "holdout",
+                "c" * 64,
+                calibration,
+                hashlib.sha256(calibration.encode()).hexdigest(),
             ),
         )
         assert customer_campaign_sha256 is not None
@@ -300,7 +323,7 @@ def test_malformed_empirical_report_is_a_visible_error_not_an_empty_holdout(tmp_
         item for item in report.milestones if item.code == "EVIDENCE_LEDGER_VALIDATION"
     )
     assert error.state == STATE_ERROR
-    assert "malformed" in error.evidence
+    assert "digest does not match" in error.evidence
     assert report.eligible_for_customer_delivery_review is False
 
 
@@ -385,6 +408,67 @@ def test_reviews_are_scoped_to_exact_campaign_digest(tmp_path, monkeypatch):
     )
     assert milestone.observed["reviewed_cases"] == 0
     assert milestone.observed["distinct_symbols"] == 0
+    assert milestone.state != STATE_COMPLETE
+
+
+def test_holdout_stages_must_share_one_label_ready_experiment(tmp_path, monkeypatch):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    for table in (
+        "postmarket_rank_empirical_runs",
+        "postmarket_rank_calibration_runs",
+    ):
+        raw, = conn.execute(f"SELECT report_json FROM {table}").fetchone()
+        payload = json.loads(raw)
+        payload["experiment_id"] = "unlinked-experiment"
+        changed = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        conn.execute(
+            f"""
+            UPDATE {table}
+            SET experiment_id=?,report_json=?,report_sha256=?
+            """,
+            (
+                "unlinked-experiment",
+                changed,
+                hashlib.sha256(changed.encode()).hexdigest(),
+            ),
+        )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestones = {item.code: item for item in report.milestones}
+    assert milestones["BLINDED_HOLDOUT_LABELS"].state == STATE_COMPLETE
+    assert milestones["EMPIRICAL_HOLDOUT_PASS"].observed == 0
+    assert milestones["EMPIRICAL_HOLDOUT_PASS"].state != STATE_COMPLETE
+    assert milestones["CALIBRATION_HOLDOUT_PASS"].observed == 0
+    assert milestones["CALIBRATION_HOLDOUT_PASS"].state != STATE_COMPLETE
+
+
+def test_label_revisions_count_latest_symbol_once(tmp_path, monkeypatch):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "UPDATE postmarket_rank_experiments SET policy_json=?",
+        (json.dumps({"min_definitive_labels": 3}),),
+    )
+    conn.execute(
+        "INSERT INTO postmarket_independent_labels VALUES (?,?,?,?,?)",
+        ("campaign-1", SESSIONS[0], "AAA", 2, "eligible"),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones if item.code == "BLINDED_HOLDOUT_LABELS"
+    )
+    assert milestone.observed == 2
+    assert milestone.required == 3
     assert milestone.state != STATE_COMPLETE
 
 
