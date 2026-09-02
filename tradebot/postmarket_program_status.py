@@ -19,6 +19,11 @@ from typing import Any, Iterable
 from tradebot.postmarket_customer_dry_run_gate import (
     evaluate_customer_dry_run_gate,
 )
+from tradebot.postmarket_customer_dry_run_campaign import (
+    CAMPAIGN_FIELDS,
+    CAMPAIGN_VERSION,
+    parse_campaign_policy,
+)
 
 
 STATUS_VERSION = 1
@@ -147,62 +152,99 @@ def _count(conn: sqlite3.Connection, table: str, where: str = "1") -> int:
     return int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0])
 
 
-def _passed_empirical_holdouts(conn: sqlite3.Connection) -> int:
+def _validated_report(
+    raw: object,
+    stored_sha256: object,
+    context: str,
+) -> dict[str, Any]:
+    if not isinstance(raw, str) or not isinstance(stored_sha256, str):
+        raise ValueError(f"{context} report storage is invalid")
+    if hashlib.sha256(raw.encode()).hexdigest() != stored_sha256:
+        raise ValueError(f"{context} report digest does not match stored JSON")
+    try:
+        report = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{context} report_json is malformed") from exc
+    if not isinstance(report, dict):
+        raise ValueError(f"{context} report_json must be an object")
+    canonical = json.dumps(report, sort_keys=True, separators=(",", ":"))
+    if canonical != raw:
+        raise ValueError(f"{context} report_json is not canonical")
+    return report
+
+
+def _passed_empirical_holdouts(
+    conn: sqlite3.Connection,
+    eligible_experiment_ids: frozenset[str],
+) -> frozenset[str]:
     if not _table_exists(conn, "postmarket_rank_empirical_runs"):
-        return 0
-    passed = 0
-    for (raw,) in conn.execute(
-        "SELECT report_json FROM postmarket_rank_empirical_runs WHERE split='holdout'"
+        return frozenset()
+    passed: set[str] = set()
+    for experiment_id, input_digest, raw, report_sha256 in conn.execute(
+        """
+        SELECT experiment_id,input_digest_sha256,report_json,report_sha256
+        FROM postmarket_rank_empirical_runs WHERE split='holdout'
+        """
     ).fetchall():
-        try:
-            report = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("empirical holdout report_json is malformed") from exc
-        if not isinstance(report, dict):
-            raise ValueError("empirical holdout report_json must be an object")
+        report = _validated_report(raw, report_sha256, "empirical holdout")
         if (
-            report.get("split") == "holdout"
+            report.get("experiment_id") != experiment_id
+            or report.get("input_digest_sha256") != input_digest
+        ):
+            raise ValueError("empirical holdout report identity does not match its row")
+        if (
+            experiment_id in eligible_experiment_ids
+            and report.get("split") == "holdout"
             and report.get("holdout_unblinded") is True
             and report.get("passed_locked_policy") is True
             and report.get("blocking_reasons") == []
         ):
-            passed += 1
-    return passed
+            passed.add(str(experiment_id))
+    return frozenset(passed)
 
 
-def _passed_calibration_holdouts(conn: sqlite3.Connection) -> int:
+def _passed_calibration_holdouts(
+    conn: sqlite3.Connection,
+    eligible_experiment_ids: frozenset[str],
+) -> frozenset[str]:
     if not _table_exists(conn, "postmarket_rank_calibration_runs"):
-        return 0
-    passed = 0
-    for (raw,) in conn.execute(
-        "SELECT report_json FROM postmarket_rank_calibration_runs WHERE split='holdout'"
+        return frozenset()
+    passed: set[str] = set()
+    for experiment_id, input_digest, raw, report_sha256 in conn.execute(
+        """
+        SELECT experiment_id,input_digest_sha256,report_json,report_sha256
+        FROM postmarket_rank_calibration_runs WHERE split='holdout'
+        """
     ).fetchall():
-        try:
-            report = json.loads(raw)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise ValueError("calibration holdout report_json is malformed") from exc
-        if not isinstance(report, dict):
-            raise ValueError("calibration holdout report_json must be an object")
+        report = _validated_report(raw, report_sha256, "calibration holdout")
         if (
-            report.get("split") == "holdout"
+            report.get("experiment_id") != experiment_id
+            or report.get("input_digest_sha256") != input_digest
+        ):
+            raise ValueError("calibration holdout report identity does not match its row")
+        if (
+            experiment_id in eligible_experiment_ids
+            and report.get("split") == "holdout"
             and report.get("holdout_unblinded") is True
             and report.get("calibrated_quality_claim_valid") is True
             and report.get("blocking_reasons") == []
         ):
-            passed += 1
-    return passed
+            passed.add(str(experiment_id))
+    return frozenset(passed)
 
 
-def _holdout_label_progress(conn: sqlite3.Connection) -> tuple[int, int, bool]:
-    """Return best definitive count, its locked floor, and whether one contract passes."""
+def _holdout_label_progress(
+    conn: sqlite3.Connection,
+) -> tuple[int, int, frozenset[str]]:
+    """Return best latest-label count, its floor, and every passing experiment."""
     required_tables = {
         "postmarket_rank_experiments",
         "postmarket_independent_labels",
     }
     if any(not _table_exists(conn, table) for table in required_tables):
-        return 0, 0, False
+        return 0, 0, frozenset()
     best_observed = best_required = 0
-    any_passed = False
+    passed_experiments: set[str] = set()
     for experiment_id, raw_sessions, raw_policy in conn.execute(
         """
         SELECT experiment_id,holdout_sessions_json,policy_json
@@ -226,19 +268,107 @@ def _holdout_label_progress(conn: sqlite3.Connection) -> tuple[int, int, bool]:
         placeholders = ",".join("?" for _ in sessions)
         observed = int(conn.execute(
             f"""
-            SELECT COUNT(*) FROM postmarket_independent_labels
-            WHERE experiment_id=? AND session IN ({placeholders})
-              AND classification IN ('eligible','ineligible')
+            WITH latest AS (
+              SELECT session,symbol,MAX(revision) AS revision
+              FROM postmarket_independent_labels
+              WHERE experiment_id=? AND session IN ({placeholders})
+              GROUP BY session,symbol
+            )
+            SELECT COUNT(*)
+            FROM postmarket_independent_labels AS labels
+            JOIN latest
+              ON latest.session=labels.session
+             AND latest.symbol=labels.symbol
+             AND latest.revision=labels.revision
+            WHERE labels.experiment_id=?
+              AND labels.classification IN ('eligible','ineligible')
             """,
-            (experiment_id, *sessions),
+            (experiment_id, *sessions, experiment_id),
         ).fetchone()[0])
         required = int(policy["min_definitive_labels"])
-        if observed > best_observed or (
+        if best_required == 0 or observed > best_observed or (
             observed == best_observed and required < best_required
         ):
             best_observed, best_required = observed, required
-        any_passed = any_passed or observed >= required
-    return best_observed, best_required, any_passed
+        if observed >= required:
+            passed_experiments.add(str(experiment_id))
+    return best_observed, best_required, frozenset(passed_experiments)
+
+
+def _customer_review_progress(
+    conn: sqlite3.Connection,
+    evidence_dir: Path,
+) -> tuple[dict[str, object], object, bool]:
+    """Count distinct independent cases against their exact locked campaign."""
+    if not _table_exists(conn, "postmarket_customer_dry_run_reviews"):
+        return (
+            {"reviewed_cases": 0, "distinct_symbols": 0},
+            "locked customer campaign floor unavailable",
+            False,
+        )
+    campaigns: list[tuple[bool, float, dict[str, object], dict[str, int]]] = []
+    if evidence_dir.exists():
+        for path in sorted(evidence_dir.rglob("*.json")):
+            payload = _regular_json(path)
+            campaign_markers = {"campaign_id", "expected_sessions", "policy"}
+            if not campaign_markers <= set(payload):
+                continue
+            if (
+                set(payload) != CAMPAIGN_FIELDS
+                or payload.get("schema_version") != CAMPAIGN_VERSION
+                or payload.get("status") != "locked"
+            ):
+                raise ValueError(f"customer campaign contract is invalid: {path}")
+            policy = parse_campaign_policy(payload["policy"])
+            digest = hashlib.sha256(path.resolve(strict=True).read_bytes()).hexdigest()
+            reviewed_cases, distinct_symbols = conn.execute(
+                """
+                SELECT COUNT(DISTINCT case_evidence_sha256),
+                       COUNT(DISTINCT symbol)
+                FROM postmarket_customer_dry_run_reviews
+                WHERE campaign_sha256=?
+                  AND reviewer_role='independent_market_reviewer'
+                  AND independent_of_implementation=1
+                  AND blinded_to_future_outcomes=1
+                """,
+                (digest,),
+            ).fetchone()
+            required = {
+                "reviewed_cases": policy.min_independently_reviewed_cases,
+                "distinct_symbols": policy.min_distinct_reviewed_symbols,
+            }
+            observed = {
+                "campaign_id": payload["campaign_id"],
+                "campaign_sha256": digest,
+                "reviewed_cases": int(reviewed_cases),
+                "distinct_symbols": int(distinct_symbols),
+            }
+            passed = (
+                int(reviewed_cases) >= required["reviewed_cases"]
+                and int(distinct_symbols) >= required["distinct_symbols"]
+            )
+            progress = min(
+                int(reviewed_cases) / required["reviewed_cases"],
+                int(distinct_symbols) / required["distinct_symbols"],
+            )
+            campaigns.append((passed, progress, observed, required))
+    if not campaigns:
+        return (
+            {"reviewed_cases": 0, "distinct_symbols": 0},
+            "locked customer campaign floor unavailable",
+            False,
+        )
+    passed, _, observed, required = max(
+        campaigns,
+        key=lambda item: (
+            item[0],
+            item[1],
+            item[2]["reviewed_cases"],
+            item[2]["distinct_symbols"],
+            item[2]["campaign_sha256"],
+        ),
+    )
+    return observed, required, passed
 
 
 def _verified_ready_customer_gates(
@@ -476,43 +606,53 @@ def build_program_status(
                 "versioned context features, lifecycle transitions, and decomposed ranks",
             ))
 
-            holdout_labels, holdout_floor, labels_pass = _holdout_label_progress(conn)
+            (
+                holdout_labels,
+                holdout_floor,
+                label_ready_experiments,
+            ) = _holdout_label_progress(conn)
             milestones.append(_milestone(
                 "BLINDED_HOLDOUT_LABELS",
                 holdout_labels,
                 holdout_floor or "locked policy floor unavailable",
-                labels_pass,
+                bool(label_ready_experiments),
                 "definitive labels are compared with their exact locked experiment floor",
             ))
 
-            empirical_passes = _passed_empirical_holdouts(conn)
+            empirical_experiments = _passed_empirical_holdouts(
+                conn, label_ready_experiments
+            )
             milestones.append(_milestone(
                 "EMPIRICAL_HOLDOUT_PASS",
-                empirical_passes,
+                len(empirical_experiments),
                 1,
-                empirical_passes >= 1,
-                "unblinded holdout run with passed_locked_policy and no blockers",
+                bool(empirical_experiments),
+                "digest-valid unblinded holdout pass linked to an experiment "
+                "whose latest independent labels meet its locked floor",
             ))
-            calibration_passes = _passed_calibration_holdouts(conn)
+            calibration_experiments = _passed_calibration_holdouts(
+                conn, empirical_experiments
+            )
             milestones.append(_milestone(
                 "CALIBRATION_HOLDOUT_PASS",
-                calibration_passes,
+                len(calibration_experiments),
                 1,
-                calibration_passes >= 1,
-                "holdout calibration with a valid quality claim and no blockers",
+                bool(calibration_experiments),
+                "digest-valid holdout calibration linked to the same "
+                "label-ready, empirically passing experiment",
             ))
 
-            independent_reviews = _count(
-                conn,
-                "postmarket_customer_dry_run_reviews",
-                "reviewer_role='independent_market_reviewer'",
+            review_progress, review_floor, reviews_pass = _customer_review_progress(
+                conn, evidence
             )
             milestones.append(_milestone(
                 "INDEPENDENT_CUSTOMER_CASE_REVIEWS",
-                independent_reviews,
-                ">= locked customer campaign floor",
-                independent_reviews > 0,
-                "inventory only; the locked customer campaign policy remains authoritative",
+                review_progress,
+                review_floor,
+                reviews_pass,
+                "distinct blinded independent cases and symbols are compared with "
+                "their exact locked customer campaign floors; final gate still "
+                "revalidates every review payload",
             ))
         finally:
             conn.close()
