@@ -6,12 +6,19 @@
 
 ## Decision
 
-Perch will use Tiingo only as an independent, backend reference source for a
-30-day signal-quality evaluation. The intended starting plan is the monthly
-Internal Commercial plan at $50/month. Tiingo-derived customer output must
-remain derived-only: alerts, rankings, factor scores, recall metrics, model
-signals, and other non-reconstructable summaries. Perch will not expose raw
-Tiingo quotes, price tables, price charts, or downloadable raw records.
+Perch may use Tiingo only as an independent, backend **EOD evaluation** source.
+The intended starting plan, if that narrower evaluation is approved, is the
+monthly Internal Commercial plan at $50/month. Tiingo-derived customer output
+must remain derived-only: alerts, rankings, factor scores, evaluation metrics,
+model signals, and other non-reconstructable summaries. Perch will not expose
+raw Tiingo quotes, price tables, price charts, or downloadable raw records.
+
+Tiingo does **not** satisfy Perch's immutable bulk full-universe intraday recall
+proof. Its documented per-symbol intraday source is not the next-day bulk
+object with immutable provenance required by that contract. Tiingo therefore
+cannot complete `INDEPENDENT_PROVIDER_PROOFS`, cannot make a discovery session
+evidence-eligible, and must not be represented as the provider that unlocks the
+ten-session campaign.
 
 The $250/month Standard Startup Redistribution plan, the $100/month
 Fundamentals add-on, and an annual commitment are deferred until evidence from
@@ -19,13 +26,13 @@ the monthly evaluation shows that they solve a measured product requirement.
 
 ## Context and rationale
 
-Perch needs an independent source to measure full-universe recall, validate
-candidate and ranking outcomes, normalize corporate actions, and distinguish
-pipeline misses from primary-feed limitations. Tiingo Sales confirmed in an
-email received 2026-09-01 that Perch's described derived-only SaaS model
-qualifies for the Internal Commercial plan. That plan is materially less
-expensive than raw-data redistribution and is sufficient for the immediate
-evaluation purpose.
+Perch needs independent sources for two distinct jobs: EOD outcome/reference
+evaluation and immutable intraday full-universe recall proof. Tiingo Sales
+confirmed in an email received 2026-09-01 that Perch's described derived-only
+SaaS model qualifies for the Internal Commercial plan. That plan is materially
+less expensive than raw-data redistribution and can support the first job. It
+does not satisfy the second job's bulk-object, postmarket-window, or immutable
+provenance requirements.
 
 This source is an evaluation and evidence layer, not an automatic improvement
 to live detection. The existing real-time pipeline remains responsible for
@@ -70,10 +77,16 @@ The outbound inquiry was sent through Resend with message ID
 - **$499/year Internal Commercial plan:** deferred until the first month proves
   coverage, reliability, and integration value.
 - **Fundamentals add-on:** deferred because it does not provide free float or
-  historical point-in-time security-master revisions, and sector data is not
-  required to begin independent EOD recall validation.
-- **No independent provider:** rejected because it leaves recall and outcome
-  quality dependent on the same source being evaluated.
+  historical point-in-time security-master revisions. It could supply licensed
+  current sector/industry classification for sector-relative shadow context,
+  but it still would not satisfy the intraday full-universe recall proof.
+- **Treat Tiingo as the recall-proof provider:** rejected because it lacks the
+  required immutable next-day bulk postmarket object and the shipped provider
+  registry therefore fails it closed for that purpose.
+- **No recall-proof-capable independent provider:** not acceptable for the
+  evidence campaign because it leaves full-universe recall dependent on the
+  same source being evaluated. Shadow collection may continue, but those
+  sessions cannot count toward customer readiness.
 
 ## Protected implementation boundaries
 
@@ -94,11 +107,17 @@ The outbound inquiry was sent through Resend with message ID
 - Complete the production discovery-audit memory verification before adding a
   new provider workload.
 - Subscribe monthly only after the VPS is stable.
-- Implement an EOD-only Tiingo adapter and a raw-data deletion inventory.
-- Generate and archive a license/reference manifest before enabling the
-  external-context campaign.
-- Compare Tiingo against the primary pipeline for at least 30 calendar days,
-  then decide whether to continue, upgrade, or remove the integration.
+- Do not purchase Tiingo on the assumption that it unlocks the full campaign.
+- If the operator approves the narrower EOD evaluation, implement an EOD-only
+  Tiingo adapter and a raw-data deletion inventory.
+- If the Fundamentals add-on is approved for sector context, generate and
+  archive its license/reference manifest before enabling external context.
+- Separately obtain and qualify a recall-proof-capable provider with completed
+  postmarket minute bars, full-universe coverage, and immutable bulk-object
+  provenance before locking the ten-session evidence campaign.
+- Compare any activated Tiingo evaluation against the primary pipeline for at
+  least 30 calendar days, then decide whether to continue, upgrade, or remove
+  the integration.
 
 ## Review triggers
 
