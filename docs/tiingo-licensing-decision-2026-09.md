@@ -114,7 +114,9 @@ The outbound inquiry was sent through Resend with message ID
   archive its license/reference manifest before enabling external context.
 - Separately obtain and qualify a recall-proof-capable provider with completed
   postmarket minute bars, full-universe coverage, and immutable bulk-object
-  provenance before locking the ten-session evidence campaign.
+  provenance before locking the ten-session evidence campaign. Use
+  `docs/independent-recall-provider-rfq-2026-09.md` as the provider-neutral RFQ
+  and acceptance checklist.
 - Compare any activated Tiingo evaluation against the primary pipeline for at
   least 30 calendar days, then decide whether to continue, upgrade, or remove
   the integration.
