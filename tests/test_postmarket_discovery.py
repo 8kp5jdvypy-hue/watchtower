@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import tradebot.postmarket_discovery_shadow as discovery_shadow
 from tradebot.detectors import Bar
 from tradebot.marketdata import MarketScreenEntry, MarketWideScreen
 from tradebot.postmarket_discovery import (
@@ -121,6 +122,48 @@ def test_full_universe_sweep_covers_every_symbol_once_per_five_tick_cycle():
         if left.shard_index < right.shard_index
     ) == 0
     assert len({shard.universe_sha256 for shard in shards}) == 1
+
+
+def test_idle_maintenance_publishes_liveness_and_releases_each_stage(tmp_path):
+    writes = []
+    calls = []
+    releases = []
+
+    def stage(name, fields):
+        def run():
+            calls.append(name)
+            return fields
+
+        return run
+
+    result = discovery_shadow.run_idle_maintenance_stages(
+        (
+            ("first", stage("first", {"first_status": "current"})),
+            ("second", stage("second", {"second_status": "current"})),
+        ),
+        started_at=NOW,
+        heartbeat_path=tmp_path / "heartbeat.json",
+        heartbeat_writer=lambda path, payload: writes.append((path, payload)),
+        now_fn=lambda: NOW,
+        memory_releaser=lambda: releases.append(True),
+    )
+
+    assert calls == ["first", "second"]
+    assert releases == [True, True]
+    assert [payload["maintenance_stage"] for _, payload in writes] == [
+        "starting",
+        "first",
+        "first_complete",
+        "second",
+        "second_complete",
+    ]
+    assert "first_status" not in writes[0][1]
+    assert writes[2][1]["first_status"] == "current"
+    assert writes[-1][1]["second_status"] == "current"
+    assert result == {
+        "first_status": "current",
+        "second_status": "current",
+    }
 
 
 def test_selection_unions_sweep_provenance_and_conserves_overlap():
