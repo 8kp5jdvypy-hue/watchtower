@@ -55,6 +55,16 @@ The report reconciles these ordered requirements:
 
 Counts are intersected with the clean-session set where applicable. Evidence
 from a dirty or unrelated session does not improve progress.
+The experiment milestone validates the complete canonical contract rather than
+counting rows: its XNYS development/holdout split, lock timestamp, eligibility
+and selection rules, sample and metric floors, current rank version/contract,
+and manifest SHA-256 must all reproduce. Labels, empirical holdout reports, and
+calibration reports count only when they share that same valid experiment.
+
+The context/lifecycle/rank milestone reports per-feature status distributions,
+rankable-rank counts, and qualified-lifecycle counts in addition to its exact
+coherent-chain count. This makes a missing required input (for example, a
+licensed sector reference) visible without treating populated tables as proof.
 Customer reviews are scoped to the exact SHA-256 of a locked campaign and count
 distinct blinded cases and symbols against that campaign's locked floors. A
 single review, duplicate reviews of one case, or reviews from another campaign
@@ -70,8 +80,10 @@ every review payload before customer-delivery review can become eligible.
   every exact SHA-256-bound input and reruns the existing customer dry-run gate;
   the recomputed report must equal the stored report.
 - A gate with customer delivery already enabled is rejected.
-- The first unresolved milestone becomes `next_action`, except that evidence
-  validation errors always take priority.
+- Evidence validation and database-integrity errors take priority in
+  `next_action`. If context rows exist but none form a coherent feature,
+  lifecycle, and rank chain, that dependency is surfaced before session-count
+  collection; otherwise the first unresolved milestone supplies the action.
 
 The output is safe to archive with the normal evidence backup, but a status
 report is never a substitute for the immutable artifacts it inventories.
