@@ -199,17 +199,15 @@ def _census_bars_fetch(symbols: list[str], start: datetime, end: datetime):
 
 
 def _provider_flatfile_configured() -> bool:
-    from tradebot.vendors.massive_flatfiles import configured
+    from tradebot.vendors.historical_reference import source
 
-    return configured()
+    return source().configured()
 
 
 def _provider_flatfile_fetch(session, symbols, start, end):
-    from tradebot.vendors.massive_flatfiles import fetch_minute_aggregates
+    from tradebot.vendors.historical_reference import source
 
-    return fetch_minute_aggregates(
-        session, symbols=symbols, start=start, end=end,
-    )
+    return source().fetch(session, symbols, start, end)
 
 
 def _daily_bars_fetch(symbols: list[str]):

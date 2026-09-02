@@ -22,6 +22,7 @@ from tradebot.postmarket_recall_provider import (
     write_provider_proof_report,
 )
 from tradebot.vendors.massive_flatfiles import FlatFileSnapshot, object_key
+from tradebot.vendors.historical_reference import HistoricalReferenceSource
 
 
 SESSION = date(2026, 8, 27)
@@ -114,6 +115,29 @@ def _snapshot(bars):
     )
 
 
+def _custom_source(bars):
+    return HistoricalReferenceSource(
+        provider="licensed-test-provider",
+        feed="consolidated",
+        dataset="us-equities-minute-v2",
+        configured=lambda: True,
+        expected_available_at=lambda session: PROOF_NOW - timedelta(minutes=1),
+        object_key=lambda session: f"licensed/{session.isoformat()}.parquet",
+        fetch=lambda session, symbols, start, end: FlatFileSnapshot(
+            session,
+            f"licensed/{session.isoformat()}.parquet",
+            "licensed-etag",
+            PROOF_NOW.isoformat(),
+            456,
+            hashlib.sha256(b"licensed-selected").hexdigest(),
+            100,
+            6,
+            len(bars),
+            bars,
+        ),
+    )
+
+
 def test_provider_proof_waits_for_next_day_file_and_is_due_once(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     census_id = _seed(conn)
@@ -157,6 +181,45 @@ def test_provider_proof_replays_same_universe_and_can_pass_cleanly(tmp_path):
     assert report.operational_complete is True
     assert report.evidence_eligible is False
     assert report.issue_codes == ("INDEPENDENT_RECALL_BELOW_95_PERCENT",)
+
+
+def test_provider_identity_and_object_contract_come_from_selected_adapter(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    census_id = _seed(conn)
+    bars = {symbol: _candidate_bars(symbol) for symbol in ("A", "B")}
+    reference = _custom_source(bars)
+
+    assert next_due_provider_proof(
+        conn, now=PROOF_NOW, independent_source=reference
+    ) == (census_id, SESSION)
+    result, _ = run_provider_proof(
+        conn,
+        census_id=census_id,
+        session=SESSION,
+        now=PROOF_NOW,
+        run_id="custom-provider-proof",
+        code_version="proof-code",
+        primary_fetch=lambda symbols, start, end: {
+            symbol: bars[symbol] for symbol in symbols
+        },
+        independent_fetch=reference.fetch,
+        independent_source=reference,
+    )
+
+    assert result.status == "success"
+    source_row = conn.execute(
+        """
+        SELECT independent_provider,independent_feed,independent_dataset,object_key
+        FROM postmarket_recall_provider_runs WHERE comparison_id=?
+        """,
+        (result.comparison_id,),
+    ).fetchone()
+    assert source_row == (
+        "licensed-test-provider",
+        "consolidated",
+        "us-equities-minute-v2",
+        f"licensed/{SESSION.isoformat()}.parquet",
+    )
 
 
 def test_provider_proof_exposes_eligibility_and_price_disagreement(tmp_path):

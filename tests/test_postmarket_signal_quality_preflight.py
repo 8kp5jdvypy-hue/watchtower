@@ -281,6 +281,53 @@ def test_missing_independent_provider_key_blocks_campaign_not_safe_shadow(tmp_pa
     assert check.passed is False
 
 
+def test_tiingo_selection_does_not_require_massive_but_fails_until_adapter_exists(
+    tmp_path,
+):
+    args = _fixture(tmp_path)
+    env_file = args["env_file"]
+    values = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+    }
+    values["POSTMARKET_REFERENCE_PROVIDER"] = "tiingo"
+    values["TIINGO_API_KEY"] = "tiingo-secret"
+    for key in (
+        "MASSIVE_API_KEY",
+        "MASSIVE_S3_ACCESS_KEY_ID",
+        "MASSIVE_S3_SECRET_ACCESS_KEY",
+    ):
+        values.pop(key)
+    env_file.write_text(
+        "".join(f"{key}={value}\n" for key, value in values.items()),
+        encoding="utf-8",
+    )
+
+    report = _evaluate(args)
+
+    assert report.safe_to_deploy_shadow is True
+    assert report.evidence_campaign_ready is False
+    checks = {item.name: item for item in report.checks}
+    assert checks["selected_postmarket_reference_provider"].passed is True
+    assert checks["configured_tiingo_api_key"].passed is True
+    assert checks["implemented_postmarket_reference_provider_adapter"].passed is False
+    assert not any("massive" in name for name in checks)
+
+
+def test_unknown_reference_provider_fails_campaign_closed(tmp_path):
+    args = _fixture(tmp_path)
+    with args["env_file"].open("a", encoding="utf-8") as handle:
+        handle.write("POSTMARKET_REFERENCE_PROVIDER=unknown-provider\n")
+
+    report = _evaluate(args)
+
+    assert report.safe_to_deploy_shadow is True
+    assert report.evidence_campaign_ready is False
+    checks = {item.name: item for item in report.checks}
+    assert checks["selected_postmarket_reference_provider"].passed is False
+    assert checks["implemented_postmarket_reference_provider_adapter"].passed is False
+
+
 def test_corrupt_live_database_blocks_shadow_deploy(tmp_path):
     args = _fixture(tmp_path)
     (args["data_dir"] / "journal.db").write_bytes(b"not sqlite")
