@@ -332,6 +332,13 @@ evidence.
   The shadow observer may remain enabled to collect evidence. Customer routing
   must remain absent/off until the acceptance gate below is satisfied and the
   owner explicitly approves a separate delivery release.
+- Signal-quality program status: implemented as a read-only, fail-closed
+  inventory over the existing authoritative gates. One JSON report identifies
+  the first missing requirement across clean sessions, outcomes, census,
+  independent-provider proof, empirical labels/holdout, calibration, reviews,
+  and the reproducible final gate. It cannot activate delivery and does not
+  turn an operationally healthy service into a quality claim. See
+  `docs/postmarket-program-status.md`.
 
 ## Shadow acceptance gate
 

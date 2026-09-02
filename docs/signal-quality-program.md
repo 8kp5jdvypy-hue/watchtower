@@ -215,6 +215,16 @@ licensed reference contract without printing secrets or changing production.
 It distinguishes safe shadow deployment from full evidence-campaign readiness.
 See `docs/postmarket-signal-quality-preflight.md`.
 
+Program progress ledger: `tradebot.postmarket_program_status` provides one
+read-only, fail-closed status report across database integrity, ten clean
+sessions, append-only outcome quality, full-universe censuses, independent
+provider proofs, the locked empirical experiment, blinded labels, empirical
+and calibration holdouts, independent customer reviews, and the final customer
+review gate. It recomputes a claimed final gate from its exact digest-bound
+inputs rather than trusting the verdict string. It never enables delivery and
+returns a nonzero status until the complete inventory is eligible for a
+separate owner review. See `docs/postmarket-program-status.md`.
+
 Stage-1 retention prerequisite: `tradebot/screening_archive.py` publishes
 deterministic SHA-256-addressed archives for every completed screening session,
 with nightly catch-up before encrypted backup and full creation/restore
