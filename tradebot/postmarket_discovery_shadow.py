@@ -1,6 +1,8 @@
 """Default-off, alert-incapable market-wide postmarket discovery service."""
 from __future__ import annotations
 
+import ctypes
+import gc
 import json
 import logging
 import math
@@ -473,6 +475,61 @@ def _heartbeat(status: str, now: datetime, **extra) -> dict:
         "code_version": code_version(),
         **extra,
     }
+
+
+def release_process_memory() -> None:
+    """Return completed maintenance allocations to the OS when possible.
+
+    Full-universe evidence jobs intentionally run in this long-lived process.
+    CPython can keep their freed arenas resident, which is material on the
+    2-GiB production host.  Collection is portable; ``malloc_trim`` is a
+    best-effort glibc optimization and must never make maintenance fail.
+    """
+    gc.collect()
+    try:
+        trim = getattr(ctypes.CDLL(None), "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except (AttributeError, OSError):
+        logger.debug("process allocator does not expose malloc_trim")
+
+
+def run_idle_maintenance_stages(
+    stages: tuple[tuple[str, Callable[[], dict]], ...],
+    *,
+    started_at: datetime,
+    heartbeat_path: Path = HEARTBEAT_PATH,
+    heartbeat_writer: Callable[[Path, dict], None] = write_heartbeat_atomic,
+    now_fn: Callable[[], datetime] = _utc_now,
+    memory_releaser: Callable[[], None] = release_process_memory,
+) -> dict:
+    """Run idle maintenance with liveness and bounded resident memory.
+
+    A heartbeat is written before any work and on both sides of every stage.
+    This makes startup observable even when a full-universe job is due and
+    ensures completed provider payloads do not accumulate across stages.
+    """
+    fields: dict = {}
+
+    def publish(stage: str) -> None:
+        heartbeat_writer(
+            heartbeat_path,
+            _heartbeat(
+                "idle",
+                now_fn(),
+                maintenance_started_at_utc=started_at.isoformat(),
+                maintenance_stage=stage,
+                **fields,
+            ),
+        )
+
+    publish("starting")
+    for name, stage in stages:
+        publish(name)
+        fields.update(stage())
+        memory_releaser()
+        publish(f"{name}_complete")
+    return fields
 
 
 def configure_logging() -> None:
@@ -1308,75 +1365,106 @@ def main() -> int:
             )
             continue
         if not postmarket_is_active(now):
-            rth_fields = rth_handoff_reconcile_heartbeat_fields(
-                now,
-                shadow_conn,
-                version=version,
-                run_id=run_id,
-            )
-            lifecycle_fields = lifecycle_heartbeat_fields(
-                now,
-                shadow_conn,
-                data_feed=data_feed,
-                version=version,
-                run_id=run_id,
-            )
-            context_fields = context_backfill_heartbeat_fields(
-                now,
-                shadow_conn,
-                journal_conn,
-                universe_conn,
-                version=version,
-            )
-            rank_fields = rank_heartbeat_fields(
-                _utc_now(),
-                shadow_conn,
-                version=version,
-                run_id=run_id,
-            )
-            quality_fields = quality_backfill_heartbeat_fields(
-                now,
-                shadow_conn,
-                data_feed=data_feed,
-                version=version,
-                run_id=run_id,
-            )
-            census_fields = recall_census_heartbeat_fields(
-                now,
-                shadow_conn,
-                universe_conn,
-                data_feed=data_feed,
-                version=version,
-            )
-            rth_census_fields = rth_missed_mover_census_heartbeat_fields(
-                now,
-                shadow_conn,
-                universe_conn,
-                data_feed=data_feed,
-                version=version,
-            )
-            provider_fields = provider_proof_heartbeat_fields(
-                now,
-                shadow_conn,
-                version=version,
+            maintenance_fields = run_idle_maintenance_stages(
+                (
+                    (
+                        "rth_handoff",
+                        lambda: rth_handoff_reconcile_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            version=version,
+                            run_id=run_id,
+                        ),
+                    ),
+                    (
+                        "lifecycle",
+                        lambda: lifecycle_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            data_feed=data_feed,
+                            version=version,
+                            run_id=run_id,
+                        ),
+                    ),
+                    (
+                        "context",
+                        lambda: context_backfill_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            journal_conn,
+                            universe_conn,
+                            version=version,
+                        ),
+                    ),
+                    (
+                        "rank",
+                        lambda: rank_heartbeat_fields(
+                            _utc_now(),
+                            shadow_conn,
+                            version=version,
+                            run_id=run_id,
+                        ),
+                    ),
+                    (
+                        "quality_backfill",
+                        lambda: quality_backfill_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            data_feed=data_feed,
+                            version=version,
+                            run_id=run_id,
+                        ),
+                    ),
+                    (
+                        "recall_census",
+                        lambda: recall_census_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            universe_conn,
+                            data_feed=data_feed,
+                            version=version,
+                        ),
+                    ),
+                    (
+                        "rth_missed_mover_census",
+                        lambda: rth_missed_mover_census_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            universe_conn,
+                            data_feed=data_feed,
+                            version=version,
+                            daily_fetch=_rth_daily_bars_fetch,
+                        ),
+                    ),
+                    (
+                        "provider_proof",
+                        lambda: provider_proof_heartbeat_fields(
+                            now,
+                            shadow_conn,
+                            version=version,
+                        ),
+                    ),
+                    (
+                        "discovery_audit",
+                        lambda: discovery_audit_heartbeat_fields(now),
+                    ),
+                    (
+                        "rth_audit",
+                        lambda: rth_audit_heartbeat_fields(
+                            now, expected_session=rth_audit_session_due(now)
+                        ),
+                    ),
+                ),
+                started_at=now,
             )
             write_heartbeat_atomic(
                 HEARTBEAT_PATH,
                 _heartbeat(
                     "idle",
-                    now,
-                    **discovery_audit_heartbeat_fields(now),
-                    **rth_audit_heartbeat_fields(
-                        now, expected_session=rth_audit_session_due(now)
-                    ),
-                    **lifecycle_fields,
-                    **context_fields,
-                    **rank_fields,
-                    **quality_fields,
-                    **census_fields,
-                    **rth_census_fields,
-                    **provider_fields,
-                    **rth_fields,
+                    _utc_now(),
+                    maintenance_started_at_utc=now.isoformat(),
+                    maintenance_stage="complete",
+                    **maintenance_fields,
                 ),
             )
             time.sleep(discovery_idle_sleep_seconds(now))

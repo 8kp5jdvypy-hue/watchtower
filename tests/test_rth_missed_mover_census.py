@@ -29,6 +29,23 @@ POSTMARKET_END = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
 NOW = POSTMARKET_END + timedelta(minutes=5)
 
 
+def test_rth_census_fetch_uses_bounded_daily_lookback(monkeypatch):
+    observed = {}
+
+    def fake_fetch(symbols, *, lookback_days):
+        observed["symbols"] = symbols
+        observed["lookback_days"] = lookback_days
+        return {}
+
+    monkeypatch.setattr(
+        "tradebot.vendors.alpaca.fetch_daily_bars_bulk",
+        fake_fetch,
+    )
+
+    assert discovery_shadow._rth_daily_bars_fetch(["AAPL"]) == {}
+    assert observed == {"symbols": ["AAPL"], "lookback_days": 10}
+
+
 def _bar(
     symbol: str,
     session: date,
