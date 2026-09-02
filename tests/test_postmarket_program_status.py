@@ -15,6 +15,11 @@ from tradebot.postmarket_program_status import (
 )
 from tradebot import postmarket_program_status as program_status
 from tradebot.postmarket_customer_dry_run_campaign import POLICY_FIELDS
+from tradebot.postmarket_rank import (
+    COMPONENT_WEIGHTS,
+    rank_contract_sha256,
+    rank_thresholds,
+)
 
 
 NOW = datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)
@@ -30,9 +35,42 @@ def _database(
     conn = sqlite3.connect(path)
     conn.executescript(
         """
-        CREATE TABLE postmarket_candidate_context (id INTEGER);
-        CREATE TABLE postmarket_candidate_lifecycle (id INTEGER);
-        CREATE TABLE postmarket_candidate_ranks (id INTEGER);
+        CREATE TABLE postmarket_candidate_context (
+          context_id INTEGER, candidate_id INTEGER, context_version INTEGER,
+          session TEXT, symbol TEXT, direction TEXT,
+          lifecycle_observation_seq INTEGER,
+          lifecycle_evidence_bar_open_ts_utc TEXT,
+          status TEXT, volatility_status TEXT, market_relative_status TEXT,
+          sector_relative_status TEXT, liquidity_status TEXT,
+          catalyst_status TEXT, catalyst_sources_json TEXT,
+          catalyst_details_json TEXT, catalyst_coverage_json TEXT,
+          data_confidence_status TEXT, data_confidence_coverage_pct REAL,
+          data_confidence_components_json TEXT
+        );
+        CREATE TABLE postmarket_candidate_lifecycle (
+          transition_id INTEGER, candidate_id INTEGER, lifecycle_version INTEGER,
+          session TEXT, symbol TEXT, direction TEXT, state TEXT,
+          actionability TEXT, evidence_bar_open_ts_utc TEXT
+        );
+        CREATE TABLE postmarket_candidate_lifecycle_observations (
+          seq INTEGER, candidate_id INTEGER, lifecycle_version INTEGER,
+          session TEXT, symbol TEXT, evidence_bar_open_ts_utc TEXT
+        );
+        CREATE TABLE postmarket_rank_runs (
+          rank_run_id INTEGER, rank_version INTEGER,
+          rank_contract_sha256 TEXT, status TEXT,
+          weights_json TEXT, thresholds_json TEXT
+        );
+        CREATE TABLE postmarket_candidate_ranks (
+          rank_id INTEGER, rank_run_id INTEGER, candidate_id INTEGER,
+          context_id INTEGER, transition_id INTEGER, observation_seq INTEGER,
+          session TEXT, symbol TEXT, direction TEXT, lifecycle_state TEXT,
+          rankable INTEGER, ordinal_rank INTEGER, evidence_score REAL,
+          raw_component_score REAL, penalty_total REAL,
+          evidence_coverage_pct REAL, components_json TEXT,
+          penalties_json TEXT, exclusion_reasons_json TEXT,
+          explanation_json TEXT
+        );
         CREATE TABLE postmarket_rank_experiments (
           experiment_id TEXT, holdout_sessions_json TEXT, policy_json TEXT
         );
@@ -56,9 +94,56 @@ def _database(
         """
     )
     if complete:
-        conn.execute("INSERT INTO postmarket_candidate_context VALUES (1)")
-        conn.execute("INSERT INTO postmarket_candidate_lifecycle VALUES (1)")
-        conn.execute("INSERT INTO postmarket_candidate_ranks VALUES (1)")
+        bar_utc = "2026-08-10T20:05:00+00:00"
+        catalyst_coverage = {
+            key: "CONFIGURED"
+            for key in (
+                "earnings", "filings", "guidance", "news", "regulatory", "analyst"
+            )
+        }
+        confidence_components = {
+            key: True
+            for key in (
+                "completed_bar_gate", "sip_bar_provenance", "operational_fetches",
+                "quote_temporal_integrity", "volatility_history", "market_benchmark",
+                "rth_liquidity", "asset_point_in_time",
+            )
+        }
+        rank_components = dict(COMPONENT_WEIGHTS)
+        conn.execute(
+            "INSERT INTO postmarket_candidate_context VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                1, 11, 2, SESSIONS[0], "AAA", "up", 1, bar_utc, "complete",
+                "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "VERIFIED",
+                json.dumps(["earnings"]), json.dumps([{"source": "earnings"}]),
+                json.dumps(catalyst_coverage), "HIGH", 100.0,
+                json.dumps(confidence_components),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_candidate_lifecycle VALUES (?,?,?,?,?,?,?,?,?)",
+            (1, 11, 1, SESSIONS[0], "AAA", "up", "CONFIRMED", "QUALIFIED", bar_utc),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_candidate_lifecycle_observations VALUES (?,?,?,?,?,?)",
+            (1, 11, 1, SESSIONS[0], "AAA", bar_utc),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_rank_runs VALUES (?,?,?,?,?,?)",
+            (
+                1, 2, rank_contract_sha256(), "complete",
+                json.dumps(COMPONENT_WEIGHTS), json.dumps(rank_thresholds()),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_candidate_ranks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                1, 1, 11, 1, 1, 1, SESSIONS[0], "AAA", "up", "CONFIRMED",
+                1, 1, 100.0, 100.0, 0.0, 100.0, json.dumps(rank_components),
+                json.dumps({}), json.dumps([]),
+                json.dumps([f"{key}=+1.00" for key in rank_components]),
+            ),
+        )
         conn.execute(
             "INSERT INTO postmarket_rank_experiments VALUES (?,?,?)",
             (
@@ -291,6 +376,78 @@ def test_empty_valid_database_reports_the_first_real_next_action(tmp_path):
     assert report.customer_delivery_enabled is False
     assert report.blockers[0] == "CLEAN_DISCOVERY_SESSIONS"
     assert "ten clean sessions" in report.next_action
+
+
+def test_populated_tables_do_not_replace_a_feature_complete_candidate_chain(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "UPDATE postmarket_candidate_context SET sector_relative_status='UNAVAILABLE'"
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones
+        if item.code == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    )
+    assert milestone.observed["context_rows"] == 1
+    assert milestone.observed["lifecycle_transition_rows"] == 1
+    assert milestone.observed["rank_rows"] == 1
+    assert milestone.observed["coherent_complete_chains"] == 0
+    assert milestone.state != STATE_COMPLETE
+    assert report.eligible_for_customer_delivery_review is False
+
+
+def test_rank_decomposition_must_cover_every_named_component(tmp_path, monkeypatch):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    raw, = conn.execute(
+        "SELECT components_json FROM postmarket_candidate_ranks"
+    ).fetchone()
+    components = json.loads(raw)
+    del components["verified_catalyst"]
+    conn.execute(
+        "UPDATE postmarket_candidate_ranks SET components_json=?",
+        (json.dumps(components),),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones
+        if item.code == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    )
+    assert milestone.observed["coherent_complete_chains"] == 0
+    assert milestone.state != STATE_COMPLETE
+
+
+def test_rank_must_link_the_exact_context_transition_and_observation(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute("UPDATE postmarket_candidate_ranks SET observation_seq=999")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones
+        if item.code == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    )
+    assert milestone.observed["coherent_complete_chains"] == 0
+    assert milestone.state != STATE_COMPLETE
 
 
 def test_provider_proofs_do_not_count_outside_the_clean_session_set(tmp_path):
