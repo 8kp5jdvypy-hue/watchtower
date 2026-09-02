@@ -334,6 +334,50 @@ def test_complete_discovery_session_is_operationally_eligible(tmp_path):
     assert json.loads(report_json(report))["operational_clean"] is True
 
 
+def test_discovery_observations_are_streamed_without_fetchall(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    _seed_session(conn)
+
+    class StreamingOnlyCursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def __iter__(self):
+            return iter(self.cursor)
+
+        def fetchall(self):
+            raise AssertionError("discovery observations must be streamed")
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self.connection = connection
+
+        @property
+        def row_factory(self):
+            return self.connection.row_factory
+
+        @row_factory.setter
+        def row_factory(self, value):
+            self.connection.row_factory = value
+
+        def execute(self, sql, parameters=()):
+            cursor = self.connection.execute(sql, parameters)
+            if "FROM postmarket_discovery_observations o" in sql:
+                return StreamingOnlyCursor(cursor)
+            return cursor
+
+    report = audit_discovery_session(
+        ConnectionProxy(conn),
+        SESSION,
+        database="shadow.db",
+        audit_code_version="audit123",
+    )
+
+    assert report.operational_clean is True
+    assert report.operational.evaluated_symbols_total == 482
+    assert report.candidates[0].observation_ticks == 241
+
+
 def test_candidate_direction_reversal_reconciles_each_ledger_entry(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     times = _times()

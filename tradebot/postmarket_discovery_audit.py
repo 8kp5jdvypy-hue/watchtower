@@ -12,8 +12,8 @@ import math
 import os
 import sqlite3
 import tempfile
-from collections import Counter, defaultdict
-from dataclasses import asdict, dataclass
+from collections import Counter
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -82,6 +82,20 @@ class CandidateLifecycle:
     max_abs_move_pct: float
     max_notional: float
     sources: tuple[str, ...]
+
+
+@dataclass
+class _ObservationSummary:
+    observation_ticks: int = 0
+    latest_outcome: str = ""
+    latest_tick_utc: str = ""
+    max_abs_move_pct: float = 0.0
+    max_notional: float = 0.0
+    candidate_observations: int = 0
+    first_candidate_completed_by_direction: dict[str, datetime] = field(
+        default_factory=dict
+    )
+    near_miss: bool = False
 
 
 @dataclass(frozen=True)
@@ -331,7 +345,7 @@ def audit_discovery_session(
             WHERE t.session=? ORDER BY t.tick_utc,o.symbol
             """,
             (session.isoformat(),),
-        ).fetchall()
+        )
         candidates = conn.execute(
             "SELECT * FROM postmarket_discovery_candidates WHERE session=? "
             "ORDER BY first_detected_at,symbol",
@@ -529,22 +543,15 @@ def audit_discovery_session(
         )
         coverage_pct = round(100 * covered / duration, 2) if duration else 0.0
 
-    observation_counts = Counter(row["tick_id"] for row in observations)
-    observation_candidates = Counter(
-        row["tick_id"] for row in observations if row["outcome"] == "CANDIDATE"
-    )
-    observation_errors = Counter(
-        row["tick_id"] for row in observations if row["outcome"] == "FETCH_ERROR"
-    )
-    observation_no_bars = Counter(
-        row["tick_id"]
-        for row in observations
-        if row["outcome"] == "NO_BARS_RETURNED"
-    )
-    observations_by_symbol: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    observation_counts: Counter[int] = Counter()
+    observation_candidates: Counter[int] = Counter()
+    observation_errors: Counter[int] = Counter()
+    observation_no_bars: Counter[int] = Counter()
+    outcome_counts: Counter[str] = Counter()
+    observation_summaries: dict[str, _ObservationSummary] = {}
     source_observations: Counter[str] = Counter()
     scheduled_symbols: set[str] = set()
-    sweep_positions_by_tick: dict[int, dict[int, str]] = defaultdict(dict)
+    sweep_positions_by_tick: dict[int, bytearray] = {}
     max_source_ages: list[float] = []
     updates_by_tick: dict[int, dict[str, datetime]] = {}
     ticks_by_id = {row["tick_id"]: row for row in ticks}
@@ -555,10 +562,47 @@ def audit_discovery_session(
         updates_by_tick[row["tick_id"]] = updates
 
     for row in observations:
-        tick_id = row["tick_id"]
-        observations_by_symbol[row["symbol"]].append(row)
+        tick_id = int(row["tick_id"])
+        symbol = str(row["symbol"])
+        outcome = str(row["outcome"])
+        observation_counts[tick_id] += 1
+        outcome_counts[outcome] += 1
+        if outcome == "CANDIDATE":
+            observation_candidates[tick_id] += 1
+        elif outcome == "FETCH_ERROR":
+            observation_errors[tick_id] += 1
+        elif outcome == "NO_BARS_RETURNED":
+            observation_no_bars[tick_id] += 1
+        summary = observation_summaries.setdefault(symbol, _ObservationSummary())
+        summary.observation_ticks += 1
+        summary.latest_outcome = outcome
+        summary.latest_tick_utc = str(row["tick_utc"])
+        if row["move_pct"] is not None:
+            summary.max_abs_move_pct = max(
+                summary.max_abs_move_pct, abs(float(row["move_pct"]))
+            )
+        if row["cumulative_notional"] is not None:
+            summary.max_notional = max(
+                summary.max_notional, float(row["cumulative_notional"])
+            )
+        if outcome == "CANDIDATE":
+            summary.candidate_observations += 1
+            direction = row["direction"]
+            if direction is not None:
+                completed = _aware_datetime(
+                    row["completed_utc"], "qualifying completed_utc"
+                )
+                prior = summary.first_candidate_completed_by_direction.get(
+                    str(direction)
+                )
+                if prior is None or completed < prior:
+                    summary.first_candidate_completed_by_direction[
+                        str(direction)
+                    ] = completed
+        if outcome in NEAR_MISS_OUTCOMES or abs(float(row["move_pct"] or 0)) >= 5:
+            summary.near_miss = True
         if row["event_date"] != session.isoformat():
-            _issue(issues, "EVENT_DATE_MISMATCH", f"{row['symbol']} has {row['event_date']}")
+            _issue(issues, "EVENT_DATE_MISMATCH", f"{symbol} has {row['event_date']}")
         if (
             row["data_feed"] != row["tick_data_feed"]
             or row["market_data_provider"] != row["tick_provider"]
@@ -663,14 +707,16 @@ def audit_discovery_session(
                         )
                     else:
                         position = int(item["universe_position"])
-                        prior_symbol = sweep_positions_by_tick[int(tick_id)].get(position)
-                        if prior_symbol is not None and prior_symbol != row["symbol"]:
+                        bitmap = sweep_positions_by_tick.setdefault(
+                            tick_id, bytearray(int(tick["universe_symbols"]))
+                        )
+                        if bitmap[position]:
                             _issue(
                                 issues,
                                 "SWEEP_POSITION_DUPLICATED",
                                 f"tick {tick_id} maps position {position} to multiple symbols",
                             )
-                        sweep_positions_by_tick[int(tick_id)][position] = row["symbol"]
+                        bitmap[position] = 1
                     continue
                 if item.get("source") not in SOURCE_ENDPOINT:
                     _issue(
@@ -854,12 +900,14 @@ def audit_discovery_session(
                 expected_positions = set(
                     range(start, start + expected_shard_symbols)
                 )
-                actual_positions = set(sweep_positions_by_tick[int(tick_id)])
-                if actual_positions != expected_positions:
+                actual_positions = sum(
+                    sweep_positions_by_tick.get(int(tick_id), bytearray())
+                )
+                if actual_positions != len(expected_positions):
                     _issue(
                         issues,
                         "SWEEP_POSITION_COVERAGE_MISMATCH",
-                        f"tick {tick_id} stored {len(actual_positions)} of "
+                        f"tick {tick_id} stored {actual_positions} of "
                         f"{len(expected_positions)} expected sweep positions",
                     )
                 expected_rows = 4 * row["requested_top_n"] + int(
@@ -935,19 +983,18 @@ def audit_discovery_session(
     candidate_lifecycles: list[CandidateLifecycle] = []
     candidate_symbols = {row["symbol"] for row in candidates}
     for candidate in candidates:
-        rows = observations_by_symbol.get(candidate["symbol"], [])
-        qualifying = [row for row in rows if row["outcome"] == "CANDIDATE"]
-        if not qualifying:
+        summary = observation_summaries.get(candidate["symbol"])
+        if summary is None or not summary.candidate_observations:
             _issue(
                 issues,
                 "CANDIDATE_WITHOUT_OBSERVATION",
                 f"{candidate['symbol']} has no qualifying observation",
             )
             continue
-        directional_qualifying = [
-            row for row in qualifying if row["direction"] == candidate["direction"]
-        ]
-        if not directional_qualifying:
+        first_qualifying = summary.first_candidate_completed_by_direction.get(
+            candidate["direction"]
+        )
+        if first_qualifying is None:
             _issue(
                 issues,
                 "CANDIDATE_DIRECTION_MISMATCH",
@@ -976,23 +1023,8 @@ def audit_discovery_session(
         except ValueError as exc:
             _issue(issues, "MALFORMED_CANDIDATE_SOURCES", str(exc))
             sources = ()
-        latest = rows[-1]
-        moves = [abs(float(row["move_pct"])) for row in rows if row["move_pct"] is not None]
-        notionals = [
-            float(row["cumulative_notional"])
-            for row in rows
-            if row["cumulative_notional"] is not None
-        ]
         first_detected = _aware_datetime(
             candidate["first_detected_at"], "candidate first_detected_at"
-        )
-        first_qualifying = (
-            min(
-                _aware_datetime(row["completed_utc"], "qualifying completed_utc")
-                for row in directional_qualifying
-            )
-            if directional_qualifying
-            else None
         )
         if first_qualifying is not None and first_detected != first_qualifying:
             _issue(
@@ -1007,13 +1039,13 @@ def audit_discovery_session(
                 first_detected_at=first_detected.isoformat(),
                 initial_move_pct=float(candidate["move_pct"]),
                 initial_notional=float(candidate["cumulative_notional"]),
-                observation_ticks=len(rows),
-                latest_outcome=latest["outcome"],
+                observation_ticks=summary.observation_ticks,
+                latest_outcome=summary.latest_outcome,
                 latest_observed_at=_aware_datetime(
-                    latest["tick_utc"], "candidate latest tick"
+                    summary.latest_tick_utc, "candidate latest tick"
                 ).isoformat(),
-                max_abs_move_pct=max(moves) if moves else 0.0,
-                max_notional=max(notionals) if notionals else 0.0,
+                max_abs_move_pct=summary.max_abs_move_pct,
+                max_notional=summary.max_notional,
                 sources=sources,
             )
         )
@@ -1021,13 +1053,9 @@ def audit_discovery_session(
     near_misses = tuple(
         sorted(
             symbol
-            for symbol, rows in observations_by_symbol.items()
+            for symbol, summary in observation_summaries.items()
             if symbol not in candidate_symbols
-            and any(
-                row["outcome"] in NEAR_MISS_OUTCOMES
-                or abs(float(row["move_pct"] or 0)) >= 5
-                for row in rows
-            )
+            and summary.near_miss
         )
     )
     blocking = tuple(issue for issue in issues if issue.severity == "blocker")
@@ -1101,7 +1129,7 @@ def audit_discovery_session(
         requested_top_ns=tuple(sorted({row["requested_top_n"] for row in ticks})),
         endpoint_snapshots=len({row["endpoints_json"] for row in ticks}),
         threshold_snapshots=len({row["thresholds_json"] for row in ticks}),
-        outcome_counts=dict(sorted(Counter(row["outcome"] for row in observations).items())),
+        outcome_counts=dict(sorted(outcome_counts.items())),
         source_observations=dict(sorted(source_observations.items())),
         scheduled_overlap_symbols=len(scheduled_symbols),
     )
