@@ -36,6 +36,17 @@ Discovery also fails on any explicit subsystem `error`. A `degraded` evidence
 result remains visible but does not trigger a restart loop; missing market data
 is not the same as a dead worker.
 
+`postmarket-discovery` also has a Compose-enforced 700 MiB RAM limit and 1 GiB
+RAM-plus-swap limit. Production's streaming discovery audit normally remains
+far below that boundary; the limit contains a future materialization regression
+before it can starve SSH, the public API, or backups. Exact-revision deployment
+stops discovery before both verified backups, keeps it stopped during the image
+build after the predeploy backup, and restarts it only after the postdeploy
+backup. The wrapper waits for a healthy discovery container and rechecks public
+health before printing `DEPLOYMENT_VERIFIED`. An interrupted predeploy backup
+attempts to restore a discovery container that was running when deployment
+began.
+
 The `postmarket-customer-dry-run` service is independently default-off and has
 no delivery/outbox dependency. When explicitly enabled, its health probe
 requires a fresh matching-revision heartbeat all day. Enabled startup also

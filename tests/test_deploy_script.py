@@ -127,6 +127,14 @@ set -euo pipefail
 echo "GIT_SHA=${GIT_SHA:-}|docker $*" >> "$FAKE_COMMAND_LOG"
 if [[ "$1" == "compose" && "$2" == "up" ]]; then
   [[ "${FAKE_DOCKER_UP_FAIL:-0}" == "0" ]]
+elif [[ "$1" == "compose" && "$2" == "ps" && "$3" == "--status" ]]; then
+  [[ "${FAKE_DISCOVERY_RUNNING:-1}" == "1" ]] && echo "postmarket-discovery"
+elif [[ "$1" == "compose" && "$2" == "ps" && "$3" == "-q" ]]; then
+  echo "fake-discovery-container"
+elif [[ "$1" == "compose" && "$2" == "stop" ]]; then
+  :
+elif [[ "$1" == "compose" && "$2" == "start" ]]; then
+  [[ "${FAKE_DOCKER_START_FAIL:-0}" == "0" ]]
 elif [[ "$1" == "compose" && "$2" == "exec" ]]; then
   service="$4"
   if [[ "${FAKE_MISMATCH_SERVICE:-}" == "$service" ]]; then
@@ -134,6 +142,8 @@ elif [[ "$1" == "compose" && "$2" == "exec" ]]; then
   else
     echo "${FAKE_EXPECTED_REVISION:0:7}"
   fi
+elif [[ "$1" == "inspect" ]]; then
+  echo "${FAKE_DISCOVERY_HEALTH:-healthy}"
 fi
 ''',
     )
@@ -211,6 +221,31 @@ def test_happy_path_binds_revision_backs_up_waits_and_verifies_every_surface(dep
 
     log = _log(deploy_env)
     assert log.count("systemctl start perch-backup.service") == 2
+    first_stop = log.index(
+        "docker compose stop --timeout 30 postmarket-discovery"
+    )
+    predeploy_backup = log.index("systemctl start perch-backup.service")
+    compose_up = log.index(
+        "GIT_SHA=aaaaaaa|docker compose up -d --build --wait --wait-timeout 300"
+    )
+    second_stop = log.index(
+        "docker compose stop --timeout 30 postmarket-discovery",
+        first_stop + 1,
+    )
+    postdeploy_backup = log.index(
+        "systemctl start perch-backup.service",
+        predeploy_backup + 1,
+    )
+    resume = log.index(
+        "docker compose start postmarket-discovery",
+        second_stop,
+    )
+    assert first_stop < predeploy_backup < compose_up
+    assert compose_up < second_stop < postdeploy_backup < resume
+    assert "docker inspect --format" in log
+    output_lines = result.stdout.splitlines()
+    assert output_lines.count('public_health={"ok":true}') == 1
+    assert output_lines.count('postbackup_public_health={"ok":true}') == 1
     assert f"git checkout --detach {REVISION}" in log
     assert "GIT_SHA=aaaaaaa|docker compose up -d --build --wait --wait-timeout 300" in log
     for service in APP_SERVICES:
@@ -264,6 +299,35 @@ def test_predeploy_backup_failure_stops_before_checkout_or_compose(deploy_env):
     log = _log(deploy_env)
     assert "git checkout" not in log
     assert "docker compose up" not in log
+    assert "docker compose start postmarket-discovery" in log
+
+
+def test_predeploy_failure_does_not_start_discovery_that_was_already_stopped(deploy_env):
+    result = _run(
+        deploy_env,
+        REVISION,
+        FAKE_DISCOVERY_RUNNING=0,
+        FAKE_BACKUP_RESULT="failed",
+        FAKE_BACKUP_STATUS=1,
+    )
+
+    assert result.returncode == 1
+    log = _log(deploy_env)
+    assert "docker compose stop" not in log
+    assert "docker compose start postmarket-discovery" not in log
+
+
+def test_postdeploy_discovery_restart_must_be_healthy(deploy_env):
+    result = _run(
+        deploy_env,
+        REVISION,
+        FAKE_DISCOVERY_HEALTH="unhealthy",
+    )
+
+    assert result.returncode == 1
+    assert "postmarket-discovery failed after backup: state=unhealthy" in result.stderr
+    assert "DEPLOYMENT_VERIFIED" not in result.stdout
+    assert "postbackup_public_health" not in result.stdout
 
 
 def test_backup_service_start_failure_is_attributed_before_checkout(deploy_env):

@@ -72,6 +72,83 @@ fi
 
 PREVIOUS_REVISION="$(git rev-parse --verify 'HEAD^{commit}')"
 
+DISCOVERY_SERVICE="postmarket-discovery"
+DISCOVERY_RESTORE_REQUIRED=0
+
+discovery_is_running() {
+  docker compose ps --status running --services \
+    | grep -Fxq "$DISCOVERY_SERVICE"
+}
+
+pause_discovery() {
+  local phase="$1"
+  if discovery_is_running; then
+    echo "Pausing $DISCOVERY_SERVICE for $phase..."
+    docker compose stop --timeout 30 "$DISCOVERY_SERVICE"
+    DISCOVERY_RESTORE_REQUIRED=1
+    echo "discovery_paused[$phase]=true"
+  else
+    DISCOVERY_RESTORE_REQUIRED=0
+    echo "discovery_paused[$phase]=already_stopped"
+  fi
+}
+
+wait_for_discovery_health() {
+  local container_id state deadline
+  container_id="$(docker compose ps -q "$DISCOVERY_SERVICE")"
+  if [[ -z "$container_id" ]]; then
+    echo "ERROR: $DISCOVERY_SERVICE container is missing after restart." >&2
+    return 1
+  fi
+
+  deadline=$((SECONDS + 300))
+  while (( SECONDS < deadline )); do
+    state="$(
+      docker inspect --format \
+        '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' \
+        "$container_id"
+    )"
+    case "$state" in
+      healthy|running)
+        echo "discovery_health_after_backup=$state"
+        return 0
+        ;;
+      unhealthy|exited|dead)
+        echo "ERROR: $DISCOVERY_SERVICE failed after backup: state=$state" >&2
+        return 1
+        ;;
+    esac
+    sleep 2
+  done
+  echo "ERROR: $DISCOVERY_SERVICE did not become healthy after backup." >&2
+  return 1
+}
+
+resume_discovery() {
+  local phase="$1"
+  if (( DISCOVERY_RESTORE_REQUIRED == 0 )); then
+    return 0
+  fi
+  echo "Resuming $DISCOVERY_SERVICE after $phase..."
+  docker compose start "$DISCOVERY_SERVICE"
+  wait_for_discovery_health
+  DISCOVERY_RESTORE_REQUIRED=0
+  echo "discovery_resumed[$phase]=true"
+}
+
+restore_discovery_on_exit() {
+  local status=$?
+  trap - EXIT
+  if (( DISCOVERY_RESTORE_REQUIRED == 1 )); then
+    echo "Restoring $DISCOVERY_SERVICE after interrupted deployment..." >&2
+    if ! docker compose start "$DISCOVERY_SERVICE"; then
+      echo "ERROR: failed to restore $DISCOVERY_SERVICE after deployment error." >&2
+    fi
+  fi
+  exit "$status"
+}
+trap restore_discovery_on_exit EXIT
+
 run_backup() {
   local phase="$1" result status
   echo "Running verified $phase backup..."
@@ -90,6 +167,7 @@ run_backup() {
   echo "${phase}_backup=success"
 }
 
+pause_discovery predeploy_backup
 run_backup predeploy
 
 echo "Checking out exact revision $RESOLVED_REVISION..."
@@ -114,6 +192,9 @@ systemctl enable --now perch-screening-archive.timer
 SHORT_REVISION="${RESOLVED_REVISION:0:7}"
 echo "Building and starting revision $SHORT_REVISION..."
 GIT_SHA="$SHORT_REVISION" docker compose up -d --build --wait --wait-timeout 300
+# Compose has now replaced the intentionally paused predeploy container with
+# the exact-revision service and verified its health.
+DISCOVERY_RESTORE_REQUIRED=0
 
 APP_SERVICES=(
   worker
@@ -167,6 +248,15 @@ if [[ "$health_response" != *'"ok":true'* ]]; then
 fi
 echo "public_health=$health_response"
 
+pause_discovery postdeploy_backup
 run_backup postdeploy
+resume_discovery postdeploy_backup
+
+postbackup_health_response="$(curl -fsS https://api.perchmarkets.com/healthz)"
+if [[ "$postbackup_health_response" != *'"ok":true'* ]]; then
+  echo "ERROR: public health failed after postdeploy backup: $postbackup_health_response" >&2
+  exit 1
+fi
+echo "postbackup_public_health=$postbackup_health_response"
 
 echo "DEPLOYMENT_VERIFIED mode=$MODE previous=$PREVIOUS_REVISION revision=$RESOLVED_REVISION"
