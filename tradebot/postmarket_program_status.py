@@ -13,7 +13,7 @@ import json
 import math
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -26,6 +26,13 @@ from tradebot.postmarket_customer_dry_run_campaign import (
     parse_campaign_policy,
 )
 from tradebot.postmarket_lifecycle import LIFECYCLE_VERSION
+from tradebot.postmarket_empirical import (
+    CALENDAR as EMPIRICAL_CALENDAR,
+    EMPIRICAL_VERSION,
+    ET as EMPIRICAL_ET,
+    LABEL_METHODS,
+    TECHNICAL_MIN_RECALL,
+)
 from tradebot.postmarket_rank import (
     COMPONENT_WEIGHTS,
     RANK_VERSION,
@@ -232,6 +239,22 @@ _RANK_RUN_COLUMNS = {
     "weights_json",
     "thresholds_json",
 }
+_LOCKED_EXPERIMENT_COLUMNS = {
+    "experiment_id",
+    "empirical_version",
+    "status",
+    "created_at_utc",
+    "created_by",
+    "rank_version",
+    "rank_contract_sha256",
+    "label_method",
+    "development_sessions_json",
+    "holdout_sessions_json",
+    "eligibility_rule_json",
+    "selection_rule_json",
+    "policy_json",
+    "manifest_sha256",
+}
 _REQUIRED_RANK_COMPONENTS = set(COMPONENT_WEIGHTS)
 _REQUIRED_CONFIDENCE_COMPONENTS = {
     "completed_bar_gate",
@@ -278,6 +301,193 @@ def _finite_number(raw: object) -> bool:
     )
 
 
+def _locked_experiment_progress(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, object], frozenset[str]]:
+    """Validate immutable experiment contracts instead of counting rows."""
+    table = "postmarket_rank_experiments"
+    rows = _count(conn, table)
+    missing_schema = sorted(_LOCKED_EXPERIMENT_COLUMNS - _table_columns(conn, table))
+    observed: dict[str, object] = {
+        "rows": rows,
+        "valid_locked_experiments": 0,
+        "invalid_experiments": {},
+        "missing_schema": missing_schema,
+    }
+    if missing_schema:
+        return observed, frozenset()
+
+    original = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        experiments = conn.execute(
+            "SELECT * FROM postmarket_rank_experiments ORDER BY experiment_id"
+        ).fetchall()
+    finally:
+        conn.row_factory = original
+
+    valid: set[str] = set()
+    invalid: dict[str, list[str]] = {}
+    for index, row in enumerate(experiments, 1):
+        experiment_id = row["experiment_id"]
+        identity = (
+            experiment_id
+            if isinstance(experiment_id, str) and experiment_id
+            else f"row-{index}"
+        )
+        reasons: list[str] = []
+
+        def parse_object(field: str, expected_keys: set[str]) -> dict[str, object]:
+            value = _json_value(row[field], dict)
+            if value is None or set(value) != expected_keys:
+                reasons.append(f"{field} invalid")
+                return {}
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if canonical != row[field]:
+                reasons.append(f"{field} noncanonical")
+            return value
+
+        def parse_sessions(field: str) -> tuple[str, ...]:
+            value = _json_value(row[field], list)
+            if value is None or not value or any(not isinstance(item, str) for item in value):
+                reasons.append(f"{field} invalid")
+                return ()
+            sessions = tuple(value)
+            canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if canonical != row[field] or sessions != tuple(sorted(set(sessions))):
+                reasons.append(f"{field} noncanonical")
+            for session in sessions:
+                try:
+                    parsed = date.fromisoformat(session)
+                except ValueError:
+                    reasons.append(f"{field} contains invalid session")
+                    continue
+                if parsed.isoformat() != session or not EMPIRICAL_CALENDAR.is_session(parsed):
+                    reasons.append(f"{field} contains non-XNYS session")
+            return sessions
+
+        dev = parse_sessions("development_sessions_json")
+        holdout = parse_sessions("holdout_sessions_json")
+        eligibility = parse_object(
+            "eligibility_rule_json",
+            {"move_pct", "min_cumulative_notional", "persistence_bars"},
+        )
+        selection = parse_object(
+            "selection_rule_json",
+            {"minimum_evidence_score", "maximum_ordinal_rank"},
+        )
+        policy = parse_object(
+            "policy_json",
+            {
+                "min_precision",
+                "min_recall",
+                "min_definitive_labels",
+                "min_positive_labels",
+            },
+        )
+
+        if not isinstance(experiment_id, str) or not experiment_id.strip():
+            reasons.append("experiment_id invalid")
+        if row["empirical_version"] != EMPIRICAL_VERSION:
+            reasons.append("empirical_version is not current")
+        if row["status"] != "locked":
+            reasons.append("status is not locked")
+        if not isinstance(row["created_by"], str) or not row["created_by"].strip():
+            reasons.append("created_by invalid")
+        if row["rank_version"] != RANK_VERSION:
+            reasons.append("rank_version is not current")
+        if row["rank_contract_sha256"] != rank_contract_sha256():
+            reasons.append("rank contract digest mismatch")
+        if row["label_method"] not in LABEL_METHODS:
+            reasons.append("label_method invalid")
+        if dev and holdout:
+            if set(dev) & set(holdout) or max(dev) >= min(holdout):
+                reasons.append("development/holdout split invalid")
+        if not (
+            _finite_number(eligibility.get("move_pct"))
+            and 0 < float(eligibility["move_pct"]) <= 100
+            and _finite_number(eligibility.get("min_cumulative_notional"))
+            and float(eligibility["min_cumulative_notional"]) > 0
+            and isinstance(eligibility.get("persistence_bars"), int)
+            and not isinstance(eligibility.get("persistence_bars"), bool)
+            and int(eligibility["persistence_bars"]) >= 2
+        ):
+            reasons.append("eligibility rule values invalid")
+        maximum_rank = selection.get("maximum_ordinal_rank")
+        if not (
+            _finite_number(selection.get("minimum_evidence_score"))
+            and 0 <= float(selection["minimum_evidence_score"]) <= 100
+            and (
+                maximum_rank is None
+                or (
+                    isinstance(maximum_rank, int)
+                    and not isinstance(maximum_rank, bool)
+                    and maximum_rank > 0
+                )
+            )
+        ):
+            reasons.append("selection rule values invalid")
+        if not (
+            _finite_number(policy.get("min_precision"))
+            and 0 < float(policy["min_precision"]) <= 1
+            and _finite_number(policy.get("min_recall"))
+            and TECHNICAL_MIN_RECALL <= float(policy["min_recall"]) <= 1
+            and isinstance(policy.get("min_definitive_labels"), int)
+            and not isinstance(policy.get("min_definitive_labels"), bool)
+            and int(policy["min_definitive_labels"]) > 0
+            and isinstance(policy.get("min_positive_labels"), int)
+            and not isinstance(policy.get("min_positive_labels"), bool)
+            and int(policy["min_positive_labels"]) > 0
+        ):
+            reasons.append("experiment policy values invalid")
+
+        created: datetime | None = None
+        try:
+            created = datetime.fromisoformat(row["created_at_utc"])
+            if created.tzinfo is None or created.utcoffset() is None:
+                raise ValueError
+            created = created.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            reasons.append("created_at_utc invalid")
+        if created is not None and dev and holdout:
+            final_development_close = datetime.combine(
+                date.fromisoformat(max(dev)), time(20, 0), tzinfo=EMPIRICAL_ET
+            ).astimezone(timezone.utc)
+            first_holdout_open = EMPIRICAL_CALENDAR.session_open(
+                date.fromisoformat(min(holdout))
+            ).to_pydatetime()
+            if created <= final_development_close or created >= first_holdout_open:
+                reasons.append("experiment was not locked prospectively")
+
+        if not reasons:
+            payload = {
+                "empirical_version": row["empirical_version"],
+                "experiment_id": experiment_id.strip(),
+                "created_at_utc": created.isoformat(),
+                "created_by": row["created_by"].strip(),
+                "rank_version": row["rank_version"],
+                "rank_contract_sha256": row["rank_contract_sha256"],
+                "label_method": row["label_method"],
+                "development_sessions": dev,
+                "holdout_sessions": holdout,
+                "eligibility_rule": eligibility,
+                "selection_rule": selection,
+                "policy": policy,
+            }
+            canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            if hashlib.sha256(canonical.encode()).hexdigest() != row["manifest_sha256"]:
+                reasons.append("manifest digest mismatch")
+
+        if reasons:
+            invalid[str(identity)] = sorted(set(reasons))
+        else:
+            valid.add(str(experiment_id))
+
+    observed["valid_locked_experiments"] = len(valid)
+    observed["invalid_experiments"] = invalid
+    return observed, frozenset(valid)
+
+
 def _feature_pipeline_progress(
     conn: sqlite3.Connection,
 ) -> tuple[dict[str, object], bool]:
@@ -317,6 +527,36 @@ def _feature_pipeline_progress(
     }
     if missing_schema:
         return observed, False
+
+    feature_status_counts: dict[str, dict[str, int]] = {}
+    for field in (
+        "status",
+        "volatility_status",
+        "market_relative_status",
+        "sector_relative_status",
+        "liquidity_status",
+        "catalyst_status",
+        "data_confidence_status",
+    ):
+        feature_status_counts[field] = {
+            str(value or "<EMPTY>"): int(count)
+            for value, count in conn.execute(
+                f"""SELECT {field},COUNT(*)
+                    FROM postmarket_candidate_context GROUP BY {field}"""
+            ).fetchall()
+        }
+    observed["context_status_counts"] = feature_status_counts
+    observed["rankable_rank_rows"] = _count(
+        conn,
+        "postmarket_candidate_ranks",
+        "rankable=1 AND ordinal_rank IS NOT NULL",
+    )
+    observed["rankable_lifecycle_rows"] = _count(
+        conn,
+        "postmarket_candidate_lifecycle",
+        "state IN ('CONFIRMED','STRENGTHENING','REQUALIFIED') "
+        "AND actionability='QUALIFIED'",
+    )
 
     original = conn.row_factory
     conn.row_factory = sqlite3.Row
@@ -612,13 +852,17 @@ def _passed_calibration_holdouts(
 
 def _holdout_label_progress(
     conn: sqlite3.Connection,
+    eligible_experiment_ids: frozenset[str],
 ) -> tuple[int, int, frozenset[str]]:
     """Return best latest-label count, its floor, and every passing experiment."""
     required_tables = {
         "postmarket_rank_experiments",
         "postmarket_independent_labels",
     }
-    if any(not _table_exists(conn, table) for table in required_tables):
+    if (
+        not eligible_experiment_ids
+        or any(not _table_exists(conn, table) for table in required_tables)
+    ):
         return 0, 0, frozenset()
     best_observed = best_required = 0
     passed_experiments: set[str] = set()
@@ -628,6 +872,8 @@ def _holdout_label_progress(
         FROM postmarket_rank_experiments ORDER BY experiment_id
         """
     ).fetchall():
+        if str(experiment_id) not in eligible_experiment_ids:
+            continue
         try:
             sessions = json.loads(raw_sessions)
             policy = json.loads(raw_policy)
@@ -959,13 +1205,16 @@ def build_program_status(
                 f"eligible provider proof; sessions={sorted(covered_clean_sessions)!r}",
             ))
 
-            experiments = _count(conn, "postmarket_rank_experiments")
+            experiment_progress, locked_experiment_ids = (
+                _locked_experiment_progress(conn)
+            )
             milestones.append(_milestone(
                 "LOCKED_EMPIRICAL_EXPERIMENT",
-                experiments,
-                1,
-                experiments >= 1,
-                "append-only postmarket_rank_experiments rows",
+                experiment_progress,
+                {"valid_locked_experiments": 1},
+                bool(locked_experiment_ids),
+                "manifest-valid prospective experiment contract bound to the "
+                "current rank contract",
             ))
             feature_progress, feature_pipeline_complete = (
                 _feature_pipeline_progress(conn)
@@ -997,7 +1246,7 @@ def build_program_status(
                 holdout_labels,
                 holdout_floor,
                 label_ready_experiments,
-            ) = _holdout_label_progress(conn)
+            ) = _holdout_label_progress(conn, locked_experiment_ids)
             milestones.append(_milestone(
                 "BLINDED_HOLDOUT_LABELS",
                 holdout_labels,
@@ -1078,7 +1327,10 @@ def build_program_status(
         "FULL_UNIVERSE_RECALL_CENSUS": "Run the finalized full-universe census for every clean session.",
         "INDEPENDENT_PROVIDER_PROOFS": "Complete licensing and run independent provider proofs for every clean session.",
         "LOCKED_EMPIRICAL_EXPERIMENT": "Prospectively lock development and holdout sessions before labeling results.",
-        "CONTEXT_LIFECYCLE_RANK_EVIDENCE": "Collect complete context, lifecycle, and decomposed rank rows in shadow mode.",
+        "CONTEXT_LIFECYCLE_RANK_EVIDENCE": (
+            "Resolve unavailable required context features and prove one exact "
+            "context/lifecycle/rank chain before counting campaign sessions."
+        ),
         "BLINDED_HOLDOUT_LABELS": "Import independently produced, rank-blind holdout label manifests.",
         "EMPIRICAL_HOLDOUT_PASS": "Unblind once, then evaluate the frozen empirical holdout without retuning.",
         "CALIBRATION_HOLDOUT_PASS": "Fit on development only and pass the frozen calibration on holdout.",
@@ -1086,11 +1338,29 @@ def build_program_status(
         "CUSTOMER_DELIVERY_REVIEW_GATE": "Seal and independently reproduce the final customer-delivery review gate.",
         "EVIDENCE_LEDGER_VALIDATION": "Resolve malformed or conflicting evidence before interpreting progress.",
     }
-    priority_blocker = (
-        "EVIDENCE_LEDGER_VALIDATION"
-        if "EVIDENCE_LEDGER_VALIDATION" in blockers
-        else (blockers[0] if blockers else "")
+    feature_milestone = next(
+        (
+            item
+            for item in milestones
+            if item.code == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+        ),
+        None,
     )
+    populated_but_incoherent = bool(
+        feature_milestone is not None
+        and feature_milestone.state != STATE_COMPLETE
+        and isinstance(feature_milestone.observed, dict)
+        and int(feature_milestone.observed.get("context_rows", 0)) > 0
+        and int(feature_milestone.observed.get("coherent_complete_chains", 0)) == 0
+    )
+    if "EVIDENCE_LEDGER_VALIDATION" in blockers:
+        priority_blocker = "EVIDENCE_LEDGER_VALIDATION"
+    elif "DATABASE_INTEGRITY" in blockers:
+        priority_blocker = "DATABASE_INTEGRITY"
+    elif populated_but_incoherent:
+        priority_blocker = "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    else:
+        priority_blocker = blockers[0] if blockers else ""
     next_action = (
         "Evidence is eligible for a separate owner review; customer delivery remains disabled."
         if eligible_review

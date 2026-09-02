@@ -17,13 +17,17 @@ from tradebot import postmarket_program_status as program_status
 from tradebot.postmarket_customer_dry_run_campaign import POLICY_FIELDS
 from tradebot.postmarket_rank import (
     COMPONENT_WEIGHTS,
+    RANK_VERSION,
     rank_contract_sha256,
     rank_thresholds,
 )
 
 
 NOW = datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)
-SESSIONS = tuple(f"2026-08-{day:02d}" for day in range(10, 20))
+SESSIONS = tuple(
+    f"2026-08-{day:02d}"
+    for day in (10, 11, 12, 13, 14, 17, 18, 19, 20, 21)
+)
 
 
 def _database(
@@ -72,7 +76,12 @@ def _database(
           explanation_json TEXT
         );
         CREATE TABLE postmarket_rank_experiments (
-          experiment_id TEXT, holdout_sessions_json TEXT, policy_json TEXT
+          experiment_id TEXT, empirical_version INTEGER, status TEXT,
+          created_at_utc TEXT, created_by TEXT, rank_version INTEGER,
+          rank_contract_sha256 TEXT, label_method TEXT,
+          development_sessions_json TEXT, holdout_sessions_json TEXT,
+          eligibility_rule_json TEXT, selection_rule_json TEXT,
+          policy_json TEXT, manifest_sha256 TEXT
         );
         CREATE TABLE postmarket_independent_labels (
           experiment_id TEXT, session TEXT, symbol TEXT, revision INTEGER,
@@ -144,19 +153,62 @@ def _database(
                 json.dumps([f"{key}=+1.00" for key in rank_components]),
             ),
         )
+        development_sessions = SESSIONS[:-2]
+        holdout_sessions = SESSIONS[-2:]
+        eligibility_rule = {
+            "move_pct": 5.0,
+            "min_cumulative_notional": 100_000.0,
+            "persistence_bars": 2,
+        }
+        selection_rule = {
+            "minimum_evidence_score": 60.0,
+            "maximum_ordinal_rank": 20,
+        }
+        experiment_policy = {
+            "min_precision": 0.8,
+            "min_recall": 0.95,
+            "min_definitive_labels": 2,
+            "min_positive_labels": 1,
+        }
+        created_at = "2026-08-20T01:00:00+00:00"
+        experiment_payload = {
+            "empirical_version": 1,
+            "experiment_id": "campaign-1",
+            "created_at_utc": created_at,
+            "created_by": "independent-review-owner",
+            "rank_version": RANK_VERSION,
+            "rank_contract_sha256": rank_contract_sha256(),
+            "label_method": "blind_bar_review",
+            "development_sessions": development_sessions,
+            "holdout_sessions": holdout_sessions,
+            "eligibility_rule": eligibility_rule,
+            "selection_rule": selection_rule,
+            "policy": experiment_policy,
+        }
+        experiment_manifest = hashlib.sha256(
+            json.dumps(
+                experiment_payload, sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
         conn.execute(
-            "INSERT INTO postmarket_rank_experiments VALUES (?,?,?)",
+            "INSERT INTO postmarket_rank_experiments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                "campaign-1",
-                json.dumps(SESSIONS[:2]),
-                json.dumps({"min_definitive_labels": 2}),
+                "campaign-1", 1, "locked", created_at,
+                "independent-review-owner", RANK_VERSION,
+                rank_contract_sha256(), "blind_bar_review",
+                json.dumps(development_sessions, separators=(",", ":")),
+                json.dumps(holdout_sessions, separators=(",", ":")),
+                json.dumps(eligibility_rule, sort_keys=True, separators=(",", ":")),
+                json.dumps(selection_rule, sort_keys=True, separators=(",", ":")),
+                json.dumps(experiment_policy, sort_keys=True, separators=(",", ":")),
+                experiment_manifest,
             ),
         )
         conn.executemany(
             "INSERT INTO postmarket_independent_labels VALUES (?,?,?,?,?)",
             [
-                ("campaign-1", SESSIONS[0], "AAA", 1, "eligible"),
-                ("campaign-1", SESSIONS[1], "BBB", 1, "ineligible"),
+                ("campaign-1", SESSIONS[-2], "AAA", 1, "eligible"),
+                ("campaign-1", SESSIONS[-1], "BBB", 1, "ineligible"),
             ],
         )
         empirical = json.dumps(
@@ -400,8 +452,42 @@ def test_populated_tables_do_not_replace_a_feature_complete_candidate_chain(
     assert milestone.observed["lifecycle_transition_rows"] == 1
     assert milestone.observed["rank_rows"] == 1
     assert milestone.observed["coherent_complete_chains"] == 0
+    assert milestone.observed["context_status_counts"]["sector_relative_status"] == {
+        "UNAVAILABLE": 1
+    }
     assert milestone.state != STATE_COMPLETE
     assert report.eligible_for_customer_delivery_review is False
+    assert report.next_action == (
+        "Resolve unavailable required context features and prove one exact "
+        "context/lifecycle/rank chain before counting campaign sessions."
+    )
+
+
+def test_forged_experiment_manifest_cannot_unlock_downstream_holdout_gates(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "UPDATE postmarket_rank_experiments SET manifest_sha256=?",
+        ("f" * 64,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestones = {item.code: item for item in report.milestones}
+    locked = milestones["LOCKED_EMPIRICAL_EXPERIMENT"]
+    assert locked.observed["valid_locked_experiments"] == 0
+    assert locked.observed["invalid_experiments"] == {
+        "campaign-1": ["manifest digest mismatch"]
+    }
+    assert locked.state != STATE_COMPLETE
+    assert milestones["BLINDED_HOLDOUT_LABELS"].state != STATE_COMPLETE
+    assert milestones["EMPIRICAL_HOLDOUT_PASS"].observed == 0
+    assert milestones["CALIBRATION_HOLDOUT_PASS"].observed == 0
 
 
 def test_rank_decomposition_must_cover_every_named_component(tmp_path, monkeypatch):
@@ -608,12 +694,11 @@ def test_label_revisions_count_latest_symbol_once(tmp_path, monkeypatch):
     database, audits, evidence = _fixture(tmp_path, complete=True)
     conn = sqlite3.connect(database)
     conn.execute(
-        "UPDATE postmarket_rank_experiments SET policy_json=?",
-        (json.dumps({"min_definitive_labels": 3}),),
+        "DELETE FROM postmarket_independent_labels WHERE symbol='BBB'",
     )
     conn.execute(
         "INSERT INTO postmarket_independent_labels VALUES (?,?,?,?,?)",
-        ("campaign-1", SESSIONS[0], "AAA", 2, "eligible"),
+        ("campaign-1", SESSIONS[-2], "AAA", 2, "eligible"),
     )
     conn.commit()
     conn.close()
@@ -624,8 +709,8 @@ def test_label_revisions_count_latest_symbol_once(tmp_path, monkeypatch):
     milestone = next(
         item for item in report.milestones if item.code == "BLINDED_HOLDOUT_LABELS"
     )
-    assert milestone.observed == 2
-    assert milestone.required == 3
+    assert milestone.observed == 1
+    assert milestone.required == 2
     assert milestone.state != STATE_COMPLETE
 
 
