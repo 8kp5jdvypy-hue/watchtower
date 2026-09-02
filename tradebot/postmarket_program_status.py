@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -23,6 +24,14 @@ from tradebot.postmarket_customer_dry_run_campaign import (
     CAMPAIGN_FIELDS,
     CAMPAIGN_VERSION,
     parse_campaign_policy,
+)
+from tradebot.postmarket_lifecycle import LIFECYCLE_VERSION
+from tradebot.postmarket_rank import (
+    COMPONENT_WEIGHTS,
+    RANK_VERSION,
+    REQUIRED_CONTEXT_VERSION,
+    rank_contract_sha256,
+    rank_thresholds,
 )
 
 
@@ -150,6 +159,374 @@ def _count(conn: sqlite3.Connection, table: str, where: str = "1") -> int:
     if not _table_exists(conn, table):
         return 0
     return int(conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0])
+
+
+_CONTEXT_FEATURE_COLUMNS = {
+    "context_id",
+    "candidate_id",
+    "context_version",
+    "session",
+    "symbol",
+    "direction",
+    "lifecycle_observation_seq",
+    "lifecycle_evidence_bar_open_ts_utc",
+    "status",
+    "volatility_status",
+    "market_relative_status",
+    "sector_relative_status",
+    "liquidity_status",
+    "catalyst_status",
+    "catalyst_sources_json",
+    "catalyst_details_json",
+    "catalyst_coverage_json",
+    "data_confidence_status",
+    "data_confidence_coverage_pct",
+    "data_confidence_components_json",
+}
+_LIFECYCLE_COLUMNS = {
+    "transition_id",
+    "candidate_id",
+    "lifecycle_version",
+    "session",
+    "symbol",
+    "direction",
+    "state",
+    "actionability",
+    "evidence_bar_open_ts_utc",
+}
+_LIFECYCLE_OBSERVATION_COLUMNS = {
+    "seq",
+    "candidate_id",
+    "lifecycle_version",
+    "session",
+    "symbol",
+    "evidence_bar_open_ts_utc",
+}
+_RANK_COLUMNS = {
+    "rank_id",
+    "rank_run_id",
+    "candidate_id",
+    "context_id",
+    "transition_id",
+    "observation_seq",
+    "session",
+    "symbol",
+    "direction",
+    "lifecycle_state",
+    "rankable",
+    "ordinal_rank",
+    "evidence_score",
+    "raw_component_score",
+    "penalty_total",
+    "evidence_coverage_pct",
+    "components_json",
+    "penalties_json",
+    "exclusion_reasons_json",
+    "explanation_json",
+}
+_RANK_RUN_COLUMNS = {
+    "rank_run_id",
+    "rank_version",
+    "rank_contract_sha256",
+    "status",
+    "weights_json",
+    "thresholds_json",
+}
+_REQUIRED_RANK_COMPONENTS = set(COMPONENT_WEIGHTS)
+_REQUIRED_CONFIDENCE_COMPONENTS = {
+    "completed_bar_gate",
+    "sip_bar_provenance",
+    "operational_fetches",
+    "quote_temporal_integrity",
+    "volatility_history",
+    "market_benchmark",
+    "rth_liquidity",
+    "asset_point_in_time",
+}
+_CATALYST_COVERAGE_FAMILIES = {
+    "earnings",
+    "filings",
+    "guidance",
+    "news",
+    "regulatory",
+    "analyst",
+}
+_RANKABLE_LIFECYCLE_STATES = {"CONFIRMED", "STRENGTHENING", "REQUALIFIED"}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _json_value(raw: object, expected: type) -> object | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, expected) else None
+
+
+def _finite_number(raw: object) -> bool:
+    return (
+        not isinstance(raw, bool)
+        and isinstance(raw, (int, float))
+        and math.isfinite(float(raw))
+    )
+
+
+def _feature_pipeline_progress(
+    conn: sqlite3.Connection,
+) -> tuple[dict[str, object], bool]:
+    """Prove one exact feature-complete context/lifecycle/rank chain.
+
+    Mere table population is not evidence that the named feature families were
+    computed, that lifecycle state came from a completed-bar observation, or
+    that a rank decomposes the same candidate evidence.  This check therefore
+    requires exact foreign-key identities and validates the stored JSON shapes.
+    """
+    required_columns = {
+        "postmarket_candidate_context": _CONTEXT_FEATURE_COLUMNS,
+        "postmarket_candidate_lifecycle": _LIFECYCLE_COLUMNS,
+        "postmarket_candidate_lifecycle_observations": (
+            _LIFECYCLE_OBSERVATION_COLUMNS
+        ),
+        "postmarket_candidate_ranks": _RANK_COLUMNS,
+        "postmarket_rank_runs": _RANK_RUN_COLUMNS,
+    }
+    missing_schema = {
+        table: sorted(columns - _table_columns(conn, table))
+        for table, columns in required_columns.items()
+        if columns - _table_columns(conn, table)
+    }
+    observed: dict[str, object] = {
+        "context_rows": _count(conn, "postmarket_candidate_context"),
+        "lifecycle_transition_rows": _count(
+            conn, "postmarket_candidate_lifecycle"
+        ),
+        "lifecycle_observation_rows": _count(
+            conn, "postmarket_candidate_lifecycle_observations"
+        ),
+        "rank_rows": _count(conn, "postmarket_candidate_ranks"),
+        "rank_run_rows": _count(conn, "postmarket_rank_runs"),
+        "coherent_complete_chains": 0,
+        "missing_schema": missing_schema,
+    }
+    if missing_schema:
+        return observed, False
+
+    original = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+              ctx.*,
+              tr.lifecycle_version AS transition_lifecycle_version,
+              tr.state AS transition_state,
+              tr.actionability AS transition_actionability,
+              tr.evidence_bar_open_ts_utc AS transition_bar_utc,
+              obs.lifecycle_version AS observation_lifecycle_version,
+              obs.evidence_bar_open_ts_utc AS observation_bar_utc,
+              ranks.rank_id,ranks.rankable,ranks.ordinal_rank,
+              ranks.lifecycle_state AS rank_lifecycle_state,
+              ranks.evidence_score,ranks.raw_component_score,
+              ranks.penalty_total,ranks.evidence_coverage_pct,
+              ranks.components_json AS rank_components_json,
+              ranks.penalties_json AS rank_penalties_json,
+              ranks.exclusion_reasons_json,ranks.explanation_json,
+              runs.rank_version,runs.rank_contract_sha256,
+              runs.status AS rank_run_status,
+              runs.weights_json,runs.thresholds_json
+            FROM postmarket_candidate_ranks AS ranks
+            JOIN postmarket_candidate_context AS ctx
+              ON ctx.context_id=ranks.context_id
+             AND ctx.candidate_id=ranks.candidate_id
+             AND ctx.session=ranks.session
+             AND ctx.symbol=ranks.symbol
+             AND ctx.direction=ranks.direction
+            JOIN postmarket_candidate_lifecycle AS tr
+              ON tr.transition_id=ranks.transition_id
+             AND tr.candidate_id=ranks.candidate_id
+             AND tr.session=ranks.session
+             AND tr.symbol=ranks.symbol
+             AND tr.direction=ranks.direction
+            JOIN postmarket_candidate_lifecycle_observations AS obs
+              ON obs.seq=ranks.observation_seq
+             AND obs.candidate_id=ranks.candidate_id
+             AND obs.session=ranks.session
+             AND obs.symbol=ranks.symbol
+            JOIN postmarket_rank_runs AS runs
+              ON runs.rank_run_id=ranks.rank_run_id
+            WHERE ranks.rankable=1
+              AND ranks.ordinal_rank IS NOT NULL
+              AND ranks.lifecycle_state IN ('CONFIRMED','STRENGTHENING','REQUALIFIED')
+              AND tr.state=ranks.lifecycle_state
+              AND tr.lifecycle_version=obs.lifecycle_version
+              AND ctx.lifecycle_observation_seq=obs.seq
+              AND ctx.lifecycle_evidence_bar_open_ts_utc=obs.evidence_bar_open_ts_utc
+              AND tr.evidence_bar_open_ts_utc=obs.evidence_bar_open_ts_utc
+              AND runs.status='complete'
+            ORDER BY ranks.rank_id
+            """
+        ).fetchall()
+    finally:
+        conn.row_factory = original
+
+    valid = 0
+    for row in rows:
+        context_feature_status = (
+            isinstance(row["context_version"], int)
+            and row["context_version"] > 0
+            and row["status"] == "complete"
+            and row["volatility_status"] == "AVAILABLE"
+            and row["market_relative_status"] == "AVAILABLE"
+            and row["sector_relative_status"] == "AVAILABLE"
+            and row["liquidity_status"] == "AVAILABLE"
+            and row["catalyst_status"] in {"VERIFIED", "NO_VERIFIED_CATALYST"}
+            and row["data_confidence_status"] in {"HIGH", "MEDIUM"}
+            and _finite_number(row["data_confidence_coverage_pct"])
+            and 75 <= float(row["data_confidence_coverage_pct"]) <= 100
+        )
+        catalyst_sources = _json_value(row["catalyst_sources_json"], list)
+        catalyst_details = _json_value(row["catalyst_details_json"], list)
+        catalyst_coverage = _json_value(row["catalyst_coverage_json"], dict)
+        confidence = _json_value(row["data_confidence_components_json"], dict)
+        components = _json_value(row["rank_components_json"], dict)
+        penalties = _json_value(row["rank_penalties_json"], dict)
+        exclusions = _json_value(row["exclusion_reasons_json"], list)
+        explanation = _json_value(row["explanation_json"], list)
+        weights = _json_value(row["weights_json"], dict)
+        thresholds = _json_value(row["thresholds_json"], dict)
+        catalyst_coherent = (
+            catalyst_sources is not None
+            and catalyst_details is not None
+            and (
+                (
+                    row["catalyst_status"] == "VERIFIED"
+                    and bool(catalyst_sources)
+                    and bool(catalyst_details)
+                    and all(
+                        isinstance(source, str) and source
+                        for source in catalyst_sources
+                    )
+                    and all(isinstance(detail, dict) for detail in catalyst_details)
+                )
+                or (
+                    row["catalyst_status"] == "NO_VERIFIED_CATALYST"
+                    and catalyst_sources == []
+                    and catalyst_details == []
+                )
+            )
+        )
+        confidence_coverage_matches = (
+            confidence is not None
+            and set(confidence) == _REQUIRED_CONFIDENCE_COMPONENTS
+            and all(isinstance(value, bool) for value in confidence.values())
+            and _finite_number(row["data_confidence_coverage_pct"])
+            and abs(
+                float(row["data_confidence_coverage_pct"])
+                - round(
+                    sum(confidence.values()) / len(confidence) * 100,
+                    6,
+                )
+            )
+            <= 0.000001
+        )
+        decomposition_matches = (
+            components is not None
+            and penalties is not None
+            and all(_finite_number(value) for value in components.values())
+            and all(_finite_number(value) for value in penalties.values())
+            and all(
+                _finite_number(row[field])
+                for field in (
+                    "evidence_score",
+                    "raw_component_score",
+                    "penalty_total",
+                )
+            )
+            and abs(
+                float(row["raw_component_score"])
+                - round(sum(float(value) for value in components.values()), 6)
+            )
+            <= 0.000001
+            and abs(
+                float(row["penalty_total"])
+                - round(sum(float(value) for value in penalties.values()), 6)
+            )
+            <= 0.000001
+            and abs(
+                float(row["evidence_score"])
+                - round(
+                    max(
+                        0.0,
+                        min(
+                            100.0,
+                            float(row["raw_component_score"])
+                            + float(row["penalty_total"]),
+                        ),
+                    ),
+                    6,
+                )
+            )
+            <= 0.000001
+        )
+        structured_evidence = (
+            catalyst_coherent
+            and catalyst_coverage is not None
+            and set(catalyst_coverage) == _CATALYST_COVERAGE_FAMILIES
+            and all(
+                isinstance(value, str) and value
+                for value in catalyst_coverage.values()
+            )
+            and confidence_coverage_matches
+            and components is not None
+            and set(components) == _REQUIRED_RANK_COMPONENTS
+            and penalties is not None
+            and all(
+                isinstance(key, str) and key and _finite_number(value)
+                for key, value in penalties.items()
+            )
+            and decomposition_matches
+            and weights == COMPONENT_WEIGHTS
+            and thresholds == rank_thresholds()
+            and exclusions == []
+            and isinstance(explanation, list)
+            and len(explanation) >= len(_REQUIRED_RANK_COMPONENTS)
+            and all(isinstance(item, str) and item for item in explanation)
+        )
+        numeric_rank = (
+            row["context_version"] == REQUIRED_CONTEXT_VERSION
+            and row["rank_version"] == RANK_VERSION
+            and isinstance(row["ordinal_rank"], int)
+            and row["ordinal_rank"] > 0
+            and all(
+                _finite_number(row[field])
+                for field in (
+                    "evidence_score",
+                    "raw_component_score",
+                    "penalty_total",
+                    "evidence_coverage_pct",
+                )
+            )
+            and 0 <= float(row["evidence_score"]) <= 100
+            and 0 < float(row["evidence_coverage_pct"]) <= 100
+            and row["rank_contract_sha256"] == rank_contract_sha256()
+            and row["transition_state"] in _RANKABLE_LIFECYCLE_STATES
+            and row["transition_actionability"] == "QUALIFIED"
+            and row["transition_lifecycle_version"] == LIFECYCLE_VERSION
+            and row["observation_lifecycle_version"]
+            == row["transition_lifecycle_version"]
+        )
+        if context_feature_status and structured_evidence and numeric_rank:
+            valid += 1
+
+    observed["coherent_complete_chains"] = valid
+    return observed, valid > 0
 
 
 def _validated_report(
@@ -590,20 +967,30 @@ def build_program_status(
                 experiments >= 1,
                 "append-only postmarket_rank_experiments rows",
             ))
-            context_rows = _count(conn, "postmarket_candidate_context")
-            lifecycle_rows = _count(conn, "postmarket_candidate_lifecycle")
-            rank_rows = _count(conn, "postmarket_candidate_ranks")
-            feature_pipeline_complete = min(context_rows, lifecycle_rows, rank_rows) > 0
+            feature_progress, feature_pipeline_complete = (
+                _feature_pipeline_progress(conn)
+            )
             milestones.append(_milestone(
                 "CONTEXT_LIFECYCLE_RANK_EVIDENCE",
+                feature_progress,
                 {
-                    "context_rows": context_rows,
-                    "lifecycle_rows": lifecycle_rows,
-                    "rank_rows": rank_rows,
+                    "coherent_complete_chains": 1,
+                    "context_features": [
+                        "volatility",
+                        "market_relative_strength",
+                        "sector_relative_strength",
+                        "liquidity",
+                        "catalyst",
+                        "data_confidence",
+                    ],
+                    "lifecycle": (
+                        "rankable transition linked to its completed-bar observation"
+                    ),
+                    "rank": "digest-bound finite decomposition of the same evidence",
                 },
-                "non-empty append-only rows in all three ledgers",
                 feature_pipeline_complete,
-                "versioned context features, lifecycle transitions, and decomposed ranks",
+                "exact candidate/context/transition/observation/rank identities plus "
+                "validated feature and decomposition JSON",
             ))
 
             (
