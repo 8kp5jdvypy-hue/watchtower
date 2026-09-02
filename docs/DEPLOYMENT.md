@@ -138,9 +138,12 @@ Optional shadow-evidence credentials:
   absent, the proof reports `unconfigured`; it does not silently reuse Alpaca.
 
 The signal-quality preflight evaluates only the credential group belonging to
-the selected provider, plus a separate adapter-implemented check. This avoids
-claiming that Massive is the only possible vendor without weakening the gate:
-an unknown provider, an unfinished adapter, or missing selected-provider
+the selected provider, plus separate adapter-implemented and recall-proof
+capability checks. The latter requires completed intraday bars, full-universe
+snapshot delivery, postmarket coverage, immutable object provenance, and
+production qualification. This avoids claiming that Massive is the only
+possible vendor without weakening the gate: an unknown provider, an unfinished
+or EOD-only adapter, a beta per-symbol source, or missing selected-provider
 credentials keeps `evidence_campaign_ready=false` while leaving an otherwise
 safe shadow deployment unaffected.
 

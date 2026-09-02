@@ -12,9 +12,10 @@ The report separates two claims:
   off-box configuration, disk headroom, enabled scheduled/discovery shadows,
   and exact-revision controls are sound enough for a shadow-only deployment.
 - `evidence_campaign_ready` additionally proves the external-context switch,
-  Massive REST and dedicated flat-file credentials, and an operator-reviewed
-  licensed reference manifest are present. It is false if any campaign input is
-  unavailable even when basic shadow deployment is safe.
+  selected-provider credentials, an implemented adapter with the full
+  production-qualified intraday recall-proof capability set, and an
+  operator-reviewed licensed reference manifest are present. It is false if
+  any campaign input is unavailable even when basic shadow deployment is safe.
 
 Neither verdict authorizes customer alerts.
 
@@ -83,8 +84,9 @@ inspect every check; do not treat a safe shadow verdict as campaign readiness.
   untracked worktree changes;
 - `.env` contains non-placeholder Alpaca credentials and explicitly enabled
   scheduled plus market-wide shadow switches;
-- full campaign mode also has the isolated external-context switch, Massive
-  REST key, and dedicated Massive S3 key pair;
+- full campaign mode also has the isolated external-context switch, the
+  selected provider's credentials, and an adapter explicitly qualified for an
+  immutable full-universe postmarket intraday proof;
 - `.backup-env` names a non-root remote path and a present passphrase file;
 - `PRAGMA quick_check` passes read-only for all five live databases;
 - the explicit backup manifest is recent, every digest matches, all five

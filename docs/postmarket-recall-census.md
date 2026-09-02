@@ -63,6 +63,14 @@ provider/feed/dataset identity, documented availability time, immutable object
 identity, configuration check, and fetch implementation. Unknown providers and
 known providers without a shipped adapter fail closed.
 
+An implemented adapter is not sufficient by itself. The registry must also
+declare completed intraday bars, a full-universe snapshot, postmarket coverage,
+immutable object provenance, and production qualification. Both the scheduler
+and proof runner reject a source missing any capability before creating proof
+tables or calling the provider. Daily EOD data, beta per-symbol routes, and
+sources without immutable bulk-object identity therefore cannot masquerade as
+this intraday full-universe proof.
+
 The currently implemented `massive` adapter requires dedicated
 `MASSIVE_S3_ACCESS_KEY_ID` and `MASSIVE_S3_SECRET_ACCESS_KEY` credentials. It
 downloads one finalized `us_stocks_sip/minute_aggs_v1` object after a two-hour

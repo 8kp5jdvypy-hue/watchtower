@@ -22,7 +22,11 @@ from tradebot.postmarket_recall_provider import (
     write_provider_proof_report,
 )
 from tradebot.vendors.massive_flatfiles import FlatFileSnapshot, object_key
-from tradebot.vendors.historical_reference import HistoricalReferenceSource
+from tradebot.vendors.historical_reference import (
+    HistoricalReferenceCapabilities,
+    HistoricalReferenceConfigurationError,
+    HistoricalReferenceSource,
+)
 
 
 SESSION = date(2026, 8, 27)
@@ -120,6 +124,13 @@ def _custom_source(bars):
         provider="licensed-test-provider",
         feed="consolidated",
         dataset="us-equities-minute-v2",
+        capabilities=HistoricalReferenceCapabilities(
+            completed_intraday_bars=True,
+            full_universe_snapshot=True,
+            postmarket_coverage=True,
+            immutable_object_provenance=True,
+            production_qualified=True,
+        ),
         configured=lambda: True,
         expected_available_at=lambda session: PROOF_NOW - timedelta(minutes=1),
         object_key=lambda session: f"licensed/{session.isoformat()}.parquet",
@@ -138,6 +149,25 @@ def _custom_source(bars):
     )
 
 
+def _ineligible_source():
+    return HistoricalReferenceSource(
+        provider="eod-only-provider",
+        feed="eod",
+        dataset="daily-prices",
+        capabilities=HistoricalReferenceCapabilities(
+            completed_intraday_bars=False,
+            full_universe_snapshot=True,
+            postmarket_coverage=False,
+            immutable_object_provenance=True,
+            production_qualified=True,
+        ),
+        configured=lambda: True,
+        expected_available_at=lambda session: PROOF_NOW - timedelta(minutes=1),
+        object_key=lambda session: f"daily/{session.isoformat()}.csv.gz",
+        fetch=lambda *args: (_ for _ in ()).throw(AssertionError("must not fetch")),
+    )
+
+
 def test_provider_proof_waits_for_next_day_file_and_is_due_once(tmp_path):
     conn = connect(tmp_path / "shadow.db")
     census_id = _seed(conn)
@@ -145,6 +175,41 @@ def test_provider_proof_waits_for_next_day_file_and_is_due_once(tmp_path):
         conn, now=datetime(2026, 8, 28, 17, 4, tzinfo=timezone.utc)
     ) is None
     assert next_due_provider_proof(conn, now=PROOF_NOW) == (census_id, SESSION)
+
+
+def test_eod_only_provider_cannot_enter_intraday_recall_proof(tmp_path):
+    conn = connect(tmp_path / "shadow.db")
+    census_id = _seed(conn)
+    reference = _ineligible_source()
+
+    with pytest.raises(
+        HistoricalReferenceConfigurationError,
+        match="cannot serve the intraday full-universe recall proof",
+    ):
+        next_due_provider_proof(
+            conn, now=PROOF_NOW, independent_source=reference
+        )
+    with pytest.raises(
+        HistoricalReferenceConfigurationError,
+        match="completed_intraday_bars, postmarket_coverage",
+    ):
+        run_provider_proof(
+            conn,
+            census_id=census_id,
+            session=SESSION,
+            now=PROOF_NOW,
+            run_id="must-not-run",
+            code_version="proof-code",
+            primary_fetch=lambda *args: {},
+            independent_fetch=reference.fetch,
+            independent_source=reference,
+        )
+    assert conn.execute(
+        """
+        SELECT COUNT(*) FROM sqlite_master
+        WHERE type='table' AND name='postmarket_recall_provider_runs'
+        """
+    ).fetchone()[0] == 0
 
 
 def test_provider_proof_replays_same_universe_and_can_pass_cleanly(tmp_path):
