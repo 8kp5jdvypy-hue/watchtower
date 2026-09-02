@@ -1038,6 +1038,11 @@ def test_live_service_injects_post_fetch_validation_clock():
 
 def test_compose_wires_independent_default_off_discovery_service():
     compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
-    assert "command: python -m tradebot.postmarket_discovery_shadow" in compose
-    assert "POSTMARKET_DISCOVERY_ENABLED: ${POSTMARKET_DISCOVERY_ENABLED:-0}" in compose
-    assert "tradebot.postmarket_discovery_health" in compose
+    block = compose.split("  postmarket-discovery:", 1)[1].split(
+        "\n  postmarket-external-context:", 1
+    )[0]
+    assert "command: python -m tradebot.postmarket_discovery_shadow" in block
+    assert "POSTMARKET_DISCOVERY_ENABLED: ${POSTMARKET_DISCOVERY_ENABLED:-0}" in block
+    assert "tradebot.postmarket_discovery_health" in block
+    assert "mem_limit: 700m" in block
+    assert "memswap_limit: 1g" in block

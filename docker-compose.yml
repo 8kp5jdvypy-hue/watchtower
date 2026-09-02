@@ -116,6 +116,12 @@ services:
       POSTMARKET_DISCOVERY_ENABLED: ${POSTMARKET_DISCOVERY_ENABLED:-0}
     volumes:
       - ./data:/app/data
+    # The discovery audit is intentionally bounded below the VPS's available
+    # memory.  This cgroup limit is a containment boundary: the streaming audit
+    # normally peaks far below it, while a regression cannot starve SSH, the
+    # public API, or the backup service before Docker kills the container.
+    mem_limit: 700m
+    memswap_limit: 1g
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-m", "tradebot.postmarket_discovery_health", "--heartbeat", "data/postmarket_discovery_heartbeat.json", "--max-age", "600"]
