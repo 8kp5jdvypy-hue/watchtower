@@ -29,6 +29,7 @@ from tradebot.postmarket_recall_census import (
 from tradebot.vendors.historical_reference import (
     HistoricalReferenceSnapshot,
     HistoricalReferenceSource,
+    require_recall_proof_capabilities,
     source as historical_reference_source,
 )
 
@@ -227,6 +228,7 @@ def next_due_provider_proof(
     """Return the newest primary census whose independent proof is due."""
     current = _aware_utc(now, "now")
     reference = independent_source or historical_reference_source()
+    require_recall_proof_capabilities(reference)
     ensure_provider_proof_schema(conn)
     rows = conn.execute(
         """
@@ -348,6 +350,7 @@ def run_provider_proof(
 ) -> tuple[ProviderProofResult, tuple[ProviderSymbolResult, ...]]:
     current = _aware_utc(now, "now")
     reference = independent_source or historical_reference_source()
+    require_recall_proof_capabilities(reference)
     if current < reference.expected_available_at(session):
         raise ValueError("provider proof cannot precede documented source availability")
     if chunk_size <= 0:

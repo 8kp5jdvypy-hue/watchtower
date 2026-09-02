@@ -20,6 +20,60 @@ KNOWN_REFERENCE_PROVIDERS = frozenset({"massive", "tiingo", "databento"})
 IMPLEMENTED_REFERENCE_PROVIDERS = frozenset({"massive"})
 
 
+@dataclass(frozen=True)
+class HistoricalReferenceCapabilities:
+    """Evidence properties required by the intraday recall-proof contract."""
+
+    completed_intraday_bars: bool
+    full_universe_snapshot: bool
+    postmarket_coverage: bool
+    immutable_object_provenance: bool
+    production_qualified: bool
+
+    @property
+    def recall_proof_eligible(self) -> bool:
+        return not self.missing_recall_proof_capabilities
+
+    @property
+    def missing_recall_proof_capabilities(self) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in (
+                "completed_intraday_bars",
+                "full_universe_snapshot",
+                "postmarket_coverage",
+                "immutable_object_provenance",
+                "production_qualified",
+            )
+            if not getattr(self, name)
+        )
+
+
+NO_RECALL_PROOF_CAPABILITIES = HistoricalReferenceCapabilities(
+    completed_intraday_bars=False,
+    full_universe_snapshot=False,
+    postmarket_coverage=False,
+    immutable_object_provenance=False,
+    production_qualified=False,
+)
+
+
+REFERENCE_PROVIDER_CAPABILITIES = {
+    "massive": HistoricalReferenceCapabilities(
+        completed_intraday_bars=True,
+        full_universe_snapshot=True,
+        postmarket_coverage=True,
+        immutable_object_provenance=True,
+        production_qualified=True,
+    ),
+    # Tiingo is approved for a derived-only EOD evaluation. Its documented
+    # per-symbol intraday endpoint is beta and is not an immutable bulk
+    # full-universe object, so it cannot satisfy this proof contract.
+    "tiingo": NO_RECALL_PROOF_CAPABILITIES,
+    "databento": NO_RECALL_PROOF_CAPABILITIES,
+}
+
+
 class HistoricalReferenceConfigurationError(RuntimeError):
     """The selected independent provider cannot safely serve evidence."""
 
@@ -43,6 +97,7 @@ class HistoricalReferenceSource:
     provider: str
     feed: str
     dataset: str
+    capabilities: HistoricalReferenceCapabilities
     configured: Callable[[], bool]
     expected_available_at: Callable[[date], datetime]
     object_key: Callable[[date], str]
@@ -64,6 +119,22 @@ def selected_provider(raw: str | None = None) -> str:
     return normalized
 
 
+def provider_capabilities(raw: str | None = None) -> HistoricalReferenceCapabilities:
+    return REFERENCE_PROVIDER_CAPABILITIES[selected_provider(raw)]
+
+
+def require_recall_proof_capabilities(
+    reference: HistoricalReferenceSource,
+) -> None:
+    missing = reference.capabilities.missing_recall_proof_capabilities
+    if missing:
+        raise HistoricalReferenceConfigurationError(
+            f"historical reference adapter {reference.provider!r} cannot serve "
+            f"the intraday full-universe recall proof; missing capabilities: "
+            f"{', '.join(missing)}"
+        )
+
+
 def source(raw: str | None = None) -> HistoricalReferenceSource:
     provider = selected_provider(raw)
     if provider not in IMPLEMENTED_REFERENCE_PROVIDERS:
@@ -77,6 +148,7 @@ def source(raw: str | None = None) -> HistoricalReferenceSource:
             provider="massive",
             feed="sip",
             dataset=massive_flatfiles.DATASET,
+            capabilities=REFERENCE_PROVIDER_CAPABILITIES["massive"],
             configured=massive_flatfiles.configured,
             expected_available_at=massive_flatfiles.expected_available_at,
             object_key=massive_flatfiles.object_key,

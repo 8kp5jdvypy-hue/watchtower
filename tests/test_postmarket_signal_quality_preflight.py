@@ -311,6 +311,11 @@ def test_tiingo_selection_does_not_require_massive_but_fails_until_adapter_exist
     assert checks["selected_postmarket_reference_provider"].passed is True
     assert checks["configured_tiingo_api_key"].passed is True
     assert checks["implemented_postmarket_reference_provider_adapter"].passed is False
+    capability = checks[
+        "recall_proof_capable_postmarket_reference_provider"
+    ]
+    assert capability.passed is False
+    assert "intraday_full_universe_proof=ineligible" in capability.evidence
     assert not any("massive" in name for name in checks)
 
 

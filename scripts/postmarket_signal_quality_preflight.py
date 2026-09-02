@@ -32,6 +32,7 @@ from tradebot.vendors.historical_reference import (
     IMPLEMENTED_REFERENCE_PROVIDERS,
     KNOWN_REFERENCE_PROVIDERS,
     REFERENCE_PROVIDER_ENV,
+    provider_capabilities,
 )
 
 
@@ -400,6 +401,21 @@ def evaluate_signal_quality_preflight(
         ).strip().lower() or DEFAULT_REFERENCE_PROVIDER
         known_provider = reference_provider in KNOWN_REFERENCE_PROVIDERS
         implemented_provider = reference_provider in IMPLEMENTED_REFERENCE_PROVIDERS
+        capabilities = (
+            provider_capabilities(reference_provider)
+            if known_provider
+            else None
+        )
+        recall_proof_capable = bool(
+            implemented_provider
+            and capabilities is not None
+            and capabilities.recall_proof_eligible
+        )
+        missing_capabilities = (
+            capabilities.missing_recall_proof_capabilities
+            if capabilities is not None
+            else ()
+        )
         checks.extend(
             (
                 _check(
@@ -420,6 +436,21 @@ def evaluate_signal_quality_preflight(
                         f"provider={reference_provider} adapter=implemented"
                         if implemented_provider
                         else f"provider={reference_provider} adapter=not_implemented"
+                    ),
+                ),
+                _check(
+                    "campaign",
+                    "recall_proof_capable_postmarket_reference_provider",
+                    recall_proof_capable,
+                    (
+                        f"provider={reference_provider} "
+                        "intraday_full_universe_proof=eligible"
+                        if recall_proof_capable
+                        else (
+                            f"provider={reference_provider} "
+                            "intraday_full_universe_proof=ineligible "
+                            f"missing={','.join(missing_capabilities) or 'adapter'}"
+                        )
                     ),
                 ),
             )
