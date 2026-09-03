@@ -19,6 +19,9 @@ from scripts.postmarket_signal_quality_preflight import (
 )
 from tradebot.screening_archive import archive_screening_session
 from tradebot.universe import connect as connect_universe
+from tradebot.vendors.historical_reference_qualification import (
+    REQUIRED_QUALIFICATION_PROOFS,
+)
 
 
 NOW = datetime(2026, 8, 29, 1, 0, tzinfo=timezone.utc)
@@ -76,13 +79,22 @@ def _git_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, revision
 
 
-def _env(path: Path, *, omit: str | None = None) -> None:
+def _env(
+    path: Path,
+    *,
+    qualification_manifest: Path | None = None,
+    omit: str | None = None,
+) -> None:
     values = {
         **SECRETS,
         "POSTMARKET_SHADOW_ENABLED": "1",
         "POSTMARKET_DISCOVERY_ENABLED": "true",
         "POSTMARKET_EXTERNAL_CONTEXT_ENABLED": "yes",
     }
+    if qualification_manifest is not None:
+        values["POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST"] = str(
+            qualification_manifest
+        )
     if omit is not None:
         values.pop(omit)
     path.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
@@ -219,10 +231,39 @@ def _reference(path: Path) -> None:
     )
 
 
+def _provider_qualification(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "qualified",
+                "provider": "massive",
+                "dataset": "us_stocks_sip/minute_aggs_v1",
+                "approved_at_utc": "2026-08-29T00:00:00+00:00",
+                "approved_by": "operator",
+                "license_reference": "agreement-2026-001",
+                "proofs": [
+                    {
+                        "kind": kind,
+                        "reference": f"archive/{kind}.pdf",
+                        "sha256": hashlib.sha256(kind.encode()).hexdigest(),
+                    }
+                    for kind in sorted(REQUIRED_QUALIFICATION_PROOFS)
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _fixture(tmp_path: Path) -> dict:
     repo, revision = _git_repo(tmp_path)
     env_file = tmp_path / ".env"
-    _env(env_file)
+    provider_qualification = tmp_path / "provider-qualification.json"
+    _provider_qualification(provider_qualification)
+    _env(env_file, qualification_manifest=provider_qualification)
     passphrase = tmp_path / ".backup-passphrase"
     passphrase.write_text("backup-secret")
     backup_env = tmp_path / ".backup-env"
@@ -266,7 +307,12 @@ def test_complete_preflight_is_shadow_safe_and_campaign_ready(tmp_path):
 
 def test_missing_independent_provider_key_blocks_campaign_not_safe_shadow(tmp_path):
     args = _fixture(tmp_path)
-    _env(args["env_file"], omit="MASSIVE_S3_SECRET_ACCESS_KEY")
+    qualification = tmp_path / "provider-qualification.json"
+    _env(
+        args["env_file"],
+        qualification_manifest=qualification,
+        omit="MASSIVE_S3_SECRET_ACCESS_KEY",
+    )
 
     report = _evaluate(args)
 
@@ -279,6 +325,26 @@ def test_missing_independent_provider_key_blocks_campaign_not_safe_shadow(tmp_pa
     )
     assert check.scope == "campaign"
     assert check.passed is False
+
+
+def test_missing_provider_qualification_blocks_campaign_not_safe_shadow(tmp_path):
+    args = _fixture(tmp_path)
+    _env(args["env_file"])
+
+    report = _evaluate(args)
+
+    assert report.safe_to_deploy_shadow is True
+    assert report.evidence_campaign_ready is False
+    checks = {item.name: item for item in report.checks}
+    qualification = checks["qualified_postmarket_reference_provider_contract"]
+    assert qualification.scope == "campaign"
+    assert qualification.passed is False
+    assert qualification.evidence == "not_supplied"
+    capability = checks[
+        "recall_proof_capable_postmarket_reference_provider"
+    ]
+    assert capability.passed is False
+    assert "production_qualified" in capability.evidence
 
 
 def test_tiingo_selection_does_not_require_massive_but_fails_until_adapter_exists(

@@ -32,9 +32,10 @@ from tradebot.vendors.historical_reference import (
     require_recall_proof_capabilities,
     source as historical_reference_source,
 )
+from tradebot.vendors.historical_reference_qualification import SHA256_PATTERN
 
 
-PROVIDER_PROOF_VERSION = 1
+PROVIDER_PROOF_VERSION = 2
 MAX_PROVIDER_PROOF_ATTEMPTS = 3
 CHUNK_SIZE = 500
 MAX_CLOSE_DIFFERENCE_BPS = 50.0
@@ -520,6 +521,7 @@ def run_provider_proof(
         "comparison_rule": "exact_completed_5min_close_v1",
         "max_close_difference_bps": MAX_CLOSE_DIFFERENCE_BPS,
         "source_semantic": "next_day_bulk_sip_replay_not_live_signal_input",
+        "qualification_manifest_sha256": reference.qualification_manifest_sha256,
     }
     with conn:
         cursor = conn.execute(
@@ -617,7 +619,21 @@ def build_provider_proof_report(
         ).fetchall()
     finally:
         conn.row_factory = original
+    try:
+        detail = json.loads(run["detail_json"])
+    except (TypeError, json.JSONDecodeError):
+        detail = {}
+    qualification_digest = (
+        detail.get("qualification_manifest_sha256")
+        if isinstance(detail, dict)
+        else None
+    )
     issues = []
+    if (
+        not isinstance(qualification_digest, str)
+        or not SHA256_PATTERN.fullmatch(qualification_digest)
+    ):
+        issues.append("PROVIDER_QUALIFICATION_PROVENANCE_MISSING")
     if run["status"] != "success" or not run["invariant_ok"]:
         issues.append("PROVIDER_PROOF_OPERATIONAL_FAILURE")
     if run["comparable_coverage"] is None or run["comparable_coverage"] < MIN_COMPARABLE_COVERAGE:
@@ -665,7 +681,8 @@ def build_provider_proof_report(
         "max_abs_close_difference_bps",
     )
     return ProviderProofReport(
-        PROVIDER_PROOF_VERSION, int(run["comparison_id"]), int(run["census_id"]),
+        int(run["provider_proof_version"]), int(run["comparison_id"]),
+        int(run["census_id"]),
         run["session"], int(run["attempt"]), run["code_version"], operational,
         operational and not issues,
         {
@@ -674,6 +691,7 @@ def build_provider_proof_report(
             "independent_provider": run["independent_provider"],
             "independent_feed": run["independent_feed"],
             "independent_dataset": run["independent_dataset"],
+            "qualification_manifest_sha256": qualification_digest,
             "object_key": run["object_key"],
             "object_etag": run["object_etag"],
             "object_last_modified_utc": run["object_last_modified_utc"],
@@ -729,13 +747,30 @@ def latest_provider_proof_summary(audit_dir: Path | str) -> dict | None:
         payloads,
         key=lambda value: (date.fromisoformat(value["session"]), int(value["attempt"])),
     )
+    source = payload.get("source")
+    qualification_digest = (
+        source.get("qualification_manifest_sha256")
+        if isinstance(source, dict)
+        else None
+    )
+    qualification_bound = bool(
+        isinstance(qualification_digest, str)
+        and SHA256_PATTERN.fullmatch(qualification_digest)
+    )
+    issue_codes = list(payload["issue_codes"])
+    if (
+        not qualification_bound
+        and "PROVIDER_QUALIFICATION_PROVENANCE_MISSING" not in issue_codes
+    ):
+        issue_codes.append("PROVIDER_QUALIFICATION_PROVENANCE_MISSING")
     return {
         "session": payload["session"],
         "report_version": payload["report_version"],
         "operational_complete": payload["operational_complete"],
-        "evidence_eligible": payload["evidence_eligible"],
+        "evidence_eligible": bool(payload["evidence_eligible"] and qualification_bound),
+        "qualification_manifest_sha256": qualification_digest,
         "independent_recall": payload["metrics"]["independent_recall"],
         "eligible_pair_agreement": payload["metrics"]["eligible_pair_agreement"],
         "comparable_coverage": payload["metrics"]["comparable_coverage"],
-        "issue_codes": payload["issue_codes"],
+        "issue_codes": issue_codes,
     }

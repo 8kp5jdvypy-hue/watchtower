@@ -363,10 +363,11 @@ def _artifacts(
             audit_dir / f"postmarket_recall_provider_{session}_v1.json",
             {
                 "session": session,
-                "report_version": 1,
+                "report_version": 2,
                 "attempt": 1,
                 "operational_complete": True,
                 "evidence_eligible": True,
+                "source": {"qualification_manifest_sha256": "a" * 64},
                 "issue_codes": [],
             },
         )
@@ -541,6 +542,23 @@ def test_provider_proofs_do_not_count_outside_the_clean_session_set(tmp_path):
     for path in audits.glob("postmarket_recall_provider_*.json"):
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["session"] = "2026-07-01"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones if item.code == "INDEPENDENT_PROVIDER_PROOFS"
+    )
+    assert milestone.observed == 0
+    assert milestone.state != STATE_COMPLETE
+    assert report.eligible_for_customer_delivery_review is False
+
+
+def test_legacy_provider_proofs_without_qualification_do_not_count(tmp_path):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    for path in audits.glob("postmarket_recall_provider_*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("source")
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     report = build_program_status(database, audits, evidence, generated_at=NOW)

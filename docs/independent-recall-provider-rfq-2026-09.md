@@ -1,11 +1,44 @@
 # Independent recall-provider RFQ — September 2026
 
-**Status:** Draft only; not sent and not purchasing authority
+**Status:** Sent 2026-09-02; not purchasing authority
+
+**Outbound evidence:** Massive Resend message
+`1dec35f7-8a10-422a-b90f-9169baf61cda`; Databento Resend message
+`7487c014-ef1c-420e-8ef1-38103324b802`
 
 **Owner/approver:** Perch Markets operator
 
 **Purpose:** Qualify a second source for immutable full-universe postmarket
 recall evidence. This is not a request for raw-data redistribution rights.
+
+## Databento response — 2026-09-02
+
+Databento replied to the RFQ, but the response is **not provider
+qualification** and does not authorize a purchase or campaign activation.
+
+Verified provider statements from Eric at Databento:
+
+- any use case with external distribution or display of Databento data,
+  including derived data, requires the Plus plan;
+- Plus was quoted at $1,500/month with a 12-month minimum and a 15% startup
+  discount, or $1,275/month and $15,300 for the minimum term after discount;
+- US-equity data is described as available "without a license" after 00:00 ET
+  each day, except Blue Ocean overnight-session data;
+- US-equity history begins 2018-05-01; and
+- the data is unadjusted and described as point-in-time accurate.
+
+The phrase "without a license" is ambiguous. It may refer to exchange-license
+fees rather than permission to consume the service, store raw data, or use
+derived outputs. Perch must not interpret it as a commercial grant. The reply
+also did not establish the required full-universe bulk delivery, completed
+4:00–8:00 PM bars, stable object identity/version, correction semantics,
+inactive/delisted coverage, derived-evidence retention, raw-data deletion,
+evaluation access, or cancellation terms.
+
+Decision: do not buy Plus. A narrow follow-up may ask whether a cheaper plan
+permits strictly internal validation where Databento data and Databento-derived
+outputs are never shown to customers. Even if the answer is yes, technical
+sample inspection and every remaining acceptance row below are mandatory.
 
 ## Required evidence contract
 
@@ -84,7 +117,7 @@ archived the quote or agreement and recorded each item below.
 
 | Item | Required proof | State |
 |---|---|---|
-| Commercial internal-validation rights | Executed agreement or governing terms plus provider clarification | Pending |
+| Commercial internal-validation rights | Executed agreement or governing terms plus provider clarification | Partial — Plus required for external derived display; internal-only terms unresolved |
 | Derived-output retention | Written permission and non-reconstructability boundary | Pending |
 | Raw-data lifecycle | Cache/retention/deletion obligations | Pending |
 | Completed intraday bars | Schema and sample object inspection | Pending |
@@ -93,7 +126,21 @@ archived the quote or agreement and recorded each item below.
 | Immutable object provenance | Stable key/version/ETag/last-modified/bytes available | Pending |
 | Correction semantics | Written version/replacement schedule and replay behavior | Pending |
 | Production qualification | Adapter test, bounded production dry run, and operator sign-off | Pending |
-| Startup price | Written monthly/evaluation quote and cancellation terms | Pending |
+| Startup price | Written monthly/evaluation quote and cancellation terms | Partial — $1,275/month after discount, 12-month/$15,300 minimum; no bounded evaluation or cancellation terms |
+
+The checklist is enforced by an immutable qualification manifest. Adapter
+implementation and credentials alone never set `production_qualified=true`.
+After every row above is archived and reviewed, place a strict version-1 JSON
+manifest under `data/postmarket_evidence/provider-qualification/` and set
+`POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST` to that relative path. The
+manifest contains the selected provider and exact adapter dataset, approval
+identity/time, license reference, and exactly one `{kind,reference,sha256}`
+proof for each checklist row. The parser rejects missing/duplicate proof kinds,
+future approval times, foreign providers/datasets, malformed digests, and
+symlinks. Its SHA-256 is reported by preflight, persisted in every provider
+proof, required by downstream evidence review, and archived with the source
+file by the normal off-box evidence backup. Legacy proofs without that binding
+remain ineligible.
 
 ## Fail-closed rollout
 

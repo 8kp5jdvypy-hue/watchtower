@@ -190,7 +190,7 @@ def _provider(session: date, census_id: int) -> dict:
         tzinfo=timezone.utc,
     )
     return {
-        "report_version": 1,
+        "report_version": 2,
         "comparison_id": census_id,
         "census_id": census_id,
         "session": session.isoformat(),
@@ -204,6 +204,9 @@ def _provider(session: date, census_id: int) -> dict:
             "independent_provider": "massive",
             "independent_feed": "sip",
             "independent_dataset": "us_stocks_sip/minute_aggs_v1",
+            "qualification_manifest_sha256": hashlib.sha256(
+                b"massive-provider-qualification"
+            ).hexdigest(),
             "object_key": f"us_stocks_sip/minute_aggs_v1/{session}.csv.gz",
             "object_etag": f"etag-{session}",
             "object_last_modified_utc": modified.isoformat(),
@@ -761,6 +764,21 @@ def test_provider_coverage_failure_is_durable_not_ready_evidence(tmp_path):
     checks = {check.code: check for check in report.checks}
     assert checks["PROVIDER_PROOFS_CLEAN"].passed is False
     assert checks["MIN_PROVIDER_COMPARABLE_COVERAGE"].passed is False
+
+
+def test_legacy_provider_proof_without_qualification_provenance_fails_closed(tmp_path):
+    manifest_path, _ = _package(tmp_path)
+    _rewrite_artifact(
+        manifest_path,
+        "provider_proof_reports",
+        0,
+        lambda payload: payload["source"].pop("qualification_manifest_sha256"),
+    )
+
+    with pytest.raises(ValueError, match="qualification_manifest_sha256"):
+        evaluate_discovery_evidence_gate(
+            load_discovery_evidence_manifest(manifest_path)
+        )
 
 
 def test_same_provider_cannot_masquerade_as_independent(tmp_path):

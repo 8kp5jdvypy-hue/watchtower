@@ -288,6 +288,7 @@ that point at all is proof the system came back (see
 | `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | live market data | `tradebot/vendors/alpaca.py` is the only module that imports the Alpaca SDK |
 | `MASSIVE_API_KEY` | candidate external context | Optional licensed REST key for shadow-only independent price/reference observations; never a delivery input |
 | `MASSIVE_S3_ACCESS_KEY_ID` / `MASSIVE_S3_SECRET_ACCESS_KEY` | next-day full-universe provider proof | Optional dedicated Massive flat-file credentials; these are not AWS account credentials and are distinct from the REST key |
+| `POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST` | legal/technical provider qualification | Relative path to the immutable, operator-reviewed RFQ acceptance manifest under `data/postmarket_evidence/`; provider proofs fail closed without it |
 | `SEC_EDGAR_USER_AGENT` | EDGAR filing checks | SEC requires a real contact in the User-Agent; requests without one get rate-limited or blocked. Defaults to a placeholder that identifies as this project |
 
 **Bot configuration**

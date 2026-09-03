@@ -31,8 +31,13 @@ from tradebot.vendors.historical_reference import (
     DEFAULT_REFERENCE_PROVIDER,
     IMPLEMENTED_REFERENCE_PROVIDERS,
     KNOWN_REFERENCE_PROVIDERS,
+    REFERENCE_PROVIDER_DATASETS,
     REFERENCE_PROVIDER_ENV,
     provider_capabilities,
+)
+from tradebot.vendors.historical_reference_qualification import (
+    REFERENCE_PROVIDER_QUALIFICATION_ENV,
+    load_historical_reference_qualification,
 )
 
 
@@ -401,11 +406,46 @@ def evaluate_signal_quality_preflight(
         ).strip().lower() or DEFAULT_REFERENCE_PROVIDER
         known_provider = reference_provider in KNOWN_REFERENCE_PROVIDERS
         implemented_provider = reference_provider in IMPLEMENTED_REFERENCE_PROVIDERS
-        capabilities = (
-            provider_capabilities(reference_provider)
-            if known_provider
-            else None
-        )
+        qualification_raw = env.get(
+            REFERENCE_PROVIDER_QUALIFICATION_ENV, ""
+        ).strip()
+        qualification_path = Path(qualification_raw) if qualification_raw else None
+        if qualification_path is not None and not qualification_path.is_absolute():
+            qualification_path = repo_root / qualification_path
+        qualification_ok = False
+        qualification_evidence = "not_supplied"
+        capabilities = None
+        if known_provider:
+            try:
+                capabilities = provider_capabilities(
+                    reference_provider,
+                    qualification_manifest=qualification_path or "",
+                    observed_at=checked_at,
+                )
+                if qualification_path is not None:
+                    qualification = load_historical_reference_qualification(
+                        qualification_path,
+                        observed_at=checked_at,
+                    )
+                    expected_dataset = REFERENCE_PROVIDER_DATASETS.get(
+                        reference_provider
+                    )
+                    qualification_ok = bool(
+                        qualification.provider == reference_provider
+                        and qualification.dataset == expected_dataset
+                        and capabilities.production_qualified
+                    )
+                    qualification_evidence = (
+                        f"provider={qualification.provider} "
+                        f"dataset={qualification.dataset} "
+                        f"manifest_sha256={qualification.manifest_sha256}"
+                    )
+            except (OSError, UnicodeError, ValueError, RuntimeError) as exc:
+                capabilities = provider_capabilities(
+                    reference_provider,
+                    qualification_manifest="",
+                )
+                qualification_evidence = _safe_error(exc)
         recall_proof_capable = bool(
             implemented_provider
             and capabilities is not None
@@ -437,6 +477,12 @@ def evaluate_signal_quality_preflight(
                         if implemented_provider
                         else f"provider={reference_provider} adapter=not_implemented"
                     ),
+                ),
+                _check(
+                    "campaign",
+                    "qualified_postmarket_reference_provider_contract",
+                    qualification_ok,
+                    qualification_evidence,
                 ),
                 _check(
                     "campaign",

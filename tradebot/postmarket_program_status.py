@@ -130,6 +130,18 @@ def _latest_session_reports(
     return {session: item[1] for session, item in latest.items()}
 
 
+def _provider_qualification_is_bound(report: dict[str, Any]) -> bool:
+    source = report.get("source")
+    if not isinstance(source, dict):
+        return False
+    digest = source.get("qualification_manifest_sha256")
+    return bool(
+        isinstance(digest, str)
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+    )
+
+
 def _latest_quality_reports(paths: Iterable[Path]) -> dict[tuple[str, str], dict[str, Any]]:
     latest: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
     for path in sorted(paths):
@@ -1194,6 +1206,7 @@ def build_program_status(
                 if report.get("operational_complete") is True
                 and report.get("evidence_eligible") is True
                 and report.get("issue_codes") == []
+                and _provider_qualification_is_bound(report)
             }
             covered_clean_sessions = clean_sessions & provider_sessions
             milestones.append(_milestone(
