@@ -195,6 +195,7 @@ PROVIDER_SOURCE_FIELDS = {
     "independent_provider",
     "independent_feed",
     "independent_dataset",
+    "qualification_manifest_sha256",
     "object_key",
     "object_etag",
     "object_last_modified_utc",
@@ -1238,6 +1239,10 @@ def _load_provider(artifact: SessionArtifact) -> dict:
         ),
         "independent_dataset": _nonempty_string(
             source["independent_dataset"], f"{context}.independent_dataset"
+        ),
+        "qualification_manifest_sha256": _sha256(
+            source["qualification_manifest_sha256"],
+            f"{context}.qualification_manifest_sha256",
         ),
         "selected_rows_sha256": _sha256(
             source["selected_rows_sha256"], f"{context}.selected_rows_sha256"

@@ -136,6 +136,9 @@ Optional shadow-evidence credentials:
   The adapter remains `production_qualified=false` until the manifest proves
   every RFQ acceptance row and matches the selected provider and exact dataset.
   Credentials, a provider name, or implemented code never substitute for it.
+  The manifest SHA-256 is persisted in provider-proof evidence, and legacy
+  reports without that provenance cannot count toward program or owner-review
+  readiness.
 - `MASSIVE_API_KEY` — candidate-level Massive REST price/reference context.
 - `MASSIVE_S3_ACCESS_KEY_ID`, `MASSIVE_S3_SECRET_ACCESS_KEY` — dedicated
   Massive flat-file credentials for the next-day full-universe provider proof.

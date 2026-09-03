@@ -15,6 +15,8 @@ from typing import Callable, Mapping, Sequence
 from tradebot.detectors import Bar
 from tradebot.vendors.historical_reference_qualification import (
     REFERENCE_PROVIDER_QUALIFICATION_ENV,
+    SHA256_PATTERN,
+    HistoricalReferenceQualification,
     load_historical_reference_qualification,
 )
 
@@ -109,6 +111,7 @@ class HistoricalReferenceSource:
     feed: str
     dataset: str
     capabilities: HistoricalReferenceCapabilities
+    qualification_manifest_sha256: str | None
     configured: Callable[[], bool]
     expected_available_at: Callable[[date], datetime]
     object_key: Callable[[date], str]
@@ -130,21 +133,19 @@ def selected_provider(raw: str | None = None) -> str:
     return normalized
 
 
-def provider_capabilities(
-    raw: str | None = None,
+def _provider_qualification(
+    provider: str,
     *,
     qualification_manifest: str | Path | None = None,
     observed_at: datetime | None = None,
-) -> HistoricalReferenceCapabilities:
-    provider = selected_provider(raw)
-    capabilities = REFERENCE_PROVIDER_CAPABILITIES[provider]
+) -> HistoricalReferenceQualification | None:
     manifest_value = (
         os.environ.get(REFERENCE_PROVIDER_QUALIFICATION_ENV, "")
         if qualification_manifest is None
         else str(qualification_manifest)
     ).strip()
     if not manifest_value:
-        return capabilities
+        return None
     try:
         qualification = load_historical_reference_qualification(
             manifest_value,
@@ -163,13 +164,43 @@ def provider_capabilities(
         raise HistoricalReferenceConfigurationError(
             "historical reference qualification dataset does not match adapter"
         )
-    return replace(capabilities, production_qualified=True)
+    if not SHA256_PATTERN.fullmatch(qualification.manifest_sha256):
+        raise HistoricalReferenceConfigurationError(
+            "historical reference qualification digest is invalid"
+        )
+    return qualification
+
+
+def provider_capabilities(
+    raw: str | None = None,
+    *,
+    qualification_manifest: str | Path | None = None,
+    observed_at: datetime | None = None,
+) -> HistoricalReferenceCapabilities:
+    provider = selected_provider(raw)
+    capabilities = REFERENCE_PROVIDER_CAPABILITIES[provider]
+    qualification = _provider_qualification(
+        provider,
+        qualification_manifest=qualification_manifest,
+        observed_at=observed_at,
+    )
+    return (
+        replace(capabilities, production_qualified=True)
+        if qualification is not None
+        else capabilities
+    )
 
 
 def require_recall_proof_capabilities(
     reference: HistoricalReferenceSource,
 ) -> None:
-    missing = reference.capabilities.missing_recall_proof_capabilities
+    missing = list(reference.capabilities.missing_recall_proof_capabilities)
+    qualification_digest = reference.qualification_manifest_sha256
+    if (
+        not isinstance(qualification_digest, str)
+        or not SHA256_PATTERN.fullmatch(qualification_digest)
+    ):
+        missing.append("qualification_manifest_sha256")
     if missing:
         raise HistoricalReferenceConfigurationError(
             f"historical reference adapter {reference.provider!r} cannot serve "
@@ -187,11 +218,26 @@ def source(raw: str | None = None) -> HistoricalReferenceSource:
     if provider == "massive":
         from tradebot.vendors import massive_flatfiles
 
+        qualification = _provider_qualification(provider)
+        if (
+            qualification is not None
+            and qualification.dataset != massive_flatfiles.DATASET
+        ):
+            raise HistoricalReferenceConfigurationError(
+                "historical reference qualification dataset does not match "
+                "loaded adapter"
+            )
+        capabilities = REFERENCE_PROVIDER_CAPABILITIES[provider]
+        if qualification is not None:
+            capabilities = replace(capabilities, production_qualified=True)
         return HistoricalReferenceSource(
             provider="massive",
             feed="sip",
             dataset=massive_flatfiles.DATASET,
-            capabilities=provider_capabilities(provider),
+            capabilities=capabilities,
+            qualification_manifest_sha256=(
+                qualification.manifest_sha256 if qualification is not None else None
+            ),
             configured=massive_flatfiles.configured,
             expected_available_at=massive_flatfiles.expected_available_at,
             object_key=massive_flatfiles.object_key,

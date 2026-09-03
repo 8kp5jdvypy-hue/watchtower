@@ -55,6 +55,7 @@ def test_massive_default_is_implemented_but_not_operator_qualified(monkeypatch):
     assert adapter.provider == "massive"
     assert adapter.feed == "sip"
     assert adapter.dataset == "us_stocks_sip/minute_aggs_v1"
+    assert adapter.qualification_manifest_sha256 is None
     assert adapter.capabilities.recall_proof_eligible is False
     assert adapter.capabilities.missing_recall_proof_capabilities == (
         "production_qualified",
@@ -69,6 +70,9 @@ def test_massive_requires_exact_operator_qualification(monkeypatch, tmp_path):
     adapter = source()
 
     assert adapter.capabilities.recall_proof_eligible is True
+    assert adapter.qualification_manifest_sha256 == hashlib.sha256(
+        manifest.read_bytes()
+    ).hexdigest()
 
 
 def test_foreign_qualification_cannot_authorize_selected_adapter(tmp_path):
@@ -84,6 +88,23 @@ def test_foreign_qualification_cannot_authorize_selected_adapter(tmp_path):
             qualification_manifest=manifest,
             observed_at=datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
         )
+
+
+def test_qualification_is_bound_to_the_loaded_adapter_dataset(
+    monkeypatch, tmp_path,
+):
+    from tradebot.vendors import massive_flatfiles
+
+    manifest = tmp_path / "qualification.json"
+    _qualification(manifest)
+    monkeypatch.setenv(REFERENCE_PROVIDER_QUALIFICATION_ENV, str(manifest))
+    monkeypatch.setattr(massive_flatfiles, "DATASET", "replacement-dataset")
+
+    with pytest.raises(
+        HistoricalReferenceConfigurationError,
+        match="dataset does not match loaded adapter",
+    ):
+        source()
 
 
 @pytest.mark.parametrize("provider", ("tiingo", "databento"))

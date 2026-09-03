@@ -137,8 +137,10 @@ manifest contains the selected provider and exact adapter dataset, approval
 identity/time, license reference, and exactly one `{kind,reference,sha256}`
 proof for each checklist row. The parser rejects missing/duplicate proof kinds,
 future approval times, foreign providers/datasets, malformed digests, and
-symlinks. Its SHA-256 is reported by preflight and the normal evidence backup
-archives the source file off-box.
+symlinks. Its SHA-256 is reported by preflight, persisted in every provider
+proof, required by downstream evidence review, and archived with the source
+file by the normal off-box evidence backup. Legacy proofs without that binding
+remain ineligible.
 
 ## Fail-closed rollout
 
