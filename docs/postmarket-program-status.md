@@ -49,22 +49,24 @@ The report reconciles these ordered requirements:
 2. A coherent context, lifecycle, and decomposed-rank development-evidence
    chain.
 3. A prospectively locked empirical experiment.
-4. An operator-approved qualification manifest for the exact implemented
+4. A frozen development-only calibrator bound to that experiment, fitted after
+   experiment lock and before the first holdout session opens.
+5. An operator-approved qualification manifest for the exact implemented
    independent provider and dataset.
-5. A prospectively locked discovery campaign whose exact session inventory is
-   the experiment holdout and whose experiment, rank, provider, dataset, and
-   empirical floors all match.
-6. Ten clean, evidence-eligible discovery sessions from that locked campaign.
-7. Append-only market-wide outcome-quality reports for those clean sessions.
-8. Full-universe recall censuses for those clean sessions.
-9. Independent-provider proofs for those clean sessions, bound to the exact
+6. A prospectively locked discovery campaign whose exact session inventory is
+   the experiment holdout and whose experiment, calibrator, rank, provider,
+   dataset, empirical floors, and calibration floors all match.
+7. Ten clean, evidence-eligible discovery sessions from that locked campaign.
+8. Append-only market-wide outcome-quality reports for those clean sessions.
+9. Full-universe recall censuses for those clean sessions.
+10. Independent-provider proofs for those clean sessions, bound to the exact
    qualification manifest, provider, and dataset.
-10. Enough independently produced, rank-blind holdout labels for the exact
+11. Enough independently produced, rank-blind holdout labels for the exact
    locked experiment floor.
-11. A passing frozen empirical holdout.
-12. A passing frozen calibration holdout.
-13. Independent customer-case reviews.
-14. A reproducible customer-delivery review gate.
+12. A passing frozen empirical holdout.
+13. A passing frozen calibration holdout.
+14. Independent customer-case reviews.
+15. A reproducible customer-delivery review gate.
 
 Session-based counts are first restricted to the prospectively locked campaign
 inventory and then intersected with the clean-session set where applicable.
@@ -75,7 +77,11 @@ The experiment milestone validates the complete canonical contract rather than
 counting rows: its XNYS development/holdout split, lock timestamp, eligibility
 and selection rules, sample and metric floors, current rank version/contract,
 and manifest SHA-256 must all reproduce. Labels, empirical holdout reports, and
-calibration reports count only when they share that same valid experiment.
+calibration reports count only when they share that same valid experiment. The
+frozen-calibrator milestone independently verifies the canonical model digest,
+policy, development sample conservation, monotonic segments, code attribution,
+and fit timing. Campaign sessions cannot count unless that calibrator existed
+before the campaign lock and its holdout floors match the campaign exactly.
 
 The context/lifecycle/rank milestone reports per-feature status distributions,
 rankable-rank counts, and qualified-lifecycle counts in addition to its exact
@@ -98,7 +104,8 @@ every review payload before customer-delivery review can become eligible.
 - A gate with customer delivery already enabled is rejected.
 - Evidence validation and database-integrity errors take priority in
   `next_action`. Remaining milestones follow causal order: development evidence,
-  experiment lock, provider qualification, and campaign lock are surfaced
+  experiment lock, frozen development calibration, provider qualification, and
+  campaign lock are surfaced
   before session-count collection. If context rows exist but none form a
   coherent feature, lifecycle, and rank chain, that dependency is surfaced
   first.
