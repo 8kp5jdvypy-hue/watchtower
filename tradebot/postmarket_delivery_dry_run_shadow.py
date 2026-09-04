@@ -1,8 +1,8 @@
 """Default-off supervisor for the customer-readiness dry-run ledger.
 
-The service reads completed shadow evidence and writes dry-run decisions back
-to the shadow database. It cannot render, enqueue, send, trade, or call a
-market-data provider.
+The service reads completed shadow evidence and writes dry-run decisions plus
+derived-only presentation previews back to the shadow database. It cannot
+enqueue, send, trade, or call a market-data provider.
 """
 from __future__ import annotations
 
