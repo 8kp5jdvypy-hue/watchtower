@@ -9,7 +9,29 @@ delivery.
 ## Lock the campaign first
 
 Before the first covered XNYS session opens, create one immutable campaign with
-`python -m tradebot.postmarket_discovery_evidence_campaign`. The campaign pins:
+the contract-derived operator command:
+
+```bash
+python -m tradebot.postmarket_signal_campaign_lock \
+  data/postmarket_evidence/discovery-campaign.json \
+  --database data/postmarket_shadow.db \
+  --provider-qualification \
+    data/postmarket_evidence/provider-qualification/qualification.json \
+  --policy data/postmarket_evidence/discovery-policy.json \
+  --campaign-id marketwide-holdout-1 \
+  --experiment-id marketwide-holdout-1
+```
+
+The policy file must contain exactly the current discovery-gate policy fields.
+The command reads the database without mutation, reproduces the append-only
+experiment manifest in a scratch database, validates the exact qualification,
+and derives the coverage dates, experiment digest, rank version, rank-contract
+digest, independent provider, independent dataset, and empirical floors. It
+refuses any mismatch before publishing the read-only campaign file. This avoids
+copying shared identities between separate commands.
+
+The lower-level `tradebot.postmarket_discovery_evidence_campaign` writer remains
+the offline immutable writer used beneath this workflow. The campaign pins:
 
 - the exact XNYS date range;
 - the blinded empirical experiment ID, manifest SHA-256, rank version, and

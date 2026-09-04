@@ -195,6 +195,10 @@ Market-wide aggregate gate implementation:
 `tradebot/postmarket_discovery_evidence_campaign.py` prospectively locks the
 session range, empirical identity, exact canonical rank-contract digest,
 policy floors, providers, datasets, and eligible revisions.
+`tradebot/postmarket_signal_campaign_lock.py` is the prescribed operator path:
+it reproduces the locked experiment from the read-only database, validates the
+exact provider qualification, derives every identity shared with the campaign,
+and refuses drift before calling the offline immutable writer.
 `tradebot/postmarket_discovery_evidence_gate.py` then
 requires exact clean-session inventories, reconciled full-universe censuses,
 separate independent-provider proofs, the matching empirical holdout, and all
