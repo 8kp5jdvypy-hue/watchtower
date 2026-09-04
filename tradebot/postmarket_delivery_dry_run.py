@@ -1,7 +1,8 @@
 """Append-only ledger for the postmarket customer-readiness dry run.
 
-The router records readiness policy decisions only. It has no delivery,
-provider, alert, order, or network dependency and cannot contact customers.
+The router records readiness policy decisions and derived-only presentation
+previews. It has no delivery, provider, alert, order, or network dependency
+and cannot contact customers.
 """
 from __future__ import annotations
 
@@ -17,6 +18,11 @@ from tradebot.postmarket_delivery_readiness import (
     DeliveryPolicy,
     OwnerAuthorization,
     evaluate_delivery_readiness,
+)
+from tradebot.postmarket_customer_presentation import (
+    CUSTOMER_PRESENTATION_VERSION,
+    DERIVED_ONLY_SEMANTIC,
+    build_customer_preview,
 )
 
 
@@ -76,6 +82,18 @@ CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_calibrations (
 );
 CREATE INDEX IF NOT EXISTS idx_postmarket_delivery_dry_run_calibrations_model
     ON postmarket_delivery_dry_run_calibrations(model_sha256,route_id);
+
+CREATE TABLE IF NOT EXISTS postmarket_customer_presentation_previews (
+    route_id INTEGER PRIMARY KEY,
+    presentation_version INTEGER NOT NULL,
+    license_semantic TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    generated_at_utc TEXT NOT NULL,
+    CHECK (presentation_version > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_postmarket_customer_presentation_previews_digest
+    ON postmarket_customer_presentation_previews(payload_sha256,route_id);
 
 CREATE TABLE IF NOT EXISTS postmarket_delivery_dry_run_ticks (
     tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +155,14 @@ END;
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_calibrations_no_delete
 BEFORE DELETE ON postmarket_delivery_dry_run_calibrations BEGIN
     SELECT RAISE(ABORT, 'postmarket_delivery_dry_run_calibrations is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_customer_presentation_previews_no_update
+BEFORE UPDATE ON postmarket_customer_presentation_previews BEGIN
+    SELECT RAISE(ABORT, 'postmarket_customer_presentation_previews is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS postmarket_customer_presentation_previews_no_delete
+BEFORE DELETE ON postmarket_customer_presentation_previews BEGIN
+    SELECT RAISE(ABORT, 'postmarket_customer_presentation_previews is append-only');
 END;
 CREATE TRIGGER IF NOT EXISTS postmarket_delivery_dry_run_ticks_no_update
 BEFORE UPDATE ON postmarket_delivery_dry_run_ticks BEGIN
@@ -478,6 +504,53 @@ def route_dry_run(
                 )
         elif persisted_calibration is None or tuple(persisted_calibration) != calibration_values:
             raise ValueError("dry-run route calibration evidence conflicts with candidate")
+        if decision.decision == DECISION_ELIGIBLE:
+            evaluated_at = conn.execute(
+                "SELECT evaluated_at_utc FROM postmarket_delivery_dry_runs WHERE route_id=?",
+                (route_id,),
+            ).fetchone()
+            if evaluated_at is None:
+                raise RuntimeError("eligible dry-run route disappeared before preview")
+            preview = build_customer_preview(
+                candidate,
+                decision,
+                route_id=route_id,
+                generated_at=datetime.fromisoformat(str(evaluated_at[0])),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO postmarket_customer_presentation_previews
+                  (route_id,presentation_version,license_semantic,payload_json,
+                   payload_sha256,generated_at_utc)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    route_id,
+                    CUSTOMER_PRESENTATION_VERSION,
+                    DERIVED_ONLY_SEMANTIC,
+                    preview.payload_json,
+                    preview.payload_sha256,
+                    preview.generated_at_utc,
+                ),
+            )
+            persisted_preview = conn.execute(
+                """
+                SELECT route_id,presentation_version,license_semantic,payload_json,
+                       payload_sha256,generated_at_utc
+                FROM postmarket_customer_presentation_previews WHERE route_id=?
+                """,
+                (route_id,),
+            ).fetchone()
+            expected_preview = (
+                route_id,
+                CUSTOMER_PRESENTATION_VERSION,
+                DERIVED_ONLY_SEMANTIC,
+                preview.payload_json,
+                preview.payload_sha256,
+                preview.generated_at_utc,
+            )
+            if persisted_preview is None or tuple(persisted_preview) != expected_preview:
+                raise ValueError("dry-run customer preview conflicts with eligible route")
     return DryRunRouteResult(
         route_id=route_id,
         created=created,

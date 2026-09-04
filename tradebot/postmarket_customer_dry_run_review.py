@@ -24,9 +24,10 @@ from tradebot.postmarket_customer_dry_run_campaign import (
     CAMPAIGN_VERSION,
     parse_campaign_policy,
 )
+from tradebot.postmarket_customer_presentation import validate_customer_preview
 
 
-CASE_VERSION = 2
+CASE_VERSION = 3
 REVIEW_VERSION = 1
 REVIEW_ATTESTATION = (
     "I independently reviewed only the point-in-time evidence in this case, "
@@ -123,6 +124,8 @@ class ReviewCaseEvidence:
     policy_sha256: str
     authorization_sha256: str
     runtime_router_revision: str
+    customer_preview_payload: dict[str, object]
+    customer_preview_sha256: str
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,7 @@ def list_eligible_review_cases(
                {review_select} AS review_count
         FROM postmarket_delivery_dry_runs d
         JOIN postmarket_delivery_dry_run_calibrations q ON q.route_id=d.route_id
+        JOIN postmarket_customer_presentation_previews v ON v.route_id=d.route_id
         {review_join}
         WHERE d.session IN ({placeholders})
           AND d.decision='ELIGIBLE_FOR_DRY_RUN'
@@ -344,10 +348,17 @@ def build_review_case(
                    q.projection_id,q.calibration_run_id,q.calibration_version,
                    q.model_sha256 AS calibration_model_sha256,
                    q.calibrated_quality,q.projected_at_utc,
-                   q.code_version AS calibration_code_version
+                   q.code_version AS calibration_code_version,
+                   v.payload_json AS customer_preview_payload_json,
+                   v.payload_sha256 AS customer_preview_sha256,
+                   v.presentation_version AS customer_preview_version,
+                   v.license_semantic AS customer_preview_license_semantic,
+                   v.generated_at_utc AS customer_preview_generated_at_utc
             FROM postmarket_delivery_dry_runs d
             JOIN postmarket_delivery_dry_run_calibrations q
               ON q.route_id=d.route_id
+            JOIN postmarket_customer_presentation_previews v
+              ON v.route_id=d.route_id
             JOIN postmarket_candidate_ranks r
               ON r.rank_run_id=d.rank_run_id AND r.candidate_id=d.candidate_id
             JOIN postmarket_candidate_lifecycle l ON l.transition_id=d.transition_id
@@ -394,6 +405,30 @@ def build_review_case(
         raise ValueError("cumulative_notional must be finite and non-negative")
     if row["direction"] not in {"up", "down"}:
         raise ValueError("direction must be up or down")
+    customer_preview = validate_customer_preview(
+        row["customer_preview_payload_json"],
+        _sha256(row["customer_preview_sha256"], "customer_preview_sha256"),
+    )
+    if (
+        customer_preview["symbol"] != str(row["symbol"]).strip().upper()
+        or customer_preview["ordinal_rank"] != row["ordinal_rank"]
+        or customer_preview["lifecycle"] != row["state"]
+    ):
+        raise ValueError("customer preview does not match route evidence")
+    if (
+        customer_preview["presentation_version"] != row["customer_preview_version"]
+        or customer_preview["license_semantic"]
+        != row["customer_preview_license_semantic"]
+        or customer_preview["generated_at_utc"]
+        != row["customer_preview_generated_at_utc"]
+    ):
+        raise ValueError("customer preview columns do not match its payload")
+    expected_signal = (
+        "POSTMARKET_STRENGTH" if row["direction"] == "up"
+        else "POSTMARKET_WEAKNESS"
+    )
+    if customer_preview["signal"] != expected_signal:
+        raise ValueError("customer preview direction does not match route evidence")
     evidence = ReviewCaseEvidence(
         route_id=int(row["route_id"]), session=row["session"], symbol=row["symbol"],
         direction=row["direction"], decision=row["decision"],
@@ -436,6 +471,10 @@ def build_review_case(
         ),
         runtime_router_revision=_revision(
             row["runtime_router_revision"], "runtime_router_revision"
+        ),
+        customer_preview_payload=customer_preview,
+        customer_preview_sha256=_sha256(
+            row["customer_preview_sha256"], "customer_preview_sha256"
         ),
     )
     evidence_payload = asdict(evidence)

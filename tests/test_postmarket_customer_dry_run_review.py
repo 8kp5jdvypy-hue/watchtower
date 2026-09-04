@@ -1,4 +1,5 @@
 import json
+import hashlib
 import sqlite3
 import stat
 from datetime import datetime, timedelta, timezone
@@ -89,6 +90,36 @@ def _conn():
         (cursor.lastrowid, 55, 9, 1, "e" * 64, 0.8,
          (NOW - timedelta(minutes=1)).isoformat(), "abc1234"),
     )
+    preview = json.dumps({
+        "customer_state": "ACTIONABLE",
+        "disclaimer": (
+            "Derived market-intelligence signal; not a quote, chart, "
+            "recommendation, or trade instruction."
+        ),
+        "generated_at_utc": NOW.isoformat(),
+        "license_semantic": "non_reconstructable_derived_only_v1",
+        "lifecycle": "CONFIRMED",
+        "ordinal_rank": 2,
+        "presentation_version": 1,
+        "quality_status": "MEETS_LOCKED_POLICY",
+        "schema_version": 1,
+        "signal": "POSTMARKET_STRENGTH",
+        "symbol": "OKTA",
+    }, sort_keys=True, separators=(",", ":"))
+    conn.execute(
+        """
+        INSERT INTO postmarket_customer_presentation_previews
+          (route_id,presentation_version,license_semantic,payload_json,
+           payload_sha256,generated_at_utc)
+        VALUES (?,1,'non_reconstructable_derived_only_v1',?,?,?)
+        """,
+        (
+            cursor.lastrowid,
+            preview,
+            hashlib.sha256(preview.encode()).hexdigest(),
+            NOW.isoformat(),
+        ),
+    )
     conn.commit()
     return conn, cursor.lastrowid
 
@@ -166,6 +197,9 @@ def test_case_is_point_in_time_digest_bound_and_excludes_future_outcomes(tmp_pat
     assert case["blinded_to_future_outcomes"] is True
     assert case["evidence"]["symbol"] == "OKTA"
     assert case["evidence"]["rank_components"] == {"move": 30}
+    assert case["evidence"]["customer_preview_payload"]["signal"] == (
+        "POSTMARKET_STRENGTH"
+    )
     assert "outcome_marks" in case["excluded_evidence_classes"]
     assert "mark_price" not in raw and "future_return" not in raw
     path = tmp_path / "case.json"
@@ -192,6 +226,19 @@ def test_list_is_campaign_scoped_and_does_not_require_review_table():
         "transition_id": 5,
         "review_count": 0,
     },)
+
+
+def test_route_without_customer_preview_cannot_enter_review_inventory():
+    conn, route_id = _conn()
+    conn.execute("DROP TRIGGER postmarket_customer_presentation_previews_no_delete")
+    conn.execute(
+        "DELETE FROM postmarket_customer_presentation_previews WHERE route_id=?",
+        (route_id,),
+    )
+    rows = list_eligible_review_cases(
+        conn, campaign=_campaign(), campaign_sha256=CAMPAIGN
+    )
+    assert rows == ()
 
 
 def test_approved_review_is_append_only_and_exactly_bound():
@@ -267,7 +314,7 @@ def test_case_and_assessment_contract_shapes_match_truth_schemas():
         conn, campaign_sha256=CAMPAIGN, route_id=route_id, exported_at=NOW
     )
     case_schema = json.loads(Path(
-        "truth/postmarket_customer_dry_run_review_case_v2.schema.json"
+        "truth/postmarket_customer_dry_run_review_case_v3.schema.json"
     ).read_text())
     review_schema = json.loads(Path(
         "truth/postmarket_customer_dry_run_review_assessment_v1.schema.json"

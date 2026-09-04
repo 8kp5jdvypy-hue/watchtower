@@ -263,7 +263,7 @@ inferring it from a process heartbeat.
 
 Every eligible route also has an append-only calibration link. Daily audit v2
 reproduces that link through the exact projection, frozen model, passing
-canonical holdout report, rank row, and candidate. Blinded review case v2,
+canonical holdout report, rank row, and candidate. Blinded review case v3,
 campaign v3, preflight, and the final aggregate gate all bind the same model
 identity. Missing, stale, substituted, or unattributed calibration evidence
 fails closed. Customer delivery remains unimplemented and disabled; prospective

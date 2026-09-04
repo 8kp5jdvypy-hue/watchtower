@@ -1,8 +1,9 @@
 # Postmarket customer-readiness dry run
 
 This subsystem defines and records when a candidate may enter an isolated
-customer-readiness dry run. It does not enqueue, render, send, trade, or enable
-a customer-delivery switch. The default-off Compose service writes evidence
+customer-readiness dry run. It produces a non-reconstructable derived-only
+presentation preview, but does not enqueue, send, trade, or enable a
+customer-delivery switch. The default-off Compose service writes evidence
 only. Passing a candidate means only `ELIGIBLE_FOR_DRY_RUN`; passing the final
 campaign gate means only eligibility for a separate owner review.
 
@@ -53,7 +54,16 @@ unique index to record at most one eligible dry-run decision for an
 idempotency key. Exact duplicate suppression states are also idempotent. The
 ledger is append-only and stores the policy and authorization digests, exact
 candidate/transition/rank IDs, controls, runtime revision, reason codes, and
-presentation. It still has no customer-delivery dependency.
+presentation. Each eligible route also receives one digest-bound append-only
+row in `postmarket_customer_presentation_previews`. The exact allowlist emits
+only the symbol, derived direction, lifecycle state, ordinal rank, locked-policy
+qualification, generation time, semantic version, and a non-advice disclaimer.
+It deliberately excludes prices, quotes, OHLC, returns, exact move percentages,
+volume, notional, raw evidence/calibration scores, provider/feed identities,
+and market-data timestamps. Suppressed routes cannot produce a preview. This
+is an engineering control for the derived-only product design, not a legal
+opinion; the executed vendor agreement and qualified counsel control. The
+ledger still has no customer-delivery dependency.
 
 ## Default-off supervised dry run
 
@@ -124,10 +134,12 @@ authorization or enable the default-off supervisor.
 Eligible cases are exported with
 `tradebot.postmarket_customer_dry_run_review`. The immutable case contains the
 exact router, rank, lifecycle, provenance, and explanation evidence available
-at decision time. Review case v2 also includes the exact calibration
+at decision time. Review case v3 also includes the exact calibration
 projection/run/model, calibrated observed quality, projection timestamp, and
-calibration revision. It explicitly excludes later bars, outcome marks, and later
-headlines. A named owner, delegate, or independent market reviewer must attest
+calibration revision, plus the digest-bound derived-only customer preview that
+would have been shown. A route without a valid preview cannot be listed or
+exported for review. The case explicitly excludes later bars, outcome marks,
+and later headlines. A named owner, delegate, or independent market reviewer must attest
 both implementation independence and future-outcome blinding, then grade the
 exact relevance, timeliness, evidence, explanation, and risk rubric. Any failed
 item or critical finding derives `REJECT`; reviewers cannot override that

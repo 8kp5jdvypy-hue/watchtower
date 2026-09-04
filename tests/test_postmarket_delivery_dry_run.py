@@ -133,6 +133,14 @@ def test_eligible_decision_is_append_only_and_transactionally_deduplicated(
         "SELECT projection_id,calibration_run_id,model_sha256,calibrated_quality "
         "FROM postmarket_delivery_dry_run_calibrations"
     ).fetchone() == (55, 9, "c" * 64, 0.8)
+    preview = conn.execute(
+        "SELECT route_id,presentation_version,license_semantic,payload_json "
+        "FROM postmarket_customer_presentation_previews"
+    ).fetchone()
+    assert preview[:3] == (
+        first.route_id, 1, "non_reconstructable_derived_only_v1"
+    )
+    assert json.loads(preview[3])["symbol"] == "OKTA"
 
 
 def test_suppressed_state_can_later_become_one_eligible_decision(
@@ -227,6 +235,25 @@ def test_missing_calibration_is_suppressed_without_fabricating_route_evidence(
     assert conn.execute(
         "SELECT COUNT(*) FROM postmarket_delivery_dry_run_calibrations"
     ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM postmarket_customer_presentation_previews"
+    ).fetchone()[0] == 0
+
+
+def test_customer_preview_is_append_only(conn, candidate, policy, authorization):
+    result = _route(conn, candidate, policy, authorization)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "UPDATE postmarket_customer_presentation_previews "
+            "SET license_semantic='other' WHERE route_id=?",
+            (result.route_id,),
+        )
+    conn.rollback()
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            "DELETE FROM postmarket_customer_presentation_previews WHERE route_id=?",
+            (result.route_id,),
+        )
 
 
 def test_record_binds_authorization_policy_and_exact_evidence_ids(
