@@ -22,15 +22,18 @@ from tradebot.postmarket_external_context import (
     pre_event_expectation_fact,
     run_external_context_backfill,
     run_pre_event_expectation_capture,
+    security_identity_fact,
     ticker_reference_facts,
 )
 from tradebot.postmarket_external_context_shadow import (
     external_context_enabled,
+    openfigi_identity_enabled,
     pre_close_capture_window,
 )
 from tradebot.postmarket_reference_manifest import ingest_reference_manifest
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
+from tradebot.vendors.openfigi import OpenFigiLookup, OpenFigiMatch
 from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot, ReportedFact
 
 
@@ -468,6 +471,80 @@ def test_backfill_wires_independent_reference_and_official_halt_sources():
     assert halt_calls == [SESSION]
 
 
+def _openfigi_match(figi, share_class_figi):
+    return OpenFigiMatch(
+        figi, "ABC CORP", "ABC", "US", "BBG000COMPOSITE",
+        share_class_figi, "Equity", "Common Stock", "Common Stock", "ABC",
+    )
+
+
+def test_security_identity_resolves_only_one_share_class_and_is_not_point_in_time():
+    fact = security_identity_fact(
+        _candidate(),
+        lookup=OpenFigiLookup("ABC", (
+            _openfigi_match("BBG000VENUE01", "BBG001SHARE01"),
+            _openfigi_match("BBG000VENUE02", "BBG001SHARE01"),
+        )),
+        observed_at=DETECTED + timedelta(minutes=1),
+        code_version="x", run_id="run",
+    )
+    assert fact.fact_kind == "SECURITY_IDENTITY"
+    assert fact.status == "AVAILABLE"
+    assert fact.effective_at_utc is None
+    assert fact.payload["resolution"] == "RESOLVED_SINGLE_SHARE_CLASS"
+    assert fact.payload["resolved_identity"]["share_class_figi"] == "BBG001SHARE01"
+    assert "not_point_in_time" in fact.payload["temporal_semantic"]
+    assert "not_market_data_or_rank_input" in fact.payload["usage_semantic"]
+
+
+def test_security_identity_preserves_ambiguous_matches_without_guessing():
+    fact = security_identity_fact(
+        _candidate(),
+        lookup=OpenFigiLookup("ABC", (
+            _openfigi_match("BBG000000001", "BBG001SHARE01"),
+            _openfigi_match("BBG000000002", "BBG001SHARE02"),
+        )),
+        observed_at=DETECTED, code_version="x", run_id="run",
+    )
+    assert fact.payload["resolution"] == "AMBIGUOUS_MULTIPLE_IDENTITIES"
+    assert fact.payload["resolved_identity"] == {}
+    assert len(fact.payload["matches"]) == 2
+
+
+def test_identity_backfill_is_opt_in_append_only_and_observed_after_fetch():
+    conn = sqlite3.connect(":memory:")
+    candidate_id = _seed(conn)
+    item = NewsItem("1", "ABC results", "wire", None, DETECTED, DETECTED, ("ABC",))
+    completed = DETECTED + timedelta(minutes=2)
+    result = run_external_context_backfill(
+        conn, now=DETECTED + timedelta(minutes=1), code_version="x", run_id="run",
+        option_fetch=lambda symbol, session, spot: _chain(),
+        news_fetch=lambda symbol, start, end: (item,),
+        identity_fetch=lambda symbol: OpenFigiLookup(
+            symbol, (_openfigi_match("BBG000000001", "BBG001SHARE01"),),
+        ),
+        completion_clock=lambda: completed,
+    )
+    assert result.facts_written == 10
+    row = conn.execute(
+        """SELECT status,effective_at_utc,observed_at_utc,payload_json
+           FROM postmarket_external_fact_events
+           WHERE candidate_id=? AND fact_kind='SECURITY_IDENTITY'""",
+        (candidate_id,),
+    ).fetchone()
+    assert row[0] == "AVAILABLE"
+    assert row[1] is None
+    assert row[2] == completed.isoformat()
+    assert json.loads(row[3])["resolution"] == "RESOLVED_SINGLE_MATCH"
+    again = run_external_context_backfill(
+        conn, now=completed, code_version="x", run_id="run",
+        option_fetch=lambda symbol, session, spot: _chain(),
+        news_fetch=lambda symbol, start, end: (item,),
+        identity_fetch=lambda symbol: pytest.fail("identity fetched twice"),
+    )
+    assert again.candidates_planned == 0
+
+
 def test_fetch_errors_retry_three_times_then_stop_without_silent_success():
     conn = sqlite3.connect(":memory:")
     _seed(conn)
@@ -497,6 +574,10 @@ def test_external_worker_is_default_off_strict_and_delivery_incapable():
     assert external_context_enabled("1") is True
     with pytest.raises(ValueError):
         external_context_enabled("maybe")
+    assert openfigi_identity_enabled("") is False
+    assert openfigi_identity_enabled("1") is True
+    with pytest.raises(ValueError):
+        openfigi_identity_enabled("maybe")
     tree = ast.parse(open(
         "tradebot/postmarket_external_context_shadow.py", encoding="utf-8"
     ).read())
