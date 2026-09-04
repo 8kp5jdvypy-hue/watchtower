@@ -25,6 +25,13 @@ from tradebot.postmarket_customer_dry_run_campaign import (
     CAMPAIGN_VERSION,
     parse_campaign_policy,
 )
+from tradebot.postmarket_discovery_evidence_gate import (
+    CALENDAR as DISCOVERY_CALENDAR,
+    CAMPAIGN_FIELDS as DISCOVERY_CAMPAIGN_FIELDS,
+    CAMPAIGN_SCHEMA_VERSION as DISCOVERY_CAMPAIGN_VERSION,
+    _expected_sessions as discovery_expected_sessions,
+    _parse_policy as parse_discovery_campaign_policy,
+)
 from tradebot.postmarket_lifecycle import LIFECYCLE_VERSION
 from tradebot.postmarket_empirical import (
     CALENDAR as EMPIRICAL_CALENDAR,
@@ -40,9 +47,18 @@ from tradebot.postmarket_rank import (
     rank_contract_sha256,
     rank_thresholds,
 )
+from tradebot.vendors.historical_reference import (
+    IMPLEMENTED_REFERENCE_PROVIDERS,
+    REFERENCE_PROVIDER_CAPABILITIES,
+    REFERENCE_PROVIDER_DATASETS,
+)
+from tradebot.vendors.historical_reference_qualification import (
+    HistoricalReferenceQualification,
+    load_historical_reference_qualification,
+)
 
 
-STATUS_VERSION = 1
+STATUS_VERSION = 2
 MIN_CLEAN_SESSIONS = 10
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE = REPO_ROOT / "data" / "postmarket_shadow.db"
@@ -130,15 +146,20 @@ def _latest_session_reports(
     return {session: item[1] for session, item in latest.items()}
 
 
-def _provider_qualification_is_bound(report: dict[str, Any]) -> bool:
+def _provider_qualification_is_bound(
+    report: dict[str, Any],
+    qualification: HistoricalReferenceQualification | None,
+) -> bool:
+    if qualification is None:
+        return False
     source = report.get("source")
     if not isinstance(source, dict):
         return False
-    digest = source.get("qualification_manifest_sha256")
-    return bool(
-        isinstance(digest, str)
-        and len(digest) == 64
-        and all(character in "0123456789abcdef" for character in digest)
+    return (
+        source.get("qualification_manifest_sha256")
+        == qualification.manifest_sha256
+        and source.get("independent_provider") == qualification.provider
+        and source.get("independent_dataset") == qualification.dataset
     )
 
 
@@ -498,6 +519,192 @@ def _locked_experiment_progress(
     observed["valid_locked_experiments"] = len(valid)
     observed["invalid_experiments"] = invalid
     return observed, frozenset(valid)
+
+
+def _provider_qualification_progress(
+    path: Path,
+    *,
+    observed_at: datetime,
+) -> tuple[dict[str, object], HistoricalReferenceQualification | None]:
+    """Validate the legal/technical qualification before campaign locking."""
+    observed: dict[str, object] = {
+        "path": str(path),
+        "present": False,
+        "qualified": False,
+    }
+    if path.is_symlink():
+        raise ValueError("provider qualification cannot be a symlink")
+    if not path.exists():
+        return observed, None
+    qualification = load_historical_reference_qualification(
+        path,
+        observed_at=observed_at,
+    )
+    if qualification.provider not in IMPLEMENTED_REFERENCE_PROVIDERS:
+        raise ValueError(
+            "qualified provider does not have an implemented recall-proof adapter"
+        )
+    expected_dataset = REFERENCE_PROVIDER_DATASETS.get(qualification.provider)
+    if qualification.dataset != expected_dataset:
+        raise ValueError(
+            "provider qualification dataset does not match the implemented adapter"
+        )
+    base_capabilities = REFERENCE_PROVIDER_CAPABILITIES[qualification.provider]
+    technical_missing = tuple(
+        item
+        for item in base_capabilities.missing_recall_proof_capabilities
+        if item != "production_qualified"
+    )
+    if technical_missing:
+        raise ValueError(
+            "qualified provider adapter lacks recall-proof capabilities: "
+            + ", ".join(technical_missing)
+        )
+    observed.update({
+        "present": True,
+        "qualified": True,
+        "provider": qualification.provider,
+        "dataset": qualification.dataset,
+        "approved_at_utc": qualification.approved_at_utc,
+        "manifest_sha256": qualification.manifest_sha256,
+        "proof_kinds": [proof.kind for proof in qualification.proofs],
+    })
+    return observed, qualification
+
+
+def _locked_discovery_campaign_progress(
+    conn: sqlite3.Connection,
+    path: Path,
+    *,
+    observed_at: datetime,
+    locked_experiment_ids: frozenset[str],
+    qualification: HistoricalReferenceQualification | None,
+) -> tuple[dict[str, object], bool, frozenset[str]]:
+    """Validate that collection was prospectively scoped before it starts."""
+    observed: dict[str, object] = {
+        "path": str(path),
+        "present": False,
+        "valid_locked_campaign": False,
+    }
+    if path.is_symlink():
+        raise ValueError("discovery campaign cannot be a symlink")
+    if not path.exists():
+        return observed, False, frozenset()
+    payload = _regular_json(path)
+    if set(payload) != DISCOVERY_CAMPAIGN_FIELDS:
+        raise ValueError("discovery campaign fields do not match the v3 contract")
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != DISCOVERY_CAMPAIGN_VERSION
+        or payload.get("status") != "locked"
+    ):
+        raise ValueError("discovery campaign identity is not locked v3")
+    campaign_id = payload.get("campaign_id")
+    experiment_id = payload.get("experiment_id")
+    if not isinstance(campaign_id, str) or not campaign_id.strip():
+        raise ValueError("discovery campaign_id must be non-empty")
+    if not isinstance(experiment_id, str) or not experiment_id.strip():
+        raise ValueError("discovery campaign experiment_id must be non-empty")
+    if experiment_id not in locked_experiment_ids:
+        observed.update({
+            "present": True,
+            "campaign_id": campaign_id,
+            "experiment_id": experiment_id,
+            "reason": "campaign does not bind a valid locked experiment",
+        })
+        return observed, False, frozenset()
+    try:
+        locked_at = _utc(
+            datetime.fromisoformat(str(payload["locked_at_utc"])),
+            "discovery campaign locked_at_utc",
+        )
+        coverage_start = date.fromisoformat(str(payload["coverage_start"]))
+        coverage_end = date.fromisoformat(str(payload["coverage_end"]))
+    except ValueError as exc:
+        raise ValueError("discovery campaign dates are invalid") from exc
+    if locked_at > observed_at:
+        raise ValueError("discovery campaign lock time is in the future")
+    sessions = discovery_expected_sessions(coverage_start, coverage_end)
+    if not sessions:
+        raise ValueError("discovery campaign contains no XNYS sessions")
+    policy = parse_discovery_campaign_policy(payload["policy"])
+    if len(sessions) < policy.min_clean_sessions:
+        raise ValueError("discovery campaign cannot satisfy its clean-session floor")
+    first_open = DISCOVERY_CALENDAR.session_open(sessions[0]).to_pydatetime()
+    if locked_at >= first_open:
+        raise ValueError("discovery campaign was not locked before its first session")
+
+    row = conn.execute(
+        """
+        SELECT created_at_utc,rank_version,rank_contract_sha256,
+               holdout_sessions_json,policy_json,manifest_sha256
+        FROM postmarket_rank_experiments WHERE experiment_id=?
+        """,
+        (experiment_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("discovery campaign experiment row is missing")
+    experiment_created = _utc(
+        datetime.fromisoformat(str(row[0])), "experiment created_at_utc"
+    )
+    if locked_at < experiment_created:
+        raise ValueError("discovery campaign predates its locked experiment")
+    holdout_sessions = _json_value(row[3], list)
+    experiment_policy = _json_value(row[4], dict)
+    if holdout_sessions != [session.isoformat() for session in sessions]:
+        raise ValueError(
+            "discovery campaign sessions do not equal the experiment holdout"
+        )
+    if payload["experiment_manifest_sha256"] != row[5]:
+        raise ValueError("discovery campaign experiment digest does not match")
+    if (
+        payload["rank_version"] != row[1]
+        or payload["rank_contract_sha256"] != row[2]
+        or payload["rank_version"] != RANK_VERSION
+        or payload["rank_contract_sha256"] != rank_contract_sha256()
+    ):
+        raise ValueError("discovery campaign rank contract does not match")
+    expected_empirical_policy = {
+        "min_definitive_labels": policy.min_definitive_labels,
+        "min_positive_labels": policy.min_positive_labels,
+        "min_precision": policy.min_empirical_precision,
+        "min_recall": policy.min_empirical_recall,
+    }
+    if experiment_policy != expected_empirical_policy:
+        raise ValueError("discovery campaign empirical floors do not match experiment")
+    if qualification is None:
+        observed.update({
+            "present": True,
+            "campaign_id": campaign_id,
+            "experiment_id": experiment_id,
+            "sessions": len(sessions),
+            "reason": "provider qualification is unavailable",
+        })
+        return observed, False, frozenset()
+    if (
+        policy.allowed_independent_market_data_providers
+        != (qualification.provider,)
+        or policy.allowed_independent_datasets != (qualification.dataset,)
+    ):
+        raise ValueError(
+            "discovery campaign provider/dataset does not match qualification"
+        )
+    source = path.resolve(strict=True)
+    observed.update({
+        "present": True,
+        "valid_locked_campaign": True,
+        "campaign_id": campaign_id,
+        "locked_at_utc": locked_at.isoformat(),
+        "coverage_start": coverage_start.isoformat(),
+        "coverage_end": coverage_end.isoformat(),
+        "sessions": len(sessions),
+        "experiment_id": experiment_id,
+        "experiment_manifest_sha256": row[5],
+        "provider": qualification.provider,
+        "dataset": qualification.dataset,
+        "campaign_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+    })
+    return observed, True, frozenset(session.isoformat() for session in sessions)
 
 
 def _feature_pipeline_progress(
@@ -1109,11 +1316,23 @@ def build_program_status(
     evidence_dir: Path | str,
     *,
     generated_at: datetime,
+    provider_qualification_path: Path | str | None = None,
+    discovery_campaign_path: Path | str | None = None,
 ) -> SignalQualityProgramStatus:
     generated = _utc(generated_at, "generated_at")
     database = Path(db_path).resolve()
     audits = Path(audit_dir).resolve()
     evidence = Path(evidence_dir).resolve()
+    provider_qualification = Path(
+        provider_qualification_path
+        if provider_qualification_path is not None
+        else evidence / "provider-qualification" / "qualification.json"
+    ).absolute()
+    discovery_campaign = Path(
+        discovery_campaign_path
+        if discovery_campaign_path is not None
+        else evidence / "discovery-campaign.json"
+    ).absolute()
     milestones: list[ProgramMilestone] = []
     blockers: list[str] = []
     integrity_ok = False
@@ -1135,6 +1354,30 @@ def build_program_status(
             if not integrity_ok:
                 raise ValueError(f"SQLite quick_check failed: {integrity!r}")
 
+            qualification_progress, qualification = (
+                _provider_qualification_progress(
+                    provider_qualification,
+                    observed_at=generated,
+                )
+            )
+            experiment_progress, locked_experiment_ids = (
+                _locked_experiment_progress(conn)
+            )
+            (
+                discovery_campaign_progress,
+                discovery_campaign_locked,
+                campaign_sessions,
+            ) = _locked_discovery_campaign_progress(
+                conn,
+                discovery_campaign,
+                observed_at=generated,
+                locked_experiment_ids=locked_experiment_ids,
+                qualification=qualification,
+            )
+            feature_progress, feature_pipeline_complete = (
+                _feature_pipeline_progress(conn)
+            )
+
             discovery = _latest_session_reports(
                 audits.glob("postmarket_discovery_audit_*_v*.json"),
                 version_field="audit_version",
@@ -1142,7 +1385,8 @@ def build_program_status(
             clean_sessions = {
                 session
                 for session, report in discovery.items()
-                if report.get("operational_clean") is True
+                if session in campaign_sessions
+                and report.get("operational_clean") is True
                 and report.get("session_evidence_eligible") is True
                 and report.get("issues") == []
             }
@@ -1206,7 +1450,7 @@ def build_program_status(
                 if report.get("operational_complete") is True
                 and report.get("evidence_eligible") is True
                 and report.get("issue_codes") == []
-                and _provider_qualification_is_bound(report)
+                and _provider_qualification_is_bound(report, qualification)
             }
             covered_clean_sessions = clean_sessions & provider_sessions
             milestones.append(_milestone(
@@ -1218,9 +1462,6 @@ def build_program_status(
                 f"eligible provider proof; sessions={sorted(covered_clean_sessions)!r}",
             ))
 
-            experiment_progress, locked_experiment_ids = (
-                _locked_experiment_progress(conn)
-            )
             milestones.append(_milestone(
                 "LOCKED_EMPIRICAL_EXPERIMENT",
                 experiment_progress,
@@ -1229,9 +1470,31 @@ def build_program_status(
                 "manifest-valid prospective experiment contract bound to the "
                 "current rank contract",
             ))
-            feature_progress, feature_pipeline_complete = (
-                _feature_pipeline_progress(conn)
-            )
+            milestones.append(_milestone(
+                "INDEPENDENT_PROVIDER_QUALIFICATION",
+                qualification_progress,
+                {
+                    "qualified_recall_provider": 1,
+                    "implemented_adapter": True,
+                    "complete_proof_inventory": True,
+                },
+                qualification is not None,
+                "operator-approved qualification manifest bound to an implemented "
+                "full-universe intraday adapter",
+            ))
+            milestones.append(_milestone(
+                "LOCKED_DISCOVERY_CAMPAIGN",
+                discovery_campaign_progress,
+                {
+                    "valid_locked_campaign": True,
+                    "sessions": ">=10",
+                    "experiment_holdout_match": True,
+                    "provider_qualification_match": True,
+                },
+                discovery_campaign_locked,
+                "immutable v3 campaign locked before the exact holdout inventory "
+                "opens and bound to experiment, rank, provider, dataset, and floors",
+            ))
             milestones.append(_milestone(
                 "CONTEXT_LIFECYCLE_RANK_EVIDENCE",
                 feature_progress,
@@ -1324,6 +1587,27 @@ def build_program_status(
             str(exc)[:1000],
         ))
 
+    milestone_order = {
+        code: index
+        for index, code in enumerate((
+            "DATABASE_INTEGRITY",
+            "CONTEXT_LIFECYCLE_RANK_EVIDENCE",
+            "LOCKED_EMPIRICAL_EXPERIMENT",
+            "INDEPENDENT_PROVIDER_QUALIFICATION",
+            "LOCKED_DISCOVERY_CAMPAIGN",
+            "CLEAN_DISCOVERY_SESSIONS",
+            "APPEND_ONLY_OUTCOME_QUALITY",
+            "FULL_UNIVERSE_RECALL_CENSUS",
+            "INDEPENDENT_PROVIDER_PROOFS",
+            "BLINDED_HOLDOUT_LABELS",
+            "EMPIRICAL_HOLDOUT_PASS",
+            "CALIBRATION_HOLDOUT_PASS",
+            "INDEPENDENT_CUSTOMER_CASE_REVIEWS",
+            "CUSTOMER_DELIVERY_REVIEW_GATE",
+            "EVIDENCE_LEDGER_VALIDATION",
+        ))
+    }
+    milestones.sort(key=lambda item: milestone_order.get(item.code, len(milestone_order)))
     for item in milestones:
         if item.state != STATE_COMPLETE:
             blockers.append(item.code)
@@ -1340,6 +1624,15 @@ def build_program_status(
         "FULL_UNIVERSE_RECALL_CENSUS": "Run the finalized full-universe census for every clean session.",
         "INDEPENDENT_PROVIDER_PROOFS": "Complete licensing and run independent provider proofs for every clean session.",
         "LOCKED_EMPIRICAL_EXPERIMENT": "Prospectively lock development and holdout sessions before labeling results.",
+        "INDEPENDENT_PROVIDER_QUALIFICATION": (
+            "Finish and archive one affordable provider qualification before "
+            "locking a campaign to that provider and dataset."
+        ),
+        "LOCKED_DISCOVERY_CAMPAIGN": (
+            "Lock the discovery campaign to the exact experiment, provider, "
+            "dataset, rank contract, floors, and future holdout sessions before "
+            "collecting campaign evidence."
+        ),
         "CONTEXT_LIFECYCLE_RANK_EVIDENCE": (
             "Resolve unavailable required context features and prove one exact "
             "context/lifecycle/rank chain before counting campaign sessions."
@@ -1402,12 +1695,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
     parser.add_argument("--audit-dir", type=Path, default=DEFAULT_AUDIT_DIR)
     parser.add_argument("--evidence-dir", type=Path, default=DEFAULT_EVIDENCE_DIR)
+    parser.add_argument(
+        "--provider-qualification",
+        type=Path,
+        help=(
+            "defaults to EVIDENCE_DIR/provider-qualification/qualification.json"
+        ),
+    )
+    parser.add_argument(
+        "--discovery-campaign",
+        type=Path,
+        help="defaults to EVIDENCE_DIR/discovery-campaign.json",
+    )
     args = parser.parse_args(argv)
     report = build_program_status(
         args.database,
         args.audit_dir,
         args.evidence_dir,
         generated_at=datetime.now(timezone.utc),
+        provider_qualification_path=args.provider_qualification,
+        discovery_campaign_path=args.discovery_campaign,
     )
     print(json.dumps(asdict(report), indent=2, sort_keys=True))
     return 0 if report.eligible_for_customer_delivery_review else 1
