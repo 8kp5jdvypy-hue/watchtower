@@ -14,12 +14,24 @@ from tradebot.postmarket_program_status import (
     main,
 )
 from tradebot import postmarket_program_status as program_status
-from tradebot.postmarket_customer_dry_run_campaign import POLICY_FIELDS
+from tradebot.postmarket_customer_dry_run_campaign import (
+    POLICY_FIELDS as CUSTOMER_POLICY_FIELDS,
+)
+from tradebot.postmarket_discovery_evidence_gate import (
+    CAMPAIGN_SCHEMA_VERSION as DISCOVERY_CAMPAIGN_VERSION,
+    POLICY_FIELDS as DISCOVERY_POLICY_FIELDS,
+)
+from tradebot.postmarket_empirical import EMPIRICAL_VERSION
 from tradebot.postmarket_rank import (
     COMPONENT_WEIGHTS,
     RANK_VERSION,
     rank_contract_sha256,
     rank_thresholds,
+)
+from tradebot.vendors.historical_reference import REFERENCE_PROVIDER_DATASETS
+from tradebot.vendors.historical_reference_qualification import (
+    QUALIFICATION_SCHEMA_VERSION,
+    REQUIRED_QUALIFICATION_PROOFS,
 )
 
 
@@ -28,6 +40,53 @@ SESSIONS = tuple(
     f"2026-08-{day:02d}"
     for day in (10, 11, 12, 13, 14, 17, 18, 19, 20, 21)
 )
+DEVELOPMENT_SESSIONS = tuple(
+    f"2026-{month:02d}-{day:02d}"
+    for month, day in (
+        (7, 27), (7, 28), (7, 29), (7, 30), (7, 31),
+        (8, 3), (8, 4), (8, 5), (8, 6), (8, 7),
+    )
+)
+EXPERIMENT_CREATED_AT = "2026-08-08T01:00:00+00:00"
+ELIGIBILITY_RULE = {
+    "move_pct": 5.0,
+    "min_cumulative_notional": 100_000.0,
+    "persistence_bars": 2,
+}
+SELECTION_RULE = {
+    "minimum_evidence_score": 60.0,
+    "maximum_ordinal_rank": 20,
+}
+EXPERIMENT_POLICY = {
+    "min_precision": 0.8,
+    "min_recall": 0.95,
+    "min_definitive_labels": 2,
+    "min_positive_labels": 1,
+}
+
+
+def _experiment_payload() -> dict:
+    return {
+        "empirical_version": EMPIRICAL_VERSION,
+        "experiment_id": "campaign-1",
+        "created_at_utc": EXPERIMENT_CREATED_AT,
+        "created_by": "independent-review-owner",
+        "rank_version": RANK_VERSION,
+        "rank_contract_sha256": rank_contract_sha256(),
+        "label_method": "blind_bar_review",
+        "development_sessions": DEVELOPMENT_SESSIONS,
+        "holdout_sessions": SESSIONS,
+        "eligibility_rule": ELIGIBILITY_RULE,
+        "selection_rule": SELECTION_RULE,
+        "policy": EXPERIMENT_POLICY,
+    }
+
+
+def _experiment_manifest_sha256() -> str:
+    canonical = json.dumps(
+        _experiment_payload(), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _database(
@@ -103,7 +162,7 @@ def _database(
         """
     )
     if complete:
-        bar_utc = "2026-08-10T20:05:00+00:00"
+        bar_utc = "2026-07-27T20:05:00+00:00"
         catalyst_coverage = {
             key: "CONFIGURED"
             for key in (
@@ -122,7 +181,7 @@ def _database(
         conn.execute(
             "INSERT INTO postmarket_candidate_context VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                1, 11, 2, SESSIONS[0], "AAA", "up", 1, bar_utc, "complete",
+                1, 11, 2, DEVELOPMENT_SESSIONS[0], "AAA", "up", 1, bar_utc, "complete",
                 "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "VERIFIED",
                 json.dumps(["earnings"]), json.dumps([{"source": "earnings"}]),
                 json.dumps(catalyst_coverage), "HIGH", 100.0,
@@ -131,11 +190,11 @@ def _database(
         )
         conn.execute(
             "INSERT INTO postmarket_candidate_lifecycle VALUES (?,?,?,?,?,?,?,?,?)",
-            (1, 11, 1, SESSIONS[0], "AAA", "up", "CONFIRMED", "QUALIFIED", bar_utc),
+            (1, 11, 1, DEVELOPMENT_SESSIONS[0], "AAA", "up", "CONFIRMED", "QUALIFIED", bar_utc),
         )
         conn.execute(
             "INSERT INTO postmarket_candidate_lifecycle_observations VALUES (?,?,?,?,?,?)",
-            (1, 11, 1, SESSIONS[0], "AAA", bar_utc),
+            (1, 11, 1, DEVELOPMENT_SESSIONS[0], "AAA", bar_utc),
         )
         conn.execute(
             "INSERT INTO postmarket_rank_runs VALUES (?,?,?,?,?,?)",
@@ -147,61 +206,24 @@ def _database(
         conn.execute(
             "INSERT INTO postmarket_candidate_ranks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                1, 1, 11, 1, 1, 1, SESSIONS[0], "AAA", "up", "CONFIRMED",
+                1, 1, 11, 1, 1, 1, DEVELOPMENT_SESSIONS[0], "AAA", "up", "CONFIRMED",
                 1, 1, 100.0, 100.0, 0.0, 100.0, json.dumps(rank_components),
                 json.dumps({}), json.dumps([]),
                 json.dumps([f"{key}=+1.00" for key in rank_components]),
             ),
         )
-        development_sessions = SESSIONS[:-2]
-        holdout_sessions = SESSIONS[-2:]
-        eligibility_rule = {
-            "move_pct": 5.0,
-            "min_cumulative_notional": 100_000.0,
-            "persistence_bars": 2,
-        }
-        selection_rule = {
-            "minimum_evidence_score": 60.0,
-            "maximum_ordinal_rank": 20,
-        }
-        experiment_policy = {
-            "min_precision": 0.8,
-            "min_recall": 0.95,
-            "min_definitive_labels": 2,
-            "min_positive_labels": 1,
-        }
-        created_at = "2026-08-20T01:00:00+00:00"
-        experiment_payload = {
-            "empirical_version": 1,
-            "experiment_id": "campaign-1",
-            "created_at_utc": created_at,
-            "created_by": "independent-review-owner",
-            "rank_version": RANK_VERSION,
-            "rank_contract_sha256": rank_contract_sha256(),
-            "label_method": "blind_bar_review",
-            "development_sessions": development_sessions,
-            "holdout_sessions": holdout_sessions,
-            "eligibility_rule": eligibility_rule,
-            "selection_rule": selection_rule,
-            "policy": experiment_policy,
-        }
-        experiment_manifest = hashlib.sha256(
-            json.dumps(
-                experiment_payload, sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
         conn.execute(
             "INSERT INTO postmarket_rank_experiments VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
-                "campaign-1", 1, "locked", created_at,
+                "campaign-1", EMPIRICAL_VERSION, "locked", EXPERIMENT_CREATED_AT,
                 "independent-review-owner", RANK_VERSION,
                 rank_contract_sha256(), "blind_bar_review",
-                json.dumps(development_sessions, separators=(",", ":")),
-                json.dumps(holdout_sessions, separators=(",", ":")),
-                json.dumps(eligibility_rule, sort_keys=True, separators=(",", ":")),
-                json.dumps(selection_rule, sort_keys=True, separators=(",", ":")),
-                json.dumps(experiment_policy, sort_keys=True, separators=(",", ":")),
-                experiment_manifest,
+                json.dumps(DEVELOPMENT_SESSIONS, separators=(",", ":")),
+                json.dumps(SESSIONS, separators=(",", ":")),
+                json.dumps(ELIGIBILITY_RULE, sort_keys=True, separators=(",", ":")),
+                json.dumps(SELECTION_RULE, sort_keys=True, separators=(",", ":")),
+                json.dumps(EXPERIMENT_POLICY, sort_keys=True, separators=(",", ":")),
+                _experiment_manifest_sha256(),
             ),
         )
         conn.executemany(
@@ -291,7 +313,11 @@ def _customer_campaign() -> dict:
         "allowed_audit_versions": [2],
         "allowed_audit_code_versions": ["abc1234"],
         "allowed_runtime_router_revisions": ["abc1234"],
-        **{name: True for name in POLICY_FIELDS if name.startswith("require_")},
+        **{
+            name: True
+            for name in CUSTOMER_POLICY_FIELDS
+            if name.startswith("require_")
+        },
     }
     return {
         "schema_version": 3,
@@ -320,6 +346,87 @@ def _customer_campaign() -> dict:
     }
 
 
+def _discovery_policy() -> dict:
+    return {
+        "min_clean_sessions": 10,
+        "min_definitive_labels": 2,
+        "min_positive_labels": 1,
+        "min_empirical_recall": 0.95,
+        "min_empirical_precision": 0.8,
+        "min_calibration_negative_labels": 1,
+        "min_calibration_bin_labels": 1,
+        "max_calibration_brier_score": 0.2,
+        "max_expected_calibration_error": 0.1,
+        "min_primary_recall": 0.95,
+        "max_primary_detection_latency_seconds": 300,
+        "min_provider_comparable_coverage": 0.99,
+        "min_provider_bar_overlap_coverage": 0.95,
+        "min_provider_eligible_pair_agreement": 0.95,
+        "min_provider_independent_recall": 0.95,
+        "max_provider_close_difference_bps": 25,
+        "min_window_coverage_pct": 99,
+        "max_discovery_tick_gap_seconds": 120,
+        "max_discovery_processing_latency_seconds": 30,
+        "max_discovery_scheduled_lag_seconds": 30,
+        "allowed_data_feeds": ["sip"],
+        "allowed_primary_market_data_providers": ["alpaca"],
+        "allowed_independent_market_data_providers": ["massive"],
+        "allowed_independent_datasets": [
+            REFERENCE_PROVIDER_DATASETS["massive"]
+        ],
+        "allowed_audit_versions": [4],
+        "allowed_discovery_versions": [1],
+        "allowed_audit_code_versions": ["abc1234"],
+        "allowed_observer_code_versions": ["abc1234"],
+        "allowed_census_code_versions": ["abc1234"],
+        "allowed_provider_proof_code_versions": ["abc1234"],
+        "allowed_empirical_code_versions": ["abc1234"],
+        "allowed_calibration_code_versions": ["abc1234"],
+        "allowed_control_code_versions": ["abc1234"],
+        **{
+            name: True
+            for name in DISCOVERY_POLICY_FIELDS
+            if name.startswith("require_")
+        },
+    }
+
+
+def _provider_qualification() -> dict:
+    return {
+        "schema_version": QUALIFICATION_SCHEMA_VERSION,
+        "status": "qualified",
+        "provider": "massive",
+        "dataset": REFERENCE_PROVIDER_DATASETS["massive"],
+        "approved_at_utc": "2026-08-07T12:00:00+00:00",
+        "approved_by": "independent-review-owner",
+        "license_reference": "operator-approved-test-license",
+        "proofs": [
+            {
+                "kind": kind,
+                "reference": f"evidence/{kind}.json",
+                "sha256": hashlib.sha256(kind.encode()).hexdigest(),
+            }
+            for kind in sorted(REQUIRED_QUALIFICATION_PROOFS)
+        ],
+    }
+
+
+def _discovery_campaign() -> dict:
+    return {
+        "schema_version": DISCOVERY_CAMPAIGN_VERSION,
+        "status": "locked",
+        "campaign_id": "discovery-campaign-1",
+        "locked_at_utc": "2026-08-08T02:00:00+00:00",
+        "coverage_start": SESSIONS[0],
+        "coverage_end": SESSIONS[-1],
+        "experiment_id": "campaign-1",
+        "experiment_manifest_sha256": _experiment_manifest_sha256(),
+        "rank_version": RANK_VERSION,
+        "rank_contract_sha256": rank_contract_sha256(),
+        "policy": _discovery_policy(),
+    }
+
+
 def _artifacts(
     audit_dir: Path, evidence_dir: Path, *, complete: bool
 ) -> str | None:
@@ -327,6 +434,15 @@ def _artifacts(
     evidence_dir.mkdir()
     if not complete:
         return None
+    qualification_path = (
+        evidence_dir / "provider-qualification" / "qualification.json"
+    )
+    qualification_path.parent.mkdir()
+    _write(qualification_path, _provider_qualification())
+    qualification_sha256 = hashlib.sha256(
+        qualification_path.read_bytes()
+    ).hexdigest()
+    _write(evidence_dir / "discovery-campaign.json", _discovery_campaign())
     for index, session in enumerate(SESSIONS, 1):
         _write(
             audit_dir / f"postmarket_discovery_audit_{session}_v4.json",
@@ -367,7 +483,11 @@ def _artifacts(
                 "attempt": 1,
                 "operational_complete": True,
                 "evidence_eligible": True,
-                "source": {"qualification_manifest_sha256": "a" * 64},
+                "source": {
+                    "independent_provider": "massive",
+                    "independent_dataset": REFERENCE_PROVIDER_DATASETS["massive"],
+                    "qualification_manifest_sha256": qualification_sha256,
+                },
                 "issue_codes": [],
             },
         )
@@ -427,8 +547,8 @@ def test_empty_valid_database_reports_the_first_real_next_action(tmp_path):
     assert report.evidence_collection_complete is False
     assert report.eligible_for_customer_delivery_review is False
     assert report.customer_delivery_enabled is False
-    assert report.blockers[0] == "CLEAN_DISCOVERY_SESSIONS"
-    assert "ten clean sessions" in report.next_action
+    assert report.blockers[0] == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    assert "context/lifecycle/rank chain" in report.next_action
 
 
 def test_populated_tables_do_not_replace_a_feature_complete_candidate_chain(
@@ -486,6 +606,8 @@ def test_forged_experiment_manifest_cannot_unlock_downstream_holdout_gates(
         "campaign-1": ["manifest digest mismatch"]
     }
     assert locked.state != STATE_COMPLETE
+    assert milestones["LOCKED_DISCOVERY_CAMPAIGN"].state != STATE_COMPLETE
+    assert milestones["CLEAN_DISCOVERY_SESSIONS"].observed == 0
     assert milestones["BLINDED_HOLDOUT_LABELS"].state != STATE_COMPLETE
     assert milestones["EMPIRICAL_HOLDOUT_PASS"].observed == 0
     assert milestones["CALIBRATION_HOLDOUT_PASS"].observed == 0
@@ -554,6 +676,29 @@ def test_provider_proofs_do_not_count_outside_the_clean_session_set(tmp_path):
     assert report.eligible_for_customer_delivery_review is False
 
 
+def test_clean_sessions_outside_the_locked_campaign_do_not_count(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    payload = json.loads(
+        (
+            audits / f"postmarket_discovery_audit_{SESSIONS[0]}_v4.json"
+        ).read_text(encoding="utf-8")
+    )
+    payload["session"] = "2026-08-24"
+    _write(audits / "postmarket_discovery_audit_2026-08-24_v4.json", payload)
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones
+        if item.code == "CLEAN_DISCOVERY_SESSIONS"
+    )
+    assert milestone.observed == len(SESSIONS)
+    assert "2026-08-24" not in milestone.evidence
+
+
 def test_legacy_provider_proofs_without_qualification_do_not_count(tmp_path):
     database, audits, evidence = _fixture(tmp_path, complete=True)
     for path in audits.glob("postmarket_recall_provider_*.json"):
@@ -569,6 +714,44 @@ def test_legacy_provider_proofs_without_qualification_do_not_count(tmp_path):
     assert milestone.observed == 0
     assert milestone.state != STATE_COMPLETE
     assert report.eligible_for_customer_delivery_review is False
+
+
+def test_provider_proofs_must_bind_the_exact_approved_qualification(tmp_path):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    for path in audits.glob("postmarket_recall_provider_*.json"):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["source"]["qualification_manifest_sha256"] = "f" * 64
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item for item in report.milestones
+        if item.code == "INDEPENDENT_PROVIDER_PROOFS"
+    )
+    assert milestone.observed == 0
+    assert milestone.state != STATE_COMPLETE
+    assert report.eligible_for_customer_delivery_review is False
+
+
+def test_campaign_must_be_locked_before_clean_session_collection(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    (evidence / "discovery-campaign.json").unlink()
+    for path in audits.glob("*.json"):
+        path.unlink()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestones = {item.code: item for item in report.milestones}
+    assert milestones["LOCKED_EMPIRICAL_EXPERIMENT"].state == STATE_COMPLETE
+    assert milestones["INDEPENDENT_PROVIDER_QUALIFICATION"].state == STATE_COMPLETE
+    assert milestones["LOCKED_DISCOVERY_CAMPAIGN"].state != STATE_COMPLETE
+    assert milestones["CLEAN_DISCOVERY_SESSIONS"].observed == 0
+    assert report.blockers[0] == "LOCKED_DISCOVERY_CAMPAIGN"
+    assert report.next_action.startswith("Lock the discovery campaign")
 
 
 def test_malformed_empirical_report_is_a_visible_error_not_an_empty_holdout(tmp_path):
@@ -766,5 +949,5 @@ def test_cli_emits_machine_readable_progress_and_exits_incomplete(
     assert payload["eligible_for_customer_delivery_review"] is False
     assert payload["customer_delivery_enabled"] is False
     assert payload["evidence_directory"] == str(evidence.resolve())
-    assert payload["blockers"][0] == "CLEAN_DISCOVERY_SESSIONS"
-    assert "ten clean sessions" in payload["next_action"]
+    assert payload["blockers"][0] == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    assert "context/lifecycle/rank chain" in payload["next_action"]

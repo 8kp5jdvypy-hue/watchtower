@@ -130,8 +130,9 @@ archived the quote or agreement and recorded each item below.
 
 The checklist is enforced by an immutable qualification manifest. Adapter
 implementation and credentials alone never set `production_qualified=true`.
-After every row above is archived and reviewed, place a strict version-1 JSON
-manifest under `data/postmarket_evidence/provider-qualification/` and set
+After every row above is archived and reviewed, place the strict version-1 JSON
+manifest at
+`data/postmarket_evidence/provider-qualification/qualification.json` and set
 `POSTMARKET_REFERENCE_QUALIFICATION_MANIFEST` to that relative path. The
 manifest contains the selected provider and exact adapter dataset, approval
 identity/time, license reference, and exactly one `{kind,reference,sha256}`
