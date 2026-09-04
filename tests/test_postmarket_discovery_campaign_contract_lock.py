@@ -10,6 +10,10 @@ from datetime import date, datetime, timezone
 import pytest
 
 from tradebot import postmarket_signal_campaign_lock as campaign_lock_module
+from tradebot.postmarket_calibration import (
+    CALIBRATION_VERSION,
+    ensure_calibration_schema,
+)
 from tradebot.postmarket_signal_campaign_lock import (
     lock_signal_quality_campaign,
     main,
@@ -50,6 +54,54 @@ HOLDOUT = tuple(
 EXPERIMENT_CREATED = datetime(2026, 8, 8, 1, tzinfo=timezone.utc)
 CAMPAIGN_LOCKED = datetime(2026, 8, 14, 12, tzinfo=timezone.utc)
 EXPERIMENT_POLICY = ExperimentPolicy(0.9, 0.95, 100, 30)
+CALIBRATOR_FITTED = datetime(2026, 8, 14, 10, tzinfo=timezone.utc)
+
+
+def _calibration_policy() -> dict:
+    return {
+        "min_training_labels": 100,
+        "min_training_positive_labels": 30,
+        "min_training_negative_labels": 70,
+        "min_holdout_labels": 100,
+        "min_holdout_positive_labels": 30,
+        "min_holdout_negative_labels": 70,
+        "minimum_bin_labels": 20,
+        "max_brier_score": 0.2,
+        "max_expected_calibration_error": 0.1,
+    }
+
+
+def _calibrator_model() -> tuple[str, str]:
+    development_digest = "d" * 64
+    model = {
+        "calibration_version": CALIBRATION_VERSION,
+        "experiment_id": "marketwide-holdout-1",
+        "rank_contract_sha256": rank_contract_sha256(),
+        "method": "isotonic_pav",
+        "scope": "first_rankable_score_same_direction_quality",
+        "development_input_sha256": development_digest,
+        "policy": _calibration_policy(),
+        "segments": [
+            {
+                "minimum_score": 0.0,
+                "maximum_score": 49.0,
+                "calibrated_quality": 0.0,
+                "development_labels": 70,
+                "development_positives": 0,
+            },
+            {
+                "minimum_score": 50.0,
+                "maximum_score": 100.0,
+                "calibrated_quality": 1.0,
+                "development_labels": 30,
+                "development_positives": 30,
+            },
+        ],
+    }
+    return (
+        json.dumps(model, sort_keys=True, separators=(",", ":")),
+        development_digest,
+    )
 
 
 def _policy() -> dict:
@@ -123,10 +175,16 @@ def _qualification(path, *, approved_at="2026-08-08T00:00:00+00:00"):
     )
 
 
-def _experiment(path, *, holdout=HOLDOUT) -> str:
+def _experiment(
+    path,
+    *,
+    holdout=HOLDOUT,
+    with_calibrator=True,
+    calibrator_fitted=CALIBRATOR_FITTED,
+) -> str:
     conn = sqlite3.connect(path)
     try:
-        return create_locked_experiment(
+        digest = create_locked_experiment(
             conn,
             experiment_id="marketwide-holdout-1",
             created_at=EXPERIMENT_CREATED,
@@ -140,6 +198,41 @@ def _experiment(path, *, holdout=HOLDOUT) -> str:
             selection_rule=SelectionRule(60.0, 20),
             policy=EXPERIMENT_POLICY,
         )
+        ensure_calibration_schema(conn)
+        if with_calibrator:
+            model_raw, development_digest = _calibrator_model()
+            conn.execute(
+                """
+                INSERT INTO postmarket_rank_calibrators
+                    (experiment_id,calibration_version,fitted_at_utc,code_version,
+                     method,development_input_sha256,policy_json,model_json,
+                     model_sha256,definitive_labels,positive_labels,negative_labels,
+                     training_brier_score,training_expected_calibration_error)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    "marketwide-holdout-1",
+                    CALIBRATION_VERSION,
+                    calibrator_fitted.isoformat(),
+                    "abc1234",
+                    "isotonic_pav",
+                    development_digest,
+                    json.dumps(
+                        _calibration_policy(),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    model_raw,
+                    hashlib.sha256(model_raw.encode()).hexdigest(),
+                    100,
+                    30,
+                    70,
+                    0.0,
+                    0.0,
+                ),
+            )
+            conn.commit()
+        return digest
     finally:
         conn.close()
 
@@ -197,6 +290,11 @@ def test_verified_lock_derives_every_shared_identity_without_mutating_database(
             101,
             "empirical floors do not match locked experiment",
         ),
+        (
+            "min_calibration_bin_labels",
+            21,
+            "calibration floors do not match frozen calibrator",
+        ),
     ),
 )
 def test_verified_lock_rejects_manually_drifted_shared_contracts(
@@ -228,6 +326,45 @@ def test_verified_lock_requires_qualification_to_precede_campaign(tmp_path):
     _qualification(qualification, approved_at="2026-08-15T00:00:00+00:00")
 
     with pytest.raises(ValueError, match="future"):
+        lock_signal_quality_campaign(
+            tmp_path / "campaign.json",
+            database_path=database,
+            qualification_path=qualification,
+            campaign_id="discovery-campaign-1",
+            experiment_id="marketwide-holdout-1",
+            locked_at=CAMPAIGN_LOCKED,
+            policy=_policy(),
+        )
+
+
+def test_verified_lock_requires_a_frozen_development_calibrator(tmp_path):
+    database = tmp_path / "shadow.db"
+    _experiment(database, with_calibrator=False)
+    qualification = tmp_path / "qualification.json"
+    _qualification(qualification)
+
+    with pytest.raises(ValueError, match="no frozen calibrator"):
+        lock_signal_quality_campaign(
+            tmp_path / "campaign.json",
+            database_path=database,
+            qualification_path=qualification,
+            campaign_id="discovery-campaign-1",
+            experiment_id="marketwide-holdout-1",
+            locked_at=CAMPAIGN_LOCKED,
+            policy=_policy(),
+        )
+
+
+def test_verified_lock_cannot_predate_the_frozen_calibrator(tmp_path):
+    database = tmp_path / "shadow.db"
+    _experiment(
+        database,
+        calibrator_fitted=datetime(2026, 8, 14, 13, tzinfo=timezone.utc),
+    )
+    qualification = tmp_path / "qualification.json"
+    _qualification(qualification)
+
+    with pytest.raises(ValueError, match="cannot predate"):
         lock_signal_quality_campaign(
             tmp_path / "campaign.json",
             database_path=database,

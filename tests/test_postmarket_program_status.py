@@ -14,6 +14,7 @@ from tradebot.postmarket_program_status import (
     main,
 )
 from tradebot import postmarket_program_status as program_status
+from tradebot.postmarket_calibration import CALIBRATION_VERSION
 from tradebot.postmarket_customer_dry_run_campaign import (
     POLICY_FIELDS as CUSTOMER_POLICY_FIELDS,
 )
@@ -63,6 +64,51 @@ EXPERIMENT_POLICY = {
     "min_definitive_labels": 2,
     "min_positive_labels": 1,
 }
+CALIBRATION_POLICY = {
+    "min_training_labels": 2,
+    "min_training_positive_labels": 1,
+    "min_training_negative_labels": 1,
+    "min_holdout_labels": 2,
+    "min_holdout_positive_labels": 1,
+    "min_holdout_negative_labels": 1,
+    "minimum_bin_labels": 1,
+    "max_brier_score": 0.2,
+    "max_expected_calibration_error": 0.1,
+}
+CALIBRATOR_FITTED_AT = "2026-08-08T02:00:00+00:00"
+
+
+def _calibrator_model() -> tuple[str, str]:
+    development_digest = "d" * 64
+    model = {
+        "calibration_version": CALIBRATION_VERSION,
+        "experiment_id": "campaign-1",
+        "rank_contract_sha256": rank_contract_sha256(),
+        "method": "isotonic_pav",
+        "scope": "first_rankable_score_same_direction_quality",
+        "development_input_sha256": development_digest,
+        "policy": CALIBRATION_POLICY,
+        "segments": [
+            {
+                "minimum_score": 0.0,
+                "maximum_score": 49.0,
+                "calibrated_quality": 0.0,
+                "development_labels": 1,
+                "development_positives": 0,
+            },
+            {
+                "minimum_score": 50.0,
+                "maximum_score": 100.0,
+                "calibrated_quality": 1.0,
+                "development_labels": 1,
+                "development_positives": 1,
+            },
+        ],
+    }
+    return (
+        json.dumps(model, sort_keys=True, separators=(",", ":")),
+        development_digest,
+    )
 
 
 def _experiment_payload() -> dict:
@@ -154,6 +200,16 @@ def _database(
           experiment_id TEXT, split TEXT, input_digest_sha256 TEXT,
           report_json TEXT, report_sha256 TEXT
         );
+        CREATE TABLE postmarket_rank_calibrators (
+          calibration_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          experiment_id TEXT, calibration_version INTEGER,
+          fitted_at_utc TEXT, code_version TEXT, method TEXT,
+          development_input_sha256 TEXT, policy_json TEXT,
+          model_json TEXT, model_sha256 TEXT, definitive_labels INTEGER,
+          positive_labels INTEGER, negative_labels INTEGER,
+          training_brier_score REAL,
+          training_expected_calibration_error REAL
+        );
         CREATE TABLE postmarket_customer_dry_run_reviews (
           campaign_sha256 TEXT, case_evidence_sha256 TEXT, symbol TEXT,
           reviewer_role TEXT, independent_of_implementation INTEGER,
@@ -224,6 +280,37 @@ def _database(
                 json.dumps(SELECTION_RULE, sort_keys=True, separators=(",", ":")),
                 json.dumps(EXPERIMENT_POLICY, sort_keys=True, separators=(",", ":")),
                 _experiment_manifest_sha256(),
+            ),
+        )
+        model_raw, development_digest = _calibrator_model()
+        conn.execute(
+            """
+            INSERT INTO postmarket_rank_calibrators
+                (experiment_id,calibration_version,fitted_at_utc,code_version,
+                 method,development_input_sha256,policy_json,model_json,
+                 model_sha256,definitive_labels,positive_labels,negative_labels,
+                 training_brier_score,training_expected_calibration_error)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                "campaign-1",
+                CALIBRATION_VERSION,
+                CALIBRATOR_FITTED_AT,
+                "abc1234",
+                "isotonic_pav",
+                development_digest,
+                json.dumps(
+                    CALIBRATION_POLICY,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                model_raw,
+                hashlib.sha256(model_raw.encode()).hexdigest(),
+                2,
+                1,
+                1,
+                0.0,
+                0.0,
             ),
         )
         conn.executemany(
@@ -416,7 +503,7 @@ def _discovery_campaign() -> dict:
         "schema_version": DISCOVERY_CAMPAIGN_VERSION,
         "status": "locked",
         "campaign_id": "discovery-campaign-1",
-        "locked_at_utc": "2026-08-08T02:00:00+00:00",
+        "locked_at_utc": "2026-08-08T03:00:00+00:00",
         "coverage_start": SESSIONS[0],
         "coverage_end": SESSIONS[-1],
         "experiment_id": "campaign-1",
@@ -752,6 +839,50 @@ def test_campaign_must_be_locked_before_clean_session_collection(
     assert milestones["CLEAN_DISCOVERY_SESSIONS"].observed == 0
     assert report.blockers[0] == "LOCKED_DISCOVERY_CAMPAIGN"
     assert report.next_action.startswith("Lock the discovery campaign")
+
+
+def test_calibrator_must_be_frozen_before_campaign_sessions_can_count(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute("DELETE FROM postmarket_rank_calibrators")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestones = {item.code: item for item in report.milestones}
+    assert milestones["LOCKED_EMPIRICAL_EXPERIMENT"].state == STATE_COMPLETE
+    assert milestones["FROZEN_DEVELOPMENT_CALIBRATOR"].state != STATE_COMPLETE
+    assert milestones["LOCKED_DISCOVERY_CAMPAIGN"].state != STATE_COMPLETE
+    assert milestones["CLEAN_DISCOVERY_SESSIONS"].observed == 0
+    assert report.blockers[0] == "FROZEN_DEVELOPMENT_CALIBRATOR"
+    assert report.next_action.startswith("Fit and freeze")
+
+
+def test_tampered_calibrator_cannot_unlock_campaign_sessions(
+    tmp_path, monkeypatch,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute(
+        "UPDATE postmarket_rank_calibrators SET model_sha256=?",
+        ("f" * 64,),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(program_status, "_verified_ready_customer_gates", lambda *args: 1)
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestones = {item.code: item for item in report.milestones}
+    calibrator = milestones["FROZEN_DEVELOPMENT_CALIBRATOR"]
+    assert calibrator.observed["valid_frozen_calibrators"] == 0
+    assert "digest does not match" in calibrator.observed["invalid_calibrators"]["campaign-1"][0]
+    assert milestones["LOCKED_DISCOVERY_CAMPAIGN"].state != STATE_COMPLETE
+    assert milestones["CLEAN_DISCOVERY_SESSIONS"].observed == 0
 
 
 def test_malformed_empirical_report_is_a_visible_error_not_an_empty_holdout(tmp_path):

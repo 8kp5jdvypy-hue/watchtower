@@ -13,11 +13,14 @@ fails closed unless the complete leakage-resistant sequence below succeeds.
    mapping. The mapping binds the exact locked rank contract, latest label
    revisions, first rankable score rows and their run input digests, policy,
    code revision, and model with SHA-256.
-4. Once fitted, development labels are frozen by a database trigger. A second
+4. Lock the discovery evidence campaign only after that model exists. The
+   prescribed campaign-lock command validates the exact model, fit timing,
+   calibration policy floors, and allowed calibration code revision.
+5. Once fitted, development labels are frozen by a database trigger. A second
    model for the same experiment is rejected.
-5. Import independent holdout labels while rank output remains sealed.
-6. Explicitly freeze the holdout inventory and unblind once.
-7. Evaluate the already-frozen mapping. No refit or threshold selection is
+6. Import independent holdout labels while rank output remains sealed.
+7. Explicitly freeze the holdout inventory and unblind once.
+8. Evaluate the already-frozen mapping. No refit or threshold selection is
    permitted after unblinding.
 
 The database rejects holdout-label inserts after unblinding even when a caller

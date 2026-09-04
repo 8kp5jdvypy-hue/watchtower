@@ -17,6 +17,11 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from tradebot.postmarket_calibration import (
+    CALIBRATION_VERSION,
+    FrozenCalibrator,
+    load_frozen_calibrator,
+)
 from tradebot.postmarket_customer_dry_run_gate import (
     evaluate_customer_dry_run_gate,
 )
@@ -58,7 +63,7 @@ from tradebot.vendors.historical_reference_qualification import (
 )
 
 
-STATUS_VERSION = 2
+STATUS_VERSION = 3
 MIN_CLEAN_SESSIONS = 10
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE = REPO_ROOT / "data" / "postmarket_shadow.db"
@@ -287,6 +292,23 @@ _LOCKED_EXPERIMENT_COLUMNS = {
     "selection_rule_json",
     "policy_json",
     "manifest_sha256",
+}
+_FROZEN_CALIBRATOR_COLUMNS = {
+    "calibration_id",
+    "experiment_id",
+    "calibration_version",
+    "fitted_at_utc",
+    "code_version",
+    "method",
+    "development_input_sha256",
+    "policy_json",
+    "model_json",
+    "model_sha256",
+    "definitive_labels",
+    "positive_labels",
+    "negative_labels",
+    "training_brier_score",
+    "training_expected_calibration_error",
 }
 _REQUIRED_RANK_COMPONENTS = set(COMPONENT_WEIGHTS)
 _REQUIRED_CONFIDENCE_COMPONENTS = {
@@ -521,6 +543,53 @@ def _locked_experiment_progress(
     return observed, frozenset(valid)
 
 
+def _frozen_calibrator_progress(
+    conn: sqlite3.Connection,
+    locked_experiment_ids: frozenset[str],
+    *,
+    observed_at: datetime,
+) -> tuple[dict[str, object], dict[str, FrozenCalibrator]]:
+    """Validate development-only calibrators before any holdout can count."""
+    table = "postmarket_rank_calibrators"
+    missing_schema = sorted(
+        _FROZEN_CALIBRATOR_COLUMNS - _table_columns(conn, table)
+    )
+    observed: dict[str, object] = {
+        "rows": _count(conn, table),
+        "valid_frozen_calibrators": 0,
+        "invalid_calibrators": {},
+        "missing_schema": missing_schema,
+    }
+    if missing_schema or not locked_experiment_ids:
+        return observed, {}
+
+    valid: dict[str, FrozenCalibrator] = {}
+    invalid: dict[str, list[str]] = {}
+    for experiment_id in sorted(locked_experiment_ids):
+        try:
+            calibrator = load_frozen_calibrator(conn, experiment_id)
+            fitted_at = _utc(
+                datetime.fromisoformat(calibrator.fitted_at_utc),
+                "frozen calibrator fitted_at_utc",
+            )
+            if fitted_at > observed_at:
+                raise ValueError("fitted_at_utc is in the future")
+            valid[experiment_id] = calibrator
+        except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+            invalid[experiment_id] = [str(exc)]
+    observed["valid_frozen_calibrators"] = len(valid)
+    observed["invalid_calibrators"] = invalid
+    observed["models"] = {
+        experiment_id: {
+            "model_sha256": calibrator.model_sha256,
+            "fitted_at_utc": calibrator.fitted_at_utc,
+            "code_version": calibrator.code_version,
+        }
+        for experiment_id, calibrator in valid.items()
+    }
+    return observed, valid
+
+
 def _provider_qualification_progress(
     path: Path,
     *,
@@ -578,6 +647,7 @@ def _locked_discovery_campaign_progress(
     *,
     observed_at: datetime,
     locked_experiment_ids: frozenset[str],
+    frozen_calibrators: dict[str, FrozenCalibrator],
     qualification: HistoricalReferenceQualification | None,
 ) -> tuple[dict[str, object], bool, frozenset[str]]:
     """Validate that collection was prospectively scoped before it starts."""
@@ -611,6 +681,15 @@ def _locked_discovery_campaign_progress(
             "campaign_id": campaign_id,
             "experiment_id": experiment_id,
             "reason": "campaign does not bind a valid locked experiment",
+        })
+        return observed, False, frozenset()
+    calibrator = frozen_calibrators.get(experiment_id)
+    if calibrator is None:
+        observed.update({
+            "present": True,
+            "campaign_id": campaign_id,
+            "experiment_id": experiment_id,
+            "reason": "campaign experiment has no valid frozen calibrator",
         })
         return observed, False, frozenset()
     try:
@@ -649,6 +728,12 @@ def _locked_discovery_campaign_progress(
     )
     if locked_at < experiment_created:
         raise ValueError("discovery campaign predates its locked experiment")
+    calibrator_fitted = _utc(
+        datetime.fromisoformat(calibrator.fitted_at_utc),
+        "frozen calibrator fitted_at_utc",
+    )
+    if locked_at < calibrator_fitted:
+        raise ValueError("discovery campaign predates its frozen calibrator")
     holdout_sessions = _json_value(row[3], list)
     experiment_policy = _json_value(row[4], dict)
     if holdout_sessions != [session.isoformat() for session in sessions]:
@@ -672,6 +757,28 @@ def _locked_discovery_campaign_progress(
     }
     if experiment_policy != expected_empirical_policy:
         raise ValueError("discovery campaign empirical floors do not match experiment")
+    calibration_policy = calibrator.policy
+    if (
+        policy.min_definitive_labels != calibration_policy.min_holdout_labels
+        or policy.min_positive_labels
+        != calibration_policy.min_holdout_positive_labels
+        or policy.min_calibration_negative_labels
+        != calibration_policy.min_holdout_negative_labels
+        or policy.min_calibration_bin_labels
+        != calibration_policy.minimum_bin_labels
+        or policy.max_calibration_brier_score
+        != calibration_policy.max_brier_score
+        or policy.max_expected_calibration_error
+        != calibration_policy.max_expected_calibration_error
+    ):
+        raise ValueError(
+            "discovery campaign calibration floors do not match calibrator"
+        )
+    if (
+        calibrator.calibration_version != CALIBRATION_VERSION
+        or calibrator.code_version not in policy.allowed_calibration_code_versions
+    ):
+        raise ValueError("discovery campaign does not allow its frozen calibrator")
     if qualification is None:
         observed.update({
             "present": True,
@@ -1363,6 +1470,13 @@ def build_program_status(
             experiment_progress, locked_experiment_ids = (
                 _locked_experiment_progress(conn)
             )
+            calibrator_progress, frozen_calibrators = (
+                _frozen_calibrator_progress(
+                    conn,
+                    locked_experiment_ids,
+                    observed_at=generated,
+                )
+            )
             (
                 discovery_campaign_progress,
                 discovery_campaign_locked,
@@ -1372,6 +1486,7 @@ def build_program_status(
                 discovery_campaign,
                 observed_at=generated,
                 locked_experiment_ids=locked_experiment_ids,
+                frozen_calibrators=frozen_calibrators,
                 qualification=qualification,
             )
             feature_progress, feature_pipeline_complete = (
@@ -1469,6 +1584,18 @@ def build_program_status(
                 bool(locked_experiment_ids),
                 "manifest-valid prospective experiment contract bound to the "
                 "current rank contract",
+            ))
+            milestones.append(_milestone(
+                "FROZEN_DEVELOPMENT_CALIBRATOR",
+                calibrator_progress,
+                {
+                    "valid_frozen_calibrators": 1,
+                    "development_only": True,
+                    "frozen_before_holdout": True,
+                },
+                bool(frozen_calibrators),
+                "immutable current calibration model fitted only from development "
+                "labels after experiment lock and before the first holdout opens",
             ))
             milestones.append(_milestone(
                 "INDEPENDENT_PROVIDER_QUALIFICATION",
@@ -1593,6 +1720,7 @@ def build_program_status(
             "DATABASE_INTEGRITY",
             "CONTEXT_LIFECYCLE_RANK_EVIDENCE",
             "LOCKED_EMPIRICAL_EXPERIMENT",
+            "FROZEN_DEVELOPMENT_CALIBRATOR",
             "INDEPENDENT_PROVIDER_QUALIFICATION",
             "LOCKED_DISCOVERY_CAMPAIGN",
             "CLEAN_DISCOVERY_SESSIONS",
@@ -1624,6 +1752,10 @@ def build_program_status(
         "FULL_UNIVERSE_RECALL_CENSUS": "Run the finalized full-universe census for every clean session.",
         "INDEPENDENT_PROVIDER_PROOFS": "Complete licensing and run independent provider proofs for every clean session.",
         "LOCKED_EMPIRICAL_EXPERIMENT": "Prospectively lock development and holdout sessions before labeling results.",
+        "FROZEN_DEVELOPMENT_CALIBRATOR": (
+            "Fit and freeze the development-only calibrator against the locked "
+            "experiment before the first holdout session opens."
+        ),
         "INDEPENDENT_PROVIDER_QUALIFICATION": (
             "Finish and archive one affordable provider qualification before "
             "locking a campaign to that provider and dataset."

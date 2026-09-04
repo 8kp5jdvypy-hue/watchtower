@@ -36,8 +36,9 @@ The program is complete only when all of the following are true:
 8. Threshold and rank changes use walk-forward development data and a blinded,
    independently labeled empirical holdout. Tuning examples never count as
    independent evidence.
-9. Before the first evaluation session opens, a prospective campaign locks the
-   exact range, technical/owner floors, feeds/providers, and eligible
+9. After fitting the development-only calibrator and before the first evaluation
+   session opens, a prospective campaign locks the exact range,
+   technical/owner floors, calibrator policy, feeds/providers, and eligible
    audit/observer schema and code revisions. The final evidence package
    SHA-256-pins that campaign and satisfies at least the existing floors: ten clean
    sessions, zero dirty sessions in the locked range, at least 95% recall,
@@ -197,8 +198,9 @@ session range, empirical identity, exact canonical rank-contract digest,
 policy floors, providers, datasets, and eligible revisions.
 `tradebot/postmarket_signal_campaign_lock.py` is the prescribed operator path:
 it reproduces the locked experiment from the read-only database, validates the
-exact provider qualification, derives every identity shared with the campaign,
-and refuses drift before calling the offline immutable writer.
+frozen development-only calibrator and exact provider qualification, derives
+every identity shared with the campaign, and refuses timing, policy, identity,
+or code-allowlist drift before calling the offline immutable writer.
 `tradebot/postmarket_discovery_evidence_gate.py` then
 requires exact clean-session inventories, reconciled full-universe censuses,
 separate independent-provider proofs, the matching empirical holdout, and all
@@ -223,7 +225,8 @@ Program progress ledger: `tradebot.postmarket_program_status` provides one
 read-only, fail-closed status report across database integrity, ten clean
 sessions, append-only outcome quality, full-universe censuses, independent
 provider proofs, the locked empirical experiment, blinded labels, empirical
-and calibration holdouts, independent customer reviews, and the final customer
+and calibration holdouts, a pre-holdout frozen calibrator, independent customer
+reviews, and the final customer
 review gate. It recomputes a claimed final gate from its exact digest-bound
 inputs rather than trusting the verdict string. It never enables delivery and
 returns a nonzero status until the complete inventory is eligible for a

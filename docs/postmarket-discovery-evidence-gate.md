@@ -8,8 +8,9 @@ delivery.
 
 ## Lock the campaign first
 
-Before the first covered XNYS session opens, create one immutable campaign with
-the contract-derived operator command:
+After the development-only calibrator is frozen and before the first covered
+XNYS session opens, create one immutable campaign with the contract-derived
+operator command:
 
 ```bash
 python -m tradebot.postmarket_signal_campaign_lock \
@@ -24,11 +25,14 @@ python -m tradebot.postmarket_signal_campaign_lock \
 
 The policy file must contain exactly the current discovery-gate policy fields.
 The command reads the database without mutation, reproduces the append-only
-experiment manifest in a scratch database, validates the exact qualification,
-and derives the coverage dates, experiment digest, rank version, rank-contract
-digest, independent provider, independent dataset, and empirical floors. It
-refuses any mismatch before publishing the read-only campaign file. This avoids
-copying shared identities between separate commands.
+experiment manifest in a scratch database, fully validates the frozen
+development calibrator and exact provider qualification, and derives the
+coverage dates, experiment digest, rank version, and rank-contract digest. It
+also requires the campaign's provider, dataset, empirical floors, calibration
+floors, calibration code allowlist, and lock time to match those verified
+sources. Missing, late, tampered, or policy-drifted calibration refuses the
+lock before the read-only campaign file is published. This avoids copying
+shared identities between separate commands.
 
 The lower-level `tradebot.postmarket_discovery_evidence_campaign` writer remains
 the offline immutable writer used beneath this workflow. The campaign pins:

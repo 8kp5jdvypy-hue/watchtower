@@ -32,6 +32,16 @@ CALIBRATION_ARTIFACT_VERSION = 1
 SPLITS = {"development", "holdout"}
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 REVISION_PATTERN = re.compile(r"^[0-9a-f]{7,40}$")
+CALIBRATION_MODEL_FIELDS = {
+    "calibration_version",
+    "experiment_id",
+    "rank_contract_sha256",
+    "method",
+    "scope",
+    "development_input_sha256",
+    "policy",
+    "segments",
+}
 
 
 CALIBRATION_SCHEMA = """
@@ -668,11 +678,36 @@ def _load_calibrator(conn: sqlite3.Connection, experiment_id: str) -> FrozenCali
     if row is None:
         raise ValueError("experiment has no frozen calibrator")
     model_raw = row["model_json"]
-    if hashlib.sha256(model_raw.encode()).hexdigest() != row["model_sha256"]:
+    if (
+        not isinstance(model_raw, str)
+        or hashlib.sha256(model_raw.encode()).hexdigest() != row["model_sha256"]
+    ):
         raise ValueError("stored calibrator digest does not match model JSON")
-    model = json.loads(model_raw)
+    try:
+        model = json.loads(model_raw)
+        policy_payload = json.loads(row["policy_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("stored calibrator JSON is malformed") from exc
+    if not isinstance(model, dict) or set(model) != CALIBRATION_MODEL_FIELDS:
+        raise ValueError("stored calibrator model fields are not exact")
     if _canonical(model) != model_raw:
         raise ValueError("stored calibrator model is not canonical JSON")
+    if (
+        not isinstance(policy_payload, dict)
+        or _canonical(policy_payload) != row["policy_json"]
+        or model["policy"] != policy_payload
+    ):
+        raise ValueError("stored calibrator policy is not canonical or model-bound")
+    try:
+        policy = CalibrationPolicy(**policy_payload)
+        segments = tuple(
+            CalibrationSegment(**item) for item in model["segments"]
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("stored calibrator policy or segments are invalid") from exc
+    _validate_policy(policy)
+    if not segments:
+        raise ValueError("stored calibrator must contain at least one segment")
     experiment = _experiment(conn, row["experiment_id"])
     contract_digest = model.get("rank_contract_sha256")
     if (
@@ -681,17 +716,142 @@ def _load_calibrator(conn: sqlite3.Connection, experiment_id: str) -> FrozenCali
         or contract_digest != experiment["rank_contract_sha256"]
     ):
         raise ValueError("stored calibrator rank contract attribution mismatch")
+    if (
+        type(model["calibration_version"]) is not int
+        or int(row["calibration_version"]) != CALIBRATION_VERSION
+        or model["calibration_version"] != CALIBRATION_VERSION
+        or model["experiment_id"] != row["experiment_id"]
+        or model["method"] != row["method"]
+        or model["method"] != "isotonic_pav"
+        or model["scope"] != "first_rankable_score_same_direction_quality"
+        or model["development_input_sha256"] != row["development_input_sha256"]
+        or not isinstance(row["development_input_sha256"], str)
+        or not SHA256_PATTERN.fullmatch(row["development_input_sha256"])
+    ):
+        raise ValueError("stored calibrator identity is invalid")
+    _revision(row["code_version"], "stored calibrator code_version")
+    try:
+        fitted = _utc(
+            datetime.fromisoformat(row["fitted_at_utc"]),
+            "stored calibrator fitted_at_utc",
+        )
+        experiment_created = _utc(
+            datetime.fromisoformat(experiment["created_at_utc"]),
+            "experiment created_at_utc",
+        )
+        holdout_sessions = tuple(json.loads(experiment["holdout_sessions_json"]))
+        first_holdout_open = CALENDAR.session_open(
+            date.fromisoformat(min(holdout_sessions))
+        ).to_pydatetime()
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("stored calibrator timing attribution is invalid") from exc
+    if fitted < experiment_created or fitted >= first_holdout_open:
+        raise ValueError("stored calibrator was not frozen before holdout")
+
+    if any(
+        not isinstance(row[field], int) or isinstance(row[field], bool)
+        for field in ("definitive_labels", "positive_labels", "negative_labels")
+    ):
+        raise ValueError("stored calibrator development counts are invalid")
+    definitive = row["definitive_labels"]
+    positives = row["positive_labels"]
+    negatives = row["negative_labels"]
+    if (
+        definitive != positives + negatives
+        or definitive < policy.min_training_labels
+        or positives < policy.min_training_positive_labels
+        or negatives < policy.min_training_negative_labels
+    ):
+        raise ValueError("stored calibrator development sample is invalid")
+    previous_maximum: float | None = None
+    previous_quality: float | None = None
+    for segment in segments:
+        if (
+            not isinstance(segment.minimum_score, (int, float))
+            or isinstance(segment.minimum_score, bool)
+            or not math.isfinite(segment.minimum_score)
+            or not isinstance(segment.maximum_score, (int, float))
+            or isinstance(segment.maximum_score, bool)
+            or not math.isfinite(segment.maximum_score)
+            or not isinstance(segment.calibrated_quality, (int, float))
+            or isinstance(segment.calibrated_quality, bool)
+            or not math.isfinite(segment.calibrated_quality)
+            or not isinstance(segment.development_labels, int)
+            or isinstance(segment.development_labels, bool)
+            or not isinstance(segment.development_positives, int)
+            or isinstance(segment.development_positives, bool)
+            or not 0 <= segment.minimum_score <= segment.maximum_score <= 100
+            or not 0 <= segment.calibrated_quality <= 1
+            or segment.development_labels <= 0
+            or not 0 <= segment.development_positives <= segment.development_labels
+            or not math.isclose(
+                segment.calibrated_quality,
+                segment.development_positives / segment.development_labels,
+            )
+            or (
+                previous_maximum is not None
+                and segment.minimum_score <= previous_maximum
+            )
+            or (
+                previous_quality is not None
+                and segment.calibrated_quality < previous_quality
+            )
+        ):
+            raise ValueError("stored calibrator segment invariants are invalid")
+        previous_maximum = segment.maximum_score
+        previous_quality = segment.calibrated_quality
+    if (
+        sum(segment.development_labels for segment in segments) != definitive
+        or sum(segment.development_positives for segment in segments) != positives
+    ):
+        raise ValueError("stored calibrator segments do not conserve labels")
+    try:
+        training_brier = float(row["training_brier_score"])
+        training_ece = float(row["training_expected_calibration_error"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("stored calibrator training metrics are invalid") from exc
+    if not (
+        math.isfinite(training_brier)
+        and 0 <= training_brier <= 1
+        and math.isfinite(training_ece)
+        and 0 <= training_ece <= 1
+    ):
+        raise ValueError("stored calibrator training metrics are invalid")
+    expected_brier = sum(
+        segment.development_positives * (1 - segment.calibrated_quality) ** 2
+        + (segment.development_labels - segment.development_positives)
+        * segment.calibrated_quality**2
+        for segment in segments
+    ) / definitive
+    expected_ece = sum(
+        segment.development_labels
+        * abs(
+            segment.calibrated_quality
+            - segment.development_positives / segment.development_labels
+        )
+        for segment in segments
+    ) / definitive
+    if not (
+        math.isclose(training_brier, expected_brier, abs_tol=1e-12)
+        and math.isclose(training_ece, expected_ece, abs_tol=1e-12)
+    ):
+        raise ValueError("stored calibrator training metrics do not reproduce")
     return FrozenCalibrator(
         int(row["calibration_id"]), row["experiment_id"], contract_digest,
         int(row["calibration_version"]),
         row["fitted_at_utc"], row["code_version"], row["method"],
-        row["development_input_sha256"], CalibrationPolicy(**json.loads(row["policy_json"])),
-        tuple(CalibrationSegment(**item) for item in model["segments"]),
-        row["model_sha256"], int(row["definitive_labels"]),
-        int(row["positive_labels"]), int(row["negative_labels"]),
-        float(row["training_brier_score"]),
-        float(row["training_expected_calibration_error"]), False,
+        row["development_input_sha256"], policy, segments,
+        row["model_sha256"], definitive, positives, negatives,
+        training_brier, training_ece, False,
     )
+
+
+def load_frozen_calibrator(
+    conn: sqlite3.Connection,
+    experiment_id: str,
+) -> FrozenCalibrator:
+    """Load and fully validate one immutable development-only calibrator."""
+    return _load_calibrator(conn, experiment_id)
 
 
 def load_calibrator_by_model_sha256(

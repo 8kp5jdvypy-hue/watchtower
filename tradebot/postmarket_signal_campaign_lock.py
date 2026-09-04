@@ -14,6 +14,11 @@ import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from tradebot.postmarket_calibration import (
+    CALIBRATION_VERSION,
+    FrozenCalibrator,
+    load_frozen_calibrator,
+)
 from tradebot.postmarket_discovery_evidence_campaign import (
     lock_discovery_evidence_campaign,
 )
@@ -67,7 +72,10 @@ def _canonical_database_json(raw: object, expected: type, field: str):
     return parsed
 
 
-def _verified_locked_experiment(database: Path, experiment_id: str) -> dict:
+def _verified_locked_experiment(
+    database: Path,
+    experiment_id: str,
+) -> tuple[dict, FrozenCalibrator]:
     if database.is_symlink() or not database.is_file():
         raise ValueError("experiment database must be a regular non-symlink file")
     conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
@@ -77,6 +85,8 @@ def _verified_locked_experiment(database: Path, experiment_id: str) -> dict:
             "SELECT * FROM postmarket_rank_experiments WHERE experiment_id=?",
             (experiment_id,),
         ).fetchone()
+        if row is not None:
+            calibrator = load_frozen_calibrator(conn, experiment_id)
     finally:
         conn.close()
     if row is None:
@@ -143,7 +153,7 @@ def _verified_locked_experiment(database: Path, experiment_id: str) -> dict:
         "rank_contract_sha256": row["rank_contract_sha256"],
         "holdout_sessions": holdout_sessions,
         "policy": empirical_policy,
-    }
+    }, calibrator
 
 
 def lock_signal_quality_campaign(
@@ -160,7 +170,7 @@ def lock_signal_quality_campaign(
     if locked_at.tzinfo is None or locked_at.utcoffset() is None:
         raise ValueError("locked_at must be timezone-aware")
     locked = locked_at.astimezone(timezone.utc)
-    experiment = _verified_locked_experiment(
+    experiment, calibrator = _verified_locked_experiment(
         Path(database_path).absolute(), experiment_id
     )
     qualification_file = Path(qualification_path).absolute()
@@ -177,6 +187,15 @@ def lock_signal_quality_campaign(
         raise ValueError("qualified provider is not recall-proof eligible")
 
     validated_policy = _parse_policy(policy)
+    if calibrator.calibration_version != CALIBRATION_VERSION:
+        raise ValueError("frozen calibrator does not use the current contract")
+    fitted_at = datetime.fromisoformat(calibrator.fitted_at_utc)
+    if fitted_at > locked:
+        raise ValueError("campaign cannot predate its frozen calibrator")
+    if calibrator.code_version not in (
+        validated_policy.allowed_calibration_code_versions
+    ):
+        raise ValueError("frozen calibrator code version is not campaign-allowed")
     if validated_policy.allowed_independent_market_data_providers != (
         qualification.provider,
     ):
@@ -196,6 +215,22 @@ def lock_signal_quality_campaign(
         or validated_policy.min_empirical_precision != empirical_policy.min_precision
     ):
         raise ValueError("campaign empirical floors do not match locked experiment")
+    calibration_policy = calibrator.policy
+    if (
+        validated_policy.min_definitive_labels
+        != calibration_policy.min_holdout_labels
+        or validated_policy.min_positive_labels
+        != calibration_policy.min_holdout_positive_labels
+        or validated_policy.min_calibration_negative_labels
+        != calibration_policy.min_holdout_negative_labels
+        or validated_policy.min_calibration_bin_labels
+        != calibration_policy.minimum_bin_labels
+        or validated_policy.max_calibration_brier_score
+        != calibration_policy.max_brier_score
+        or validated_policy.max_expected_calibration_error
+        != calibration_policy.max_expected_calibration_error
+    ):
+        raise ValueError("campaign calibration floors do not match frozen calibrator")
 
     holdout_sessions = experiment["holdout_sessions"]
     expected_sessions = _expected_sessions(
