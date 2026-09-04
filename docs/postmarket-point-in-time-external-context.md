@@ -55,6 +55,14 @@ canonical payload digest, revision, run, attempt, status, and error code.
   worker requests halts begun or resumed on the session at most once per batch,
   distinguishes a successful no-match from failure, and never infers a halt
   from missing bars.
+- `SECURITY_IDENTITY` optionally records the current OpenFIGI v3 ticker-mapping
+  response, scoped to the U.S. composite exchange code. Every match is retained.
+  A single identity is claimed only when the response contains one match or
+  every returned venue FIGI has the same
+  non-empty share-class FIGI; otherwise the result is explicitly ambiguous.
+  Because this is observed after candidate detection and is not a historical
+  security master, it is never backdated or treated as point-in-time identity.
+  It is identity provenance only, not market data or a rank input.
 
 Alpaca SIP versus Alpaca IEX is never called independent-provider agreement.
 Without an eligible licensed manifest, float shares and true sector/ETF mapping
@@ -70,6 +78,15 @@ cannot stall the one-minute discovery loop. It has its own default-off
 `POSTMARKET_EXTERNAL_CONTEXT_ENABLED` kill switch, market-aware health probe,
 atomic heartbeat, ten-candidate batch, and three-attempt failure cap. It remains
 shadow-only and imports no alert, Telegram, outbox, broker, or order path.
+
+OpenFIGI identity collection has an additional default-off
+`OPENFIGI_IDENTITY_ENABLED` switch. It is considered pending only when that
+switch is enabled, so running external context while it is off does not write a
+terminal "unconfigured" result that would prevent later collection. An
+`OPENFIGI_API_KEY` is optional; supplying one changes provider rate limits but
+does not change evidence semantics. No OpenFIGI result is used to satisfy the
+independent price-provider, full-universe recall, sector, float, or customer-
+delivery gates.
 
 The official Alpaca option-chain endpoint exposes latest quote/trade/Greeks and
 identifies `indicative` separately from official `opra`; the news endpoint is a
@@ -99,3 +116,5 @@ Source contracts:
 - [Nasdaq Trader halt fields and codes](https://nasdaqtrader.com/Trader.aspx?id=TradeHaltCodes)
 - [SEC EDGAR submissions and XBRL APIs](https://www.sec.gov/search-filings/edgar-application-programming-interfaces)
 - [SEC EDGAR timestamp limitations](https://www.sec.gov/about/webmaster-frequently-asked-questions)
+- [OpenFIGI API documentation](https://www.openfigi.com/api/documentation)
+- [OpenFIGI terms of service](https://www.openfigi.com/docs/terms-of-service)

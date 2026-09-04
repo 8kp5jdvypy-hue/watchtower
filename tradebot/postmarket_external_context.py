@@ -26,6 +26,7 @@ from tradebot.postmarket_reference_manifest import (
 )
 from tradebot.vendors.massive import TickerReference
 from tradebot.vendors.nasdaq_halts import HaltRecord
+from tradebot.vendors.openfigi import OpenFigiLookup
 from tradebot.vendors.sec_companyfacts import PointInTimeSnapshot
 
 
@@ -44,6 +45,7 @@ FACT_KINDS = {
     "LICENSED_POINT_IN_TIME_REFERENCE",
     "HALT_STATE",
     "INDEPENDENT_PRICE_COMPARISON",
+    "SECURITY_IDENTITY",
 }
 FACT_STATUSES = {
     "AVAILABLE",
@@ -937,6 +939,78 @@ def halt_state_fact(
     )
 
 
+def security_identity_fact(
+    candidate: CandidateFact,
+    *,
+    lookup: OpenFigiLookup,
+    observed_at: datetime,
+    code_version: str | None,
+    run_id: str,
+) -> ExternalFact:
+    """Record current OpenFIGI mappings without guessing through ambiguity."""
+    observed = _utc(observed_at, "observed_at")
+    if lookup.symbol != candidate.symbol:
+        raise ValueError("OpenFIGI lookup symbol did not match candidate")
+    matches = [{
+        "figi": match.figi,
+        "name": match.name,
+        "ticker": match.ticker,
+        "exchange_code": match.exchange_code,
+        "composite_figi": match.composite_figi,
+        "share_class_figi": match.share_class_figi,
+        "market_sector": match.market_sector,
+        "security_type": match.security_type,
+        "security_type2": match.security_type2,
+        "security_description": match.security_description,
+    } for match in lookup.matches]
+    share_classes = {row["share_class_figi"] for row in matches if row["share_class_figi"]}
+    composites = {row["composite_figi"] for row in matches if row["composite_figi"]}
+    if not matches:
+        resolution = "NO_MATCHES"
+        resolved = {}
+    elif len(matches) == 1:
+        resolution = "RESOLVED_SINGLE_MATCH"
+        resolved = {
+            "figi": matches[0]["figi"],
+            "composite_figi": matches[0]["composite_figi"],
+            "share_class_figi": matches[0]["share_class_figi"],
+        }
+    elif len(share_classes) == 1 and all(row["share_class_figi"] for row in matches):
+        resolution = "RESOLVED_SINGLE_SHARE_CLASS"
+        resolved = {
+            "figi": None,
+            "composite_figi": next(iter(composites)) if len(composites) == 1 else None,
+            "share_class_figi": next(iter(share_classes)),
+        }
+    else:
+        resolution = "AMBIGUOUS_MULTIPLE_IDENTITIES"
+        resolved = {}
+    return ExternalFact(
+        candidate.candidate_id, candidate.session.isoformat(), candidate.symbol,
+        "SECURITY_IDENTITY",
+        "AVAILABLE" if matches else "AVAILABLE_NO_MATCHES",
+        None, observed.isoformat(), "openfigi", "mapping", "v3_mapping",
+        {
+            "query": {
+                "id_type": "TICKER",
+                "id_value": candidate.symbol,
+                "market_sector_description": "Equity",
+                "exchange_code": "US",
+            },
+            "match_count": len(matches),
+            "resolution": resolution,
+            "resolved_identity": resolved,
+            "matches": matches,
+            "provider_warning": lookup.provider_warning,
+            "temporal_semantic": (
+                "current_identity_observed_after_candidate_detection_not_point_in_time"
+            ),
+            "usage_semantic": "identity_provenance_only_not_market_data_or_rank_input",
+        },
+        code_version, run_id,
+    )
+
+
 def latest_external_context_summary(conn: sqlite3.Connection) -> dict | None:
     ensure_external_context_schema(conn)
     session = conn.execute(
@@ -979,7 +1053,12 @@ def latest_external_context_summary(conn: sqlite3.Connection) -> dict | None:
     }
 
 
-def _pending_candidates(conn: sqlite3.Connection, limit: int) -> list[CandidateFact]:
+def _pending_candidates(
+    conn: sqlite3.Connection,
+    limit: int,
+    *,
+    include_security_identity: bool = False,
+) -> list[CandidateFact]:
     ensure_external_context_schema(conn)
     ensure_reference_schema(conn)
     rows = conn.execute(
@@ -1020,11 +1099,21 @@ def _pending_candidates(conn: sqlite3.Connection, limit: int) -> list[CandidateF
                 AND e.fact_kind='LICENSED_POINT_IN_TIME_REFERENCE'
                 AND (e.status!='FETCH_ERROR' OR e.attempt>=?)
             )
+        ) OR (
+          ? AND NOT EXISTS (
+            SELECT 1 FROM postmarket_external_fact_events e
+            WHERE e.candidate_id=c.candidate_id
+              AND e.external_context_version=?
+              AND e.fact_kind='SECURITY_IDENTITY'
+              AND (e.status!='FETCH_ERROR' OR e.attempt>=?)
+          )
         )
         ORDER BY c.first_detected_at,c.candidate_id LIMIT ?
         """, (
             EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS,
-            EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS, limit,
+            EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS,
+            int(include_security_identity), EXTERNAL_CONTEXT_VERSION, MAX_ATTEMPTS,
+            limit,
         ),
     ).fetchall()
     return [CandidateFact(
@@ -1047,6 +1136,7 @@ def run_external_context_backfill(
     reference_fetch: Callable[[str, date], TickerReference] | None = None,
     filing_context_fetch: Callable[[str, datetime], PointInTimeSnapshot] | None = None,
     halt_fetch: Callable[[date], Sequence[HaltRecord]] | None = None,
+    identity_fetch: Callable[[str], OpenFigiLookup] | None = None,
     completion_clock: Callable[[], datetime] | None = None,
     limit: int = MAX_BATCH,
 ) -> ExternalBackfillResult:
@@ -1055,7 +1145,9 @@ def run_external_context_backfill(
         raise ValueError("limit must be positive")
     started = clock.perf_counter()
     completion_clock = completion_clock or (lambda: datetime.now(timezone.utc))
-    candidates = _pending_candidates(conn, limit)
+    candidates = _pending_candidates(
+        conn, limit, include_security_identity=identity_fetch is not None,
+    )
     written = available = errors = 0
     halt_cache: dict[date, Sequence[HaltRecord] | Exception] = {}
     for candidate in candidates:
@@ -1243,6 +1335,26 @@ def run_external_context_backfill(
                         "v2_stock_custom_bars_5min", {}, code_version, run_id,
                         type(exc).__name__,
                     )
+            record_external_fact(conn, fact)
+            written += 1
+            available += int(fact.status.startswith("AVAILABLE"))
+        if "SECURITY_IDENTITY" not in completed and identity_fetch is not None:
+            try:
+                lookup = identity_fetch(candidate.symbol)
+                identity_observed = _utc(completion_clock(), "completion_clock")
+                fact = security_identity_fact(
+                    candidate, lookup=lookup, observed_at=identity_observed,
+                    code_version=code_version, run_id=run_id,
+                )
+            except Exception as exc:
+                errors += 1
+                failed_at = _utc(completion_clock(), "completion_clock")
+                fact = ExternalFact(
+                    candidate.candidate_id, candidate.session.isoformat(),
+                    candidate.symbol, "SECURITY_IDENTITY", "FETCH_ERROR", None,
+                    failed_at.isoformat(), "openfigi", "mapping", "v3_mapping",
+                    {}, code_version, run_id, type(exc).__name__,
+                )
             record_external_fact(conn, fact)
             written += 1
             available += int(fact.status.startswith("AVAILABLE"))

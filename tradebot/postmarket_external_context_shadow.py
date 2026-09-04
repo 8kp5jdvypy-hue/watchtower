@@ -45,6 +45,19 @@ def external_context_enabled(raw: str | None = None) -> bool:
     )
 
 
+def openfigi_identity_enabled(raw: str | None = None) -> bool:
+    value = os.environ.get("OPENFIGI_IDENTITY_ENABLED", "0") if raw is None else raw
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ValueError(
+        "OPENFIGI_IDENTITY_ENABLED must be one of 1/0, true/false, "
+        "yes/no, or on/off"
+    )
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -111,6 +124,12 @@ def _sec_context_fetch(symbol, cutoff):
     return fetch_point_in_time_snapshot(symbol, cutoff)
 
 
+def _openfigi_identity_fetch(symbol):
+    from tradebot.vendors.openfigi import fetch_ticker_identity
+
+    return fetch_ticker_identity(symbol)
+
+
 def write_heartbeat_atomic(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
@@ -148,6 +167,7 @@ def main() -> int:
     configure_logging()
     try:
         enabled = external_context_enabled()
+        identity_enabled = openfigi_identity_enabled() if enabled else False
     except ValueError:
         logger.exception("invalid postmarket external-context configuration")
         return 2
@@ -161,7 +181,11 @@ def main() -> int:
     journal_conn = connect_journal(JOURNAL_PATH)
     run_id = new_run_id()
     version = code_version()
-    logger.info("postmarket external-context worker started revision=%s run_id=%s", version, run_id)
+    logger.info(
+        "postmarket external-context worker started revision=%s run_id=%s "
+        "openfigi_identity=%s",
+        version, run_id, identity_enabled,
+    )
     while True:
         now = _utc_now()
         window = postmarket_window(now)
@@ -230,6 +254,9 @@ def main() -> int:
                     _sec_context_fetch if _sec_context_configured() else None
                 ),
                 halt_fetch=_halt_fetch,
+                identity_fetch=(
+                    _openfigi_identity_fetch if identity_enabled else None
+                ),
             )
         except Exception as exc:
             conn.rollback()
