@@ -59,6 +59,41 @@ than candidate detection. This preserves replay causality.
 
 ## Import
 
+### Build from a provider CSV export
+
+Perch includes an offline, provider-neutral normalizer for exports with exactly
+this header:
+
+```text
+symbol,sector_code,sector_name,benchmark_symbol,float_shares,float_as_of_date
+```
+
+Every row must provide an explicit, supported Select Sector ETF mapping. The
+tool never guesses a sector or benchmark. Float value and as-of date must both
+be present or both be blank. It canonicalizes row order, validates the finished
+artifact through the same parser used by ingestion, and publishes it read-only
+without overwriting an existing path:
+
+```bash
+python3 scripts/build_postmarket_reference_manifest.py \
+  /secure/provider/reference-2026-09-02.csv \
+  /secure/provider/reference-2026-09-02.json \
+  --provider licensed-vendor \
+  --dataset sector-export-v1 \
+  --license-reference agreement-2026-09 \
+  --effective-date 2026-09-02 \
+  --published-at-utc 2026-09-02T20:00:00+00:00 \
+  --classification-system GICS
+```
+
+The output summary contains only metadata, row count, and digest—not licensed
+rows. This conversion is not license evidence: the operator must still verify
+the agreement, publication time, field semantics, and permitted use before
+import. The command performs no network requests and does not enable any
+service or customer-delivery lane.
+
+### Ingest the locked manifest
+
 Place the provider-delivered file outside the repository, verify the license
 and dates, then run:
 
