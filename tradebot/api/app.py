@@ -550,7 +550,8 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     def _recent_signals(session_filter: str | None, limit: int) -> list[dict]:
         query = (
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, alerted, "
-            "primary_kind, context_json, close, origin "
+            "primary_kind, context_json, close, origin, "
+            "pct_from_prior_close, pct_from_prior_close_status "
             "FROM detections WHERE tier IN ('high', 'medium')"
         )
         params: list = []
@@ -577,6 +578,12 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 # origin for every pre-broad_scan row and the frontend
                 # badge only needs to know "screening" vs. everything else.
                 "origin": row[13] or "watchlist",
+                # Recorded at the same completed bar that created the
+                # detection. This is a derived session move, not a live quote,
+                # and is deliberately null unless the shared feature primitive
+                # marked the underlying prior-close anchor AVAILABLE.
+                "session_move_at_alert_pct": row[14] if row[15] == "AVAILABLE" else None,
+                "session_move_at_alert_status": row[15],
             })
         return result
 
@@ -605,7 +612,7 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         row = app.journal_conn.execute(
             "SELECT id, ts_utc, session, symbol, kinds, headlines, score, tier, trend, "
             "alerted, close, atr14, context_json, primary_kind, no_trade, news_driven, "
-            "event_kind, event_severity, origin "
+            "event_kind, event_severity, origin, pct_from_prior_close, pct_from_prior_close_status "
             "FROM detections WHERE id = ? AND tier IN ('high', 'medium')",
             (detection_id,),
         ).fetchone()
@@ -614,7 +621,8 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         (
             id_, ts_utc, session, symbol, kinds, headlines, score, tier, trend,
             alerted, close, atr14, context_json, primary_kind, no_trade, news_driven,
-            event_kind, event_severity, origin,
+            event_kind, event_severity, origin, pct_from_prior_close_value,
+            pct_from_prior_close_status,
         ) = row
         # One context dict per detector kind that fired in this cluster,
         # same order as kinds.split(",") -- see journal.write_cluster,
@@ -687,6 +695,12 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                 "outcomes": outcomes,
                 "outcome_status": outcome_resolution_status(checkpoint_rows),
                 "origin": origin or "watchlist",
+                "session_move_at_alert_pct": (
+                    pct_from_prior_close_value
+                    if pct_from_prior_close_status == "AVAILABLE"
+                    else None
+                ),
+                "session_move_at_alert_status": pct_from_prior_close_status,
             }
         )
 
