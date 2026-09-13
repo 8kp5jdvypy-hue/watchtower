@@ -1,6 +1,7 @@
 import PerchMark from './PerchMark'
 import { cardHeadline } from '../signalHeadlines'
 import { kindLabel } from '../kindLabels'
+import { signalMove } from '../signalMove'
 import './SignalCard.css'
 import './SignalArrival.css'
 
@@ -33,11 +34,11 @@ function relativeTime(tsUtc) {
 export default function SignalCard({ signal, quote, onView, arrived = false }) {
   const isHigh = signal.tier === 'high'
   const Root = onView ? 'button' : 'div'
-  // Real live quote (SIP, via /quotes) against price at detection --
-  // both real fields, never estimated. Absent whenever either side is
-  // missing: no quote fetched yet, the vendor had none for this symbol,
-  // or (rare, legacy rows) close was never recorded.
-  const changePct = quote && signal.close != null ? ((quote.last - signal.close) / signal.close) * 100 : null
+  // Prefer a real live quote against price at detection. If the quote
+  // provider is unavailable, signalMove may use the journaled session
+  // move captured at detection instead. Its label distinguishes the two
+  // meanings, and invalid or unavailable source data renders no number.
+  const move = signalMove(signal, quote)
   // signal.primary_kind is the real column (frozen at write time in
   // runner.py -- not always kinds[0]). Falls back to kinds[0] only for
   // pre-migration rows where primary_kind is null.
@@ -76,17 +77,15 @@ export default function SignalCard({ signal, quote, onView, arrived = false }) {
             {signal.symbol}
             <span className="sc-trend-arrow" aria-hidden="true">{signal.trend === 'up' ? '▲' : '▼'}</span>
           </span>
-          {/* Colored by raw price direction since detection, same
-              convention as the modal's "After detection" marks -- not
-              flipped for the signal's own directional call. The "since
-              alert" label says so out loud: without it, a red ▼ (the
-              signal's call) next to a green +% (price since detection)
-              reads as a rendering bug (design review H4). Lives inside
-              .sc-change so figure and label wrap as one unit at 390. */}
-          {changePct != null && (
-            <span className={`sc-change ${changePct >= 0 ? 'trend-up' : 'trend-down'}`}>
-              {changePct >= 0 ? '+' : ''}{changePct.toFixed(2)}%
-              <span className="sc-change-label"> since alert</span>
+          {/* Colored by the displayed move's direction, not flipped for
+              the signal's directional call. The label says whether it is
+              the live move "since alert" or the recorded session move
+              "at alert". It lives inside .sc-change so figure and label
+              wrap as one unit at 390. */}
+          {move != null && (
+            <span className={`sc-change ${move.valuePct >= 0 ? 'trend-up' : 'trend-down'}`}>
+              {move.valuePct >= 0 ? '+' : ''}{move.valuePct.toFixed(2)}%
+              <span className="sc-change-label"> {move.label}</span>
             </span>
           )}
         </div>

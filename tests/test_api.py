@@ -387,6 +387,8 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
         trend="up",
         detections=[detection],
         code_version_str="test",
+        pct_from_prior_close=2.5,
+        pct_from_prior_close_status="AVAILABLE",
     )
     app.journal_conn.commit()
 
@@ -403,6 +405,8 @@ def test_signals_today_and_feed_return_real_journaled_detections(app, client):
     assert feed_body["signals"][0]["primary_kind"] is None
     assert feed_body["signals"][0]["context_summary"] is None
     assert feed_body["signals"][0]["close"] == 450.0
+    assert feed_body["signals"][0]["session_move_at_alert_pct"] == 2.5
+    assert feed_body["signals"][0]["session_move_at_alert_status"] == "AVAILABLE"
 
 
 def test_signals_feed_includes_a_context_summary_for_level_break(app, client):
@@ -550,6 +554,8 @@ def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, clie
         detections=[Detection("SPY", "vwap_break", now, 5.0, "SPY broke above VWAP", context)],
         code_version_str="test",
         primary_kind="vwap_break",
+        pct_from_prior_close=-1.75,
+        pct_from_prior_close_status="AVAILABLE",
     )
     app.journal_conn.commit()
 
@@ -567,6 +573,8 @@ def test_signal_detail_returns_the_full_record_for_a_real_detection_id(app, clie
     assert body["trend"] == "up"
     assert body["close"] == 450.0
     assert body["atr14"] == 2.0
+    assert body["session_move_at_alert_pct"] == -1.75
+    assert body["session_move_at_alert_status"] == "AVAILABLE"
     assert body["no_trade"] is None
     assert body["news_driven"] is None
     # Fewer than MIN_HISTORY_SAMPLE same-kind/same-trend prior rows exist
