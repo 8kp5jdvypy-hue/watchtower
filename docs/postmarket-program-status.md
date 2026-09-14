@@ -87,6 +87,12 @@ The context/lifecycle/rank milestone reports per-feature status distributions,
 rankable-rank counts, and qualified-lifecycle counts in addition to its exact
 coherent-chain count. This makes a missing required input (for example, a
 licensed sector reference) visible without treating populated tables as proof.
+An `AVAILABLE` sector status counts only when its manifest ID, digest, and
+observation timestamp match a locked licensed reference, and that manifest
+contains the candidate's exact symbol-to-benchmark mapping. Its effective date
+must not follow the session, and its publication and observation timestamps
+must not follow candidate detection. A missing mapping, substituted benchmark,
+or reference learned after detection cannot complete the evidence chain.
 Customer reviews are scoped to the exact SHA-256 of a locked campaign and count
 distinct blinded cases and symbols against that campaign's locked floors. A
 single review, duplicate reviews of one case, or reviews from another campaign
