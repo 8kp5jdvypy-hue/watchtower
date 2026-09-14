@@ -52,6 +52,10 @@ from tradebot.postmarket_rank import (
     rank_contract_sha256,
     rank_thresholds,
 )
+from tradebot.postmarket_reference_manifest import (
+    CLASSIFICATION_SYSTEMS,
+    SECTOR_BENCHMARKS,
+)
 from tradebot.vendors.historical_reference import (
     IMPLEMENTED_REFERENCE_PROVIDERS,
     REFERENCE_PROVIDER_CAPABILITIES,
@@ -213,12 +217,17 @@ _CONTEXT_FEATURE_COLUMNS = {
     "session",
     "symbol",
     "direction",
+    "candidate_detected_at",
     "lifecycle_observation_seq",
     "lifecycle_evidence_bar_open_ts_utc",
     "status",
     "volatility_status",
     "market_relative_status",
     "sector_relative_status",
+    "sector_symbol",
+    "sector_reference_manifest_id",
+    "sector_reference_sha256",
+    "sector_reference_observed_at_utc",
     "liquidity_status",
     "catalyst_status",
     "catalyst_sources_json",
@@ -227,6 +236,18 @@ _CONTEXT_FEATURE_COLUMNS = {
     "data_confidence_status",
     "data_confidence_coverage_pct",
     "data_confidence_components_json",
+}
+_REFERENCE_MANIFEST_COLUMNS = {
+    "reference_manifest_id",
+    "provider",
+    "dataset",
+    "license_reference",
+    "effective_date",
+    "published_at_utc",
+    "observed_at_utc",
+    "classification_system",
+    "manifest_sha256",
+    "status",
 }
 _LIFECYCLE_COLUMNS = {
     "transition_id",
@@ -826,6 +847,7 @@ def _feature_pipeline_progress(
     """
     required_columns = {
         "postmarket_candidate_context": _CONTEXT_FEATURE_COLUMNS,
+        "postmarket_reference_manifests": _REFERENCE_MANIFEST_COLUMNS,
         "postmarket_candidate_lifecycle": _LIFECYCLE_COLUMNS,
         "postmarket_candidate_lifecycle_observations": (
             _LIFECYCLE_OBSERVATION_COLUMNS
@@ -906,7 +928,16 @@ def _feature_pipeline_progress(
               ranks.exclusion_reasons_json,ranks.explanation_json,
               runs.rank_version,runs.rank_contract_sha256,
               runs.status AS rank_run_status,
-              runs.weights_json,runs.thresholds_json
+              runs.weights_json,runs.thresholds_json,
+              ref.provider AS sector_reference_provider,
+              ref.dataset AS sector_reference_dataset,
+              ref.license_reference AS sector_reference_license,
+              ref.effective_date AS sector_reference_effective_date,
+              ref.published_at_utc AS sector_reference_published_at_utc,
+              ref.observed_at_utc AS locked_sector_reference_observed_at_utc,
+              ref.classification_system AS sector_reference_classification_system,
+              ref.manifest_sha256 AS locked_sector_reference_sha256,
+              ref.status AS sector_reference_manifest_status
             FROM postmarket_candidate_ranks AS ranks
             JOIN postmarket_candidate_context AS ctx
               ON ctx.context_id=ranks.context_id
@@ -927,6 +958,8 @@ def _feature_pipeline_progress(
              AND obs.symbol=ranks.symbol
             JOIN postmarket_rank_runs AS runs
               ON runs.rank_run_id=ranks.rank_run_id
+            JOIN postmarket_reference_manifests AS ref
+              ON ref.reference_manifest_id=ctx.sector_reference_manifest_id
             WHERE ranks.rankable=1
               AND ranks.ordinal_rank IS NOT NULL
               AND ranks.lifecycle_state IN ('CONFIRMED','STRENGTHENING','REQUALIFIED')
@@ -944,6 +977,62 @@ def _feature_pipeline_progress(
 
     valid = 0
     for row in rows:
+        sector_reference_causal = False
+        try:
+            detected_at = _utc(
+                datetime.fromisoformat(str(row["candidate_detected_at"])),
+                "candidate_detected_at",
+            )
+            reference_published_at = _utc(
+                datetime.fromisoformat(
+                    str(row["sector_reference_published_at_utc"])
+                ),
+                "sector_reference_published_at_utc",
+            )
+            reference_observed_at = _utc(
+                datetime.fromisoformat(
+                    str(row["locked_sector_reference_observed_at_utc"])
+                ),
+                "locked_sector_reference_observed_at_utc",
+            )
+            sector_reference_causal = (
+                date.fromisoformat(str(row["sector_reference_effective_date"]))
+                <= date.fromisoformat(str(row["session"]))
+                and reference_published_at <= detected_at
+                and reference_observed_at <= detected_at
+            )
+        except (TypeError, ValueError):
+            sector_reference_causal = False
+        sector_reference_bound = (
+            isinstance(row["sector_reference_manifest_id"], int)
+            and row["sector_reference_manifest_id"] > 0
+            and isinstance(row["sector_symbol"], str)
+            and row["sector_symbol"] in SECTOR_BENCHMARKS
+            and isinstance(row["sector_reference_sha256"], str)
+            and len(row["sector_reference_sha256"]) == 64
+            and all(
+                character in "0123456789abcdef"
+                for character in row["sector_reference_sha256"]
+            )
+            and row["sector_reference_sha256"]
+            == row["locked_sector_reference_sha256"]
+            and row["sector_reference_observed_at_utc"]
+            == row["locked_sector_reference_observed_at_utc"]
+            and row["sector_reference_manifest_status"] == "locked"
+            and isinstance(row["sector_reference_provider"], str)
+            and row["sector_reference_provider"].strip().lower()
+            not in {"", "unknown", "none", "unlicensed"}
+            and isinstance(row["sector_reference_dataset"], str)
+            and row["sector_reference_dataset"].strip().lower()
+            not in {"", "unknown", "none", "unlicensed"}
+            and isinstance(row["sector_reference_license"], str)
+            and row["sector_reference_license"].strip().lower()
+            not in {"", "unknown", "none", "unlicensed"}
+            and isinstance(row["sector_reference_classification_system"], str)
+            and row["sector_reference_classification_system"]
+            in CLASSIFICATION_SYSTEMS
+            and sector_reference_causal
+        )
         context_feature_status = (
             isinstance(row["context_version"], int)
             and row["context_version"] > 0
@@ -951,6 +1040,7 @@ def _feature_pipeline_progress(
             and row["volatility_status"] == "AVAILABLE"
             and row["market_relative_status"] == "AVAILABLE"
             and row["sector_relative_status"] == "AVAILABLE"
+            and sector_reference_bound
             and row["liquidity_status"] == "AVAILABLE"
             and row["catalyst_status"] in {"VERIFIED", "NO_VERIFIED_CATALYST"}
             and row["data_confidence_status"] in {"HIGH", "MEDIUM"}

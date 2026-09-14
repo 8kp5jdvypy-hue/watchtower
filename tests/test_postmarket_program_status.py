@@ -7,6 +7,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from tradebot.postmarket_program_status import (
     STATE_COMPLETE,
     STATE_ERROR,
@@ -147,14 +149,25 @@ def _database(
         CREATE TABLE postmarket_candidate_context (
           context_id INTEGER, candidate_id INTEGER, context_version INTEGER,
           session TEXT, symbol TEXT, direction TEXT,
+          candidate_detected_at TEXT,
           lifecycle_observation_seq INTEGER,
           lifecycle_evidence_bar_open_ts_utc TEXT,
           status TEXT, volatility_status TEXT, market_relative_status TEXT,
-          sector_relative_status TEXT, liquidity_status TEXT,
+          sector_relative_status TEXT, sector_symbol TEXT,
+          sector_reference_manifest_id INTEGER,
+          sector_reference_sha256 TEXT,
+          sector_reference_observed_at_utc TEXT,
+          liquidity_status TEXT,
           catalyst_status TEXT, catalyst_sources_json TEXT,
           catalyst_details_json TEXT, catalyst_coverage_json TEXT,
           data_confidence_status TEXT, data_confidence_coverage_pct REAL,
           data_confidence_components_json TEXT
+        );
+        CREATE TABLE postmarket_reference_manifests (
+          reference_manifest_id INTEGER, provider TEXT, dataset TEXT,
+          license_reference TEXT, effective_date TEXT,
+          published_at_utc TEXT, observed_at_utc TEXT,
+          classification_system TEXT, manifest_sha256 TEXT, status TEXT
         );
         CREATE TABLE postmarket_candidate_lifecycle (
           transition_id INTEGER, candidate_id INTEGER, lifecycle_version INTEGER,
@@ -219,6 +232,9 @@ def _database(
     )
     if complete:
         bar_utc = "2026-07-27T20:05:00+00:00"
+        candidate_detected_at = "2026-07-27T20:10:00+00:00"
+        sector_reference_observed_at = "2026-07-27T19:00:00+00:00"
+        sector_reference_sha256 = "c" * 64
         catalyst_coverage = {
             key: "CONFIGURED"
             for key in (
@@ -235,10 +251,22 @@ def _database(
         }
         rank_components = dict(COMPONENT_WEIGHTS)
         conn.execute(
-            "INSERT INTO postmarket_candidate_context VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO postmarket_reference_manifests VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
-                1, 11, 2, DEVELOPMENT_SESSIONS[0], "AAA", "up", 1, bar_utc, "complete",
-                "AVAILABLE", "AVAILABLE", "AVAILABLE", "AVAILABLE", "VERIFIED",
+                1, "tiingo", "fundamentals", "operator-approved-test-license",
+                "2026-07-27", "2026-07-27T18:00:00+00:00",
+                sector_reference_observed_at, "PROVIDER_SECTOR",
+                sector_reference_sha256, "locked",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO postmarket_candidate_context VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                1, 11, 2, DEVELOPMENT_SESSIONS[0], "AAA", "up",
+                candidate_detected_at, 1, bar_utc, "complete",
+                "AVAILABLE", "AVAILABLE", "AVAILABLE", "XLK", 1,
+                sector_reference_sha256, sector_reference_observed_at,
+                "AVAILABLE", "VERIFIED",
                 json.dumps(["earnings"]), json.dumps([{"source": "earnings"}]),
                 json.dumps(catalyst_coverage), "HIGH", 100.0,
                 json.dumps(confidence_components),
@@ -669,6 +697,62 @@ def test_populated_tables_do_not_replace_a_feature_complete_candidate_chain(
         "Resolve unavailable required context features and prove one exact "
         "context/lifecycle/rank chain before counting campaign sessions."
     )
+
+
+@pytest.mark.parametrize(
+    ("statement", "params"),
+    (
+        (
+            "UPDATE postmarket_candidate_context "
+            "SET sector_reference_sha256=?",
+            ("f" * 64,),
+        ),
+        (
+            "UPDATE postmarket_reference_manifests "
+            "SET observed_at_utc=?, published_at_utc=?",
+            (
+                "2026-07-27T20:11:00+00:00",
+                "2026-07-27T20:11:00+00:00",
+            ),
+        ),
+        (
+            "UPDATE postmarket_reference_manifests "
+            "SET license_reference='unlicensed'",
+            (),
+        ),
+        (
+            "UPDATE postmarket_candidate_context SET sector_symbol='ZZZ'",
+            (),
+        ),
+        (
+            "UPDATE postmarket_reference_manifests "
+            "SET classification_system='UNVERIFIED'",
+            (),
+        ),
+    ),
+)
+def test_sector_feature_requires_exact_causal_licensed_manifest_binding(
+    tmp_path, monkeypatch, statement, params,
+):
+    database, audits, evidence = _fixture(tmp_path, complete=True)
+    conn = sqlite3.connect(database)
+    conn.execute(statement, params)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(
+        program_status, "_verified_ready_customer_gates", lambda *args: 1
+    )
+
+    report = build_program_status(database, audits, evidence, generated_at=NOW)
+
+    milestone = next(
+        item
+        for item in report.milestones
+        if item.code == "CONTEXT_LIFECYCLE_RANK_EVIDENCE"
+    )
+    assert milestone.observed["coherent_complete_chains"] == 0
+    assert milestone.state != STATE_COMPLETE
+    assert report.eligible_for_customer_delivery_review is False
 
 
 def test_forged_experiment_manifest_cannot_unlock_downstream_holdout_gates(
