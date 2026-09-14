@@ -169,6 +169,9 @@ def _database(
           published_at_utc TEXT, observed_at_utc TEXT,
           classification_system TEXT, manifest_sha256 TEXT, status TEXT
         );
+        CREATE TABLE postmarket_reference_rows (
+          reference_manifest_id INTEGER, symbol TEXT, benchmark_symbol TEXT
+        );
         CREATE TABLE postmarket_candidate_lifecycle (
           transition_id INTEGER, candidate_id INTEGER, lifecycle_version INTEGER,
           session TEXT, symbol TEXT, direction TEXT, state TEXT,
@@ -250,6 +253,9 @@ def _database(
             )
         }
         rank_components = dict(COMPONENT_WEIGHTS)
+        conn.execute(
+            "INSERT INTO postmarket_reference_rows VALUES (1, 'AAA', 'XLK')"
+        )
         conn.execute(
             "INSERT INTO postmarket_reference_manifests VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
@@ -722,6 +728,18 @@ def test_populated_tables_do_not_replace_a_feature_complete_candidate_chain(
         ),
         (
             "UPDATE postmarket_candidate_context SET sector_symbol='ZZZ'",
+            (),
+        ),
+        (
+            "UPDATE postmarket_candidate_context SET sector_symbol='XLF'",
+            (),
+        ),
+        (
+            "UPDATE postmarket_reference_rows SET symbol='BBB'",
+            (),
+        ),
+        (
+            "DELETE FROM postmarket_reference_rows",
             (),
         ),
         (

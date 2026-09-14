@@ -249,6 +249,9 @@ _REFERENCE_MANIFEST_COLUMNS = {
     "manifest_sha256",
     "status",
 }
+_REFERENCE_ROW_COLUMNS = {
+    "reference_manifest_id", "symbol", "benchmark_symbol",
+}
 _LIFECYCLE_COLUMNS = {
     "transition_id",
     "candidate_id",
@@ -848,6 +851,7 @@ def _feature_pipeline_progress(
     required_columns = {
         "postmarket_candidate_context": _CONTEXT_FEATURE_COLUMNS,
         "postmarket_reference_manifests": _REFERENCE_MANIFEST_COLUMNS,
+        "postmarket_reference_rows": _REFERENCE_ROW_COLUMNS,
         "postmarket_candidate_lifecycle": _LIFECYCLE_COLUMNS,
         "postmarket_candidate_lifecycle_observations": (
             _LIFECYCLE_OBSERVATION_COLUMNS
@@ -960,6 +964,10 @@ def _feature_pipeline_progress(
               ON runs.rank_run_id=ranks.rank_run_id
             JOIN postmarket_reference_manifests AS ref
               ON ref.reference_manifest_id=ctx.sector_reference_manifest_id
+            JOIN postmarket_reference_rows AS ref_row
+              ON ref_row.reference_manifest_id=ref.reference_manifest_id
+             AND ref_row.symbol=ctx.symbol
+             AND ref_row.benchmark_symbol=ctx.sector_symbol
             WHERE ranks.rankable=1
               AND ranks.ordinal_rank IS NOT NULL
               AND ranks.lifecycle_state IN ('CONFIRMED','STRENGTHENING','REQUALIFIED')
