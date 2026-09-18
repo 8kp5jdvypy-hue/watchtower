@@ -7,6 +7,22 @@ own file (e.g. `tiingo-licensing-decision-2026-09.md`,
 
 Statuses: **approved**, **proposed**, **superseded**.
 
+## 2026-09-18 — Telegram is sunset: replace with the iOS app, then remove
+
+- **Status:** approved (owner, 2026-09-18: "option 2 — replace, then
+  remove"). Plan: `docs/telegram-sunset-plan-2026-09.md`.
+- **Decision:** Telegram remains Perch's alert delivery channel until
+  the iOS app delivers the same alerts via APNs and a ten-session
+  parity gate passes. Only then are the bot and worker stopped, the
+  BotFather commands deleted, the token revoked, Telegram identities
+  migrated, and the code removed — in that order, as separate steps.
+- **Why not stop now:** Telegram is the only delivery channel; the app
+  is built against a `/v1` API the backend does not yet serve. Stopping
+  today would leave alerts journal-only with no one receiving them.
+- **Sizing fact:** zero route overlap between the app's `/v1` contract
+  (`src/api/schemas.ts`) and the current Flask API; M1 (read surface +
+  auth) and M2 (APNs delivery) are backend work.
+
 ## 2026-09-18 — Alpaca paid plan cancelled; every Alpaca call is now free-tier IEX
 
 - **Status:** approved (owner cancelled Algo Trader Plus 2026-09-18);
