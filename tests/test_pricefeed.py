@@ -158,3 +158,20 @@ def test_default_instruments_are_small_and_typed():
     assert by_class == {"crypto": ["BTC", "ETH", "SOL"],
                         "equity": ["SPY", "QQQ", "GOOGL", "TSLA", "BE", "IONQ"]}
     assert len(pricefeed.DEFAULT_INSTRUMENTS) <= 10   # the cost note's budget assumption
+
+
+# ---- /status rendering ---------------------------------------------------
+
+def test_render_status_lines_groups_by_class_marks_stale_and_dashes_missing():
+    insts = (crypto("BTC"), crypto("ETH"), equity("SPY"))
+    points = {
+        "BTC": PricePoint("BTC", 80967.53, T0, "coinbase", "crypto"),
+        "SPY": PricePoint("SPY", 758.93, T0, "alpaca_iex", "equity", stale=True),
+    }
+    lines = pricefeed.render_status_lines(points, insts)
+    assert lines == ["Crypto: BTC $80,967.53 · ETH —", "Equity: SPY $758.93 (stale)"]
+    assert "<" not in "".join(lines)  # HTML-safe for Telegram parse_mode=HTML
+
+
+def test_render_status_lines_is_empty_when_nothing_served():
+    assert pricefeed.render_status_lines({}, (crypto("BTC"),)) == []

@@ -292,6 +292,33 @@ class PriceFeed:
         return fresh
 
 
+SEPARATOR = " \u00b7 "  # middle dot, matching the alert cards' field separator
+MISSING = "\u2014"      # em dash, the rendering.fields.dash convention
+
+
+def render_status_lines(points: Mapping[str, PricePoint], instruments: Sequence[Instrument]) -> list[str]:
+    """Pure: one HTML-safe line per asset class present, in `instruments`
+    order, e.g. "Crypto: BTC $80,967.53 · ETH $2,593.30 · SOL $111.64".
+    A symbol the feed couldn't serve prints as "SYM —" (never omitted --
+    the rendering.fields.dash rule); a stale one gets a "(stale)" mark.
+    Empty `points` renders nothing rather than a row of dashes, so a
+    feed that is down entirely costs /status one honest line, not
+    three -- the caller adds that line."""
+    from tradebot.rendering.fields import money
+
+    by_class: dict[str, list[str]] = {}
+    for inst in instruments:
+        point = points.get(inst.symbol)
+        if point is None:
+            cell = f"{inst.symbol} {MISSING}"
+        else:
+            cell = f"{inst.symbol} {money(point.price)}" + (" (stale)" if point.stale else "")
+        by_class.setdefault(inst.asset_class, []).append(cell)
+    if not points:
+        return []
+    return [f"{asset_class.capitalize()}: {SEPARATOR.join(cells)}" for asset_class, cells in by_class.items()]
+
+
 def build_default_feed(**overrides) -> PriceFeed:
     """The production wiring: DEFAULT_INSTRUMENTS over default_sources()."""
     now_fn = overrides.get("now_fn")

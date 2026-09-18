@@ -278,6 +278,7 @@ def handle_status(ctx: HandlerContext) -> Reply:
         f"HIGH alerts today: {qty(fired_today)}/{qty(ctx.app.high_tier_daily_cap)}",
         f"Cooldown suppressions today: {qty(cooldowns_today)}",
     ]
+    lines.extend(_price_lines(ctx))
     if ctx.user is None:
         pass  # channel_post — no per-user identity, so no personal "You: ..." line to show
     elif ctx.user.is_locked(now):
@@ -289,6 +290,24 @@ def handle_status(ctx: HandlerContext) -> Reply:
     else:
         lines.append("You: active, receiving alerts")
     return Reply(text="\n".join(lines))
+
+
+def _price_lines(ctx: HandlerContext) -> list[str]:
+    """Current prices from tradebot.pricefeed, or nothing if no feed is
+    configured. A feed failure is one line, never an exception: /status
+    is the command people reach for when something is wrong, so it
+    must render even when every price vendor is down."""
+    feed = ctx.app.price_feed
+    if feed is None:
+        return []
+    from tradebot import pricefeed
+
+    try:
+        points = feed.get()
+    except Exception:  # vendor-layer failures are already logged by the feed
+        return ["Prices: unavailable right now"]
+    rendered = pricefeed.render_status_lines(points, feed.instruments)
+    return rendered or ["Prices: unavailable right now"]
 
 
 # -------------------------------------------------------------------- #

@@ -30,6 +30,12 @@ Statuses: **approved**, **proposed**, **superseded**.
   markets, hourly, ~20 markets ≈ $6/day. Out of scope for this module;
   the SocialCrawl key does not enter this repository or the VPS `.env`
   by this change.
+- **Consumers (2026-09-18):** the Telegram bot's `/status` prints one
+  line per asset class (existing command, no BotFather change needed)
+  and the API exposes `/prices` for the web app. The dashboard's
+  `/quotes` (SIP bid/ask) is unchanged. No `/price` command was added
+  because the command registry must match BotFather exactly and the
+  bot refuses to start on drift -- that is the owner's call.
 - **Why:** run rate for prices stays at $0 with 100×+ rate-limit
   headroom (`docs/price-feed-cost-note-2026-09.md`), and IEX keeps the
   feed independent of the Algo Trader Plus subscription.
