@@ -1457,9 +1457,10 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
     range isn't the sum of its two legs' independent ranges (they don't
     hit their extremes at the same moment), so reporting one would imply
     a number nobody could have actually captured."""
-    from tradebot.vendors.alpaca import fetch_option_day_range
+    from tradebot.vendors.alpaca import fetch_option_day_range, is_entitlement_error
 
-    for detection_id, symbol, right, strike, expiry in pending_contract_day_range_backfills(conn, session_date):
+    pending = pending_contract_day_range_backfills(conn, session_date)
+    for index, (detection_id, symbol, right, strike, expiry) in enumerate(pending):
         try:
             chain = md[symbol].chain(symbol, expiry=date.fromisoformat(expiry))
             occ_symbol = _contract_occ_symbol(chain, right, strike)
@@ -1469,6 +1470,22 @@ def backfill_contract_day_ranges(conn, md, session_date: date) -> None:
             if day_range is not None:
                 record_contract_day_range(conn, detection_id, day_range[0], day_range[1])
         except Exception as exc:
+            if is_entitlement_error(exc):
+                # Option bars are not on this Alpaca plan (free tier since
+                # 2026-09-18). Every remaining contract would 403 the same
+                # way, so stop here: one WARNING instead of an ERROR per
+                # contract, and the rows stay pending -- untouched, so
+                # they backfill on their own if the entitlement returns.
+                remaining = len(pending) - index
+                metrics.increment(
+                    "contract_outcome_backfill_skipped", stage="day_range", reason="not_entitled"
+                )
+                logger.warning(
+                    "contract day-range backfill skipped: option bars are not entitled on this "
+                    "Alpaca plan (403); %d contract(s) left pending for %s",
+                    remaining, session_date.isoformat(),
+                )
+                return
             metrics.increment(
                 "contract_outcome_backfill_failed",
                 stage="day_range",

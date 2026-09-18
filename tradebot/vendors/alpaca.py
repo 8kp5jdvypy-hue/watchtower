@@ -191,12 +191,22 @@ def _news_client() -> NewsClient:
     return _bound_timeout(NewsClient(key_id, secret_key))
 
 
+def is_entitlement_error(exc: BaseException) -> bool:
+    """True for an Alpaca 403: the account's plan does not include what
+    was asked for. Live-observed 2026-09-18 on the free plan for option
+    bars (fetch_option_day_range) after the paid subscription was
+    cancelled. Unlike a 429 or a 5xx, nothing about a 403 changes on
+    retry, so _with_backoff raises it at once and callers that loop
+    over many contracts should stop after the first one."""
+    return isinstance(exc, APIError) and getattr(exc, "status_code", None) == 403
+
+
 def _with_backoff(fn, max_retries: int = 5, base_delay: float = 2.0):
     for attempt in range(max_retries):
         try:
             return fn()
         except APIError as e:
-            if attempt == max_retries - 1:
+            if attempt == max_retries - 1 or is_entitlement_error(e):
                 raise
             status = getattr(e, "status_code", None)
             delay = base_delay * (2**attempt) if status == 429 else base_delay

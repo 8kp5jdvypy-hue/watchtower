@@ -2334,6 +2334,53 @@ def test_backfill_contract_day_ranges_writes_a_real_fetched_range(tmp_path, monk
     assert row == (1.43, 3.90)
 
 
+def test_backfill_contract_day_ranges_stops_after_first_entitlement_403(tmp_path, monkeypatch, caplog):
+    """Free Alpaca plan (2026-09-18): option bars 403. One warning, the
+    loop stops, and every row stays pending so a later plan change
+    backfills them without any manual repair."""
+    import requests
+    from alpaca.common.exceptions import APIError
+
+    from tradebot.journal import record_contract_selection
+
+    response = requests.Response()
+    response.status_code = 403
+    forbidden = APIError("forbidden", requests.HTTPError(response=response))
+
+    conn = journal_connect(":memory:")
+    entry_ts = datetime(2026, 4, 8, 16, 5, tzinfo=timezone.utc)
+    ids = []
+    for i, strike in enumerate((600.0, 610.0, 620.0)):
+        ts_i = entry_ts + timedelta(minutes=5 * i)  # distinct ts -> distinct detection ids
+        detection_id = _write_minimal_detection(conn, ts_i, symbol="META")
+        record_contract_selection(
+            conn, detection_id, symbol="META", right="call", strike=strike, expiry=date(2026, 4, 17), dte=9,
+            delta=0.45, entry_mid=2.96, entry_ts=ts_i,
+        )
+        ids.append(detection_id)
+    assert len(runner_mod.pending_contract_day_range_backfills(conn, date(2026, 4, 8))) == 3
+    chain = _fake_chain(*[_fake_contract("call", k, 1.80, 1.90) for k in (600.0, 610.0, 620.0)])
+    md = {"META": type("MD", (), {"chain": staticmethod(lambda s, expiry: chain)})()}
+    calls = []
+
+    def fetch(occ_symbol, session_date):
+        calls.append(occ_symbol)
+        raise forbidden
+
+    monkeypatch.setattr("tradebot.vendors.alpaca.fetch_option_day_range", fetch)
+
+    with caplog.at_level("WARNING", logger="watchtower.runner"):
+        runner_mod.backfill_contract_day_ranges(conn, md, date(2026, 4, 8))
+
+    assert len(calls) == 1  # stopped after the first 403
+    warnings = [r for r in caplog.records if "not entitled" in r.message]
+    assert len(warnings) == 1 and warnings[0].levelname == "WARNING"
+    assert "3 contract(s) left pending" in warnings[0].message
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    # rows untouched -> still pending for a later run
+    assert len(runner_mod.pending_contract_day_range_backfills(conn, date(2026, 4, 8))) == 3
+
+
 def test_backfill_contract_day_ranges_skips_verticals(tmp_path, monkeypatch):
     from tradebot.journal import record_contract_selection
 
