@@ -257,6 +257,11 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     # tradebot.pricefeed does its own TTL caching and source fallback,
     # so unlike _quote_cache there is nothing for /prices to manage here.
     app.price_feed = pricefeed.build_default_feed()
+    # /v1 -- the iOS app's contract (docs/telegram-sunset-plan-2026-09.md M1);
+    # bearer-token auth, separate from this app's cookie session.
+    from tradebot.api import v1 as v1_api
+
+    v1_api.register(app)
 
     # Trusts app.frontend_url only, plus whatever a developer's own local
     # frontend dev server is running on -- opt-in via DEV_CORS_ORIGIN

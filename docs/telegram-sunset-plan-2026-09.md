@@ -31,6 +31,20 @@ Telegram untouched.
 
 **M1 — `/v1` read surface + auth (backend).** No app change needed:
 the client already fails closed against these exact shapes.
+*Status 2026-09-18: implemented on branch `feature/v1-ios-api-m1`
+(`tradebot/api/v1.py`, `v1_store.py`). Gate evidence: (a) every
+response validated with the app's own zod schemas via
+`scripts/v1_schema_check.mjs` inside `tests/test_api_v1.py`; (b) the
+app's real compiled client driven end to end against a local server
+by `scripts/v1_live_client_check.cjs` — 21/21 steps including live
+quotes in the watchlist. Not in M1: Sign in with Apple (needs Apple
+identity-token verification + the owner's Team/Client IDs), account
+export/deletion, StoreKit sync — each is a contract-shaped 501.
+Two owner-side items before a device can sign in for real: the
+dashboard Worker must serve `/.well-known/apple-app-site-association`
+so `https://app.perchmarkets.com/auth/magic-link#token=…` opens the
+app, and the SPA should show a "open in the app" page at that path
+for browsers.*
 - Auth: `/v1/auth/apple` (Sign in with Apple, server-side identity
   token verification), `/v1/auth/magic-link/{request,verify}`,
   `/v1/auth/refresh` → `TokenPair` (access + refresh, single-flight
