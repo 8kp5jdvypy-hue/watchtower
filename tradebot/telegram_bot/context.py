@@ -39,6 +39,11 @@ class AppConfig:
     # a brand-new /start lands on a waitlist instead of onboarding — see
     # handlers.handle_start.
     max_active_users: int | None = None
+    # A tradebot.pricefeed.PriceFeed (typed loosely, same reason as
+    # HandlerContext.client) or None -> /status shows no price block.
+    # Read-only from handlers: get() is the only call, and the feed does
+    # its own caching, so /status spam can't turn into vendor spam.
+    price_feed: object | None = None
 
 
 @dataclass

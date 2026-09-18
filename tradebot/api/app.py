@@ -54,6 +54,7 @@ from tradebot.journal import (
     tier_performance,
 )
 from tradebot.marketdata import fetch_quotes
+from tradebot import pricefeed
 from tradebot.runner import ET
 from tradebot.telegram_bot import db as users_db
 from tradebot.telegram_bot.performance import public_alert_history, track_record
@@ -253,6 +254,9 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
     app._performance_cache: dict = {"data": None, "computed_at": None}
     app._public_record_cache: dict = {"data": None, "computed_at": None}
     app._quote_cache: dict = {}
+    # tradebot.pricefeed does its own TTL caching and source fallback,
+    # so unlike _quote_cache there is nothing for /prices to manage here.
+    app.price_feed = pricefeed.build_default_feed()
 
     # Trusts app.frontend_url only, plus whatever a developer's own local
     # frontend dev server is running on -- opt-in via DEV_CORS_ORIGIN
@@ -542,6 +546,47 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
                     "stale_symbols": stale_symbols,
                     "missing_symbols": missing_symbols,
                     "cache_age_seconds": cache_age_seconds,
+                    "checked_at_utc": now.isoformat(),
+                },
+            }
+        )
+
+    @app.route("/prices")
+    @login_required
+    def prices():
+        # Last prices for the fixed pricefeed.DEFAULT_INSTRUMENTS set
+        # (crypto + the scanner's named equities) -- not the account's
+        # watchlist, and not bid/ask: that is /quotes' job. Anything
+        # requested outside the configured set is dropped silently, the
+        # same no-oracle discipline as /quotes. Vendor failures never
+        # 500: the feed serves flagged-stale or omits, and this reports
+        # which happened per symbol.
+        feed = app.price_feed
+        configured = [i.symbol for i in feed.instruments]
+        requested = {s.strip().upper() for s in request.args.get("symbols", "").split(",") if s.strip()}
+        symbols = [s for s in configured if not requested or s in requested]
+        now = datetime.now(timezone.utc)
+        try:
+            points = feed.get(symbols)
+        except Exception:
+            logger.exception("price feed failed; reporting every symbol missing")
+            points = {}
+        return jsonify(
+            {
+                "prices": {
+                    s: {
+                        "price": p.price,
+                        "ts_utc": p.ts.isoformat(),
+                        "ts_is_fetch_time": p.ts_is_fetch_time,
+                        "source": p.source,
+                        "asset_class": p.asset_class,
+                        "stale": p.stale,
+                    }
+                    for s, p in points.items()
+                },
+                "freshness": {
+                    "stale_symbols": sorted(s for s, p in points.items() if p.stale),
+                    "missing_symbols": [s for s in symbols if s not in points],
                     "checked_at_utc": now.isoformat(),
                 },
             }

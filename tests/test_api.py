@@ -257,6 +257,61 @@ def test_quotes_returns_real_quotes_for_watchlist_symbols(app, client, monkeypat
     assert body["freshness"]["missing_symbols"] == []
 
 
+class _FakePriceFeed:
+    def __init__(self, points, fail=False):
+        from tradebot.pricefeed import crypto, equity
+
+        self.instruments = (crypto("BTC"), equity("SPY"), equity("QQQ"))
+        self.points, self.fail, self.requested = points, fail, []
+
+    def get(self, symbols=None):
+        self.requested.append(list(symbols))
+        if self.fail:
+            raise RuntimeError("down")
+        return {s: p for s, p in self.points.items() if s in symbols}
+
+
+def test_prices_reports_per_symbol_freshness_and_drops_unknown_symbols(app, client):
+    from datetime import datetime, timezone
+
+    from tradebot.marketdata import PricePoint
+
+    ts = datetime(2026, 9, 18, 16, 17, tzinfo=timezone.utc)
+    app.price_feed = _FakePriceFeed({
+        "BTC": PricePoint("BTC", 80967.53, ts, "coinbase", "crypto"),
+        "SPY": PricePoint("SPY", 758.93, ts, "alpaca_iex", "equity", stale=True),
+    })
+    token = _request_and_extract_token(app, client, "prices1@example.com")
+    _verify_token(client, token)
+
+    response = client.get("/prices?symbols=btc,SPY,QQQ,NOPE")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert app.price_feed.requested == [["BTC", "SPY", "QQQ"]]  # NOPE never reaches the feed
+    assert body["prices"]["BTC"] == {
+        "price": 80967.53, "ts_utc": ts.isoformat(), "ts_is_fetch_time": False,
+        "source": "coinbase", "asset_class": "crypto", "stale": False,
+    }
+    assert body["prices"]["SPY"]["stale"] is True
+    assert body["freshness"]["stale_symbols"] == ["SPY"]
+    assert body["freshness"]["missing_symbols"] == ["QQQ"]
+
+
+def test_prices_defaults_to_every_configured_instrument_and_never_500s(app, client):
+    app.price_feed = _FakePriceFeed({}, fail=True)
+    token = _request_and_extract_token(app, client, "prices2@example.com")
+    _verify_token(client, token)
+    response = client.get("/prices")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["prices"] == {}
+    assert body["freshness"]["missing_symbols"] == ["BTC", "SPY", "QQQ"]
+
+
+def test_prices_requires_login(client):
+    assert client.get("/prices").status_code in (401, 403)
+
+
 def test_quotes_silently_drops_symbols_outside_the_watchlist(app, client, monkeypatch):
     import tradebot.api.app as api_app_module
 

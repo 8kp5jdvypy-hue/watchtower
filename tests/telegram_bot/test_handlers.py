@@ -32,7 +32,7 @@ def _assert_html_safe(text: str) -> None:
     assert "<" not in stripped and ">" not in stripped, f"unescaped angle bracket in Telegram HTML text: {text!r}"
 
 
-def _app(market_open=True, bot_username=None, max_active_users=None):
+def _app(market_open=True, bot_username=None, max_active_users=None, price_feed=None):
     return AppConfig(
         admin_ids=frozenset({999}),
         default_watchlist=["SPY", "QQQ", "TSLA"],
@@ -46,6 +46,7 @@ def _app(market_open=True, bot_username=None, max_active_users=None):
         incidents_path=Path("/tmp/watchtower_test_incidents_handlers.jsonl"),
         bot_username=bot_username,
         max_active_users=max_active_users,
+        price_feed=price_feed,
     )
 
 
@@ -253,6 +254,109 @@ def test_status_still_flags_a_genuinely_stale_feed_during_market_hours():
     _write_heartbeat(ctx.app.heartbeat_file, old_ts)
     reply = handlers.handle_status(ctx)
     assert "stale" in reply.text.lower()
+
+
+class _FakePriceFeed:
+    """Stands in for tradebot.pricefeed.PriceFeed: same two members
+    handlers read (instruments, get)."""
+
+    def __init__(self, points=None, fail=False):
+        from tradebot.pricefeed import crypto, equity
+
+        self.instruments = (crypto("BTC"), equity("SPY"))
+        self.points = points or {}
+        self.fail = fail
+        self.calls = 0
+
+    def get(self, symbols=None):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("every vendor down")
+        return self.points
+
+
+def test_status_has_no_price_block_without_a_feed():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_status(_ctx(users_conn, journal_conn))
+    assert "price" not in reply.text.lower() and "$" not in reply.text
+
+
+def test_status_shows_prices_from_the_feed():
+    from tradebot.marketdata import PricePoint
+
+    users_conn, journal_conn = _setup()
+    feed = _FakePriceFeed({
+        "BTC": PricePoint("BTC", 80967.53, NOW, "coinbase", "crypto"),
+        "SPY": PricePoint("SPY", 758.93, NOW, "alpaca_iex", "equity", stale=True),
+    })
+    ctx = _ctx(users_conn, journal_conn)
+    ctx = HandlerContext(**{**ctx.__dict__, "app": _app(price_feed=feed)})
+    reply = handlers.handle_status(ctx)
+    assert "Crypto: BTC $80,967.53" in reply.text
+    assert "Equity: SPY $758.93 (stale)" in reply.text
+    assert feed.calls == 1
+    _assert_html_safe(reply.text)
+
+
+def test_status_survives_a_dead_price_feed():
+    users_conn, journal_conn = _setup()
+    ctx = _ctx(users_conn, journal_conn)
+    ctx = HandlerContext(**{**ctx.__dict__, "app": _app(price_feed=_FakePriceFeed(fail=True))})
+    reply = handlers.handle_status(ctx)
+    assert "Prices: unavailable right now" in reply.text
+    assert "HIGH alerts today" in reply.text  # the rest of /status still rendered
+
+
+# ---------------------------------------------------------------------- #
+# /price
+# ---------------------------------------------------------------------- #
+
+
+def _price_ctx(users_conn, journal_conn, feed, args=()):
+    ctx = _ctx(users_conn, journal_conn)
+    return HandlerContext(**{**ctx.__dict__, "app": _app(price_feed=feed), "args": list(args)})
+
+
+def test_price_registry_handlers_and_help_agree():
+    from tradebot.telegram_bot import commands
+
+    assert set(handlers.HANDLERS) == set(commands.COMMAND_NAMES)
+    assert "price" in commands.GROUP_ALLOWED and "price" in commands.CHANNEL_ALLOWED
+    users_conn, journal_conn = _setup()
+    assert "/price" in handlers.handle_help(_ctx(users_conn, journal_conn)).text
+
+
+def test_price_without_args_renders_the_status_block():
+    from tradebot.marketdata import PricePoint
+
+    users_conn, journal_conn = _setup()
+    feed = _FakePriceFeed({"BTC": PricePoint("BTC", 80967.53, NOW, "coinbase", "crypto"),
+                           "SPY": PricePoint("SPY", 758.93, NOW, "alpaca_iex", "equity")})
+    reply = handlers.handle_price(_price_ctx(users_conn, journal_conn, feed))
+    assert reply.text == "Crypto: BTC $80,967.53\nEquity: SPY $758.93"
+    _assert_html_safe(reply.text)
+
+
+def test_price_with_symbols_shows_source_age_and_names_unknowns():
+    from tradebot.marketdata import PricePoint
+
+    users_conn, journal_conn = _setup()
+    feed = _FakePriceFeed({"BTC": PricePoint("BTC", 80967.53, NOW - timedelta(seconds=42), "kraken", "crypto",
+                                             stale=True, ts_is_fetch_time=True)})
+    reply = handlers.handle_price(_price_ctx(users_conn, journal_conn, feed, args=["btc", "doge", "SPY"]))
+    lines = reply.text.split("\n")
+    assert lines[0].startswith("<b>BTC</b> $80,967.53 (stale) · fetched ") and lines[0].endswith(", 42s ago · kraken")
+    assert lines[1] == "SPY — unavailable right now"
+    assert lines[2] == "Not tracked: DOGE. Tracked: BTC, SPY"
+    _assert_html_safe(reply.text)
+
+
+def test_price_survives_a_dead_feed_and_no_feed():
+    users_conn, journal_conn = _setup()
+    reply = handlers.handle_price(_price_ctx(users_conn, journal_conn, _FakePriceFeed(fail=True)))
+    assert reply.text == "Prices: unavailable right now"
+    reply = handlers.handle_price(_price_ctx(users_conn, journal_conn, None))
+    assert "aren't configured" in reply.text
 
 
 # ---------------------------------------------------------------------- #

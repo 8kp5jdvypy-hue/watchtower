@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from tradebot import accounts
+from tradebot import accounts, pricefeed
 from tradebot.config import WATCHLIST
 from tradebot.journal import connect as journal_connect
 from tradebot.runner import CALENDAR, ET, HALT_FILE, HEARTBEAT_FILE
@@ -77,6 +77,7 @@ def build_app_config(bot_username: str | None = None) -> AppConfig:
         allowed_user_ids=_parse_id_list("ALLOWED_USER_IDS") or None,
         channel_commands_enabled=_parse_bool("CHANNEL_COMMANDS_ENABLED", default=False),
         max_active_users=_parse_optional_int("WATCHTOWER_MAX_USERS"),
+        price_feed=pricefeed.build_default_feed(),
     )
 
 

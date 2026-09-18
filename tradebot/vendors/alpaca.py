@@ -29,6 +29,7 @@ from alpaca.data.requests import (
     NewsRequest,
     StockBarsRequest,
     StockLatestQuoteRequest,
+    StockLatestTradeRequest,
 )
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
@@ -42,6 +43,7 @@ from tradebot.marketdata import MarketWideScreen as MDMarketWideScreen
 from tradebot.marketdata import NewsItem as MDNewsItem
 from tradebot.marketdata import OptionChain as MDOptionChain
 from tradebot.marketdata import OptionContract as MDOptionContract
+from tradebot.marketdata import PricePoint as MDPricePoint
 from tradebot.marketdata import Quote as MDQuote
 
 # 2026-08-21 vendor-call observability: a child of "watchtower" (see
@@ -579,6 +581,52 @@ def fetch_latest_quotes(symbols: list[str]) -> dict[str, MDQuote]:
                     float(q.ask_size)
                     if getattr(q, "ask_size", None) is not None else None
                 ),
+            )
+    return out
+
+
+def fetch_latest_trade_prices(symbols: list[str]) -> dict[str, MDPricePoint]:
+    """Last trade price per symbol, IEX feed, one request per chunk --
+    the equity source for tradebot.pricefeed (decision 2026-09-17,
+    docs/DECISIONS.md).
+
+    IEX, not SIP, deliberately and unlike fetch_latest_quote(s) above:
+    the price feed is meant to keep working on Alpaca's free market-
+    data tier, where SIP is not entitled, so that the feed's run rate
+    does not depend on the Algo Trader Plus subscription staying
+    active. The trade-off is real and accepted for this use: an IEX
+    last trade can lag the consolidated tape on thin names, which is
+    fine for a price shown next to an alert and wrong for anything a
+    detector decides on -- detectors don't call this. Last TRADE,
+    not quote mid, because a crypto ticker has no NBBO and the feed
+    wants one meaning of "price" across asset classes.
+
+    A symbol Alpaca has no trade for is absent, never padded -- same
+    discipline as fetch_latest_quotes."""
+    client = _client()
+    out: dict[str, MDPricePoint] = {}
+    chunk_count = math.ceil(len(symbols) / BULK_FETCH_CHUNK_SIZE)
+    for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
+        chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
+        request = StockLatestTradeRequest(symbol_or_symbols=chunk, feed=DataFeed.IEX)
+        response = _observed_call(
+            "fetch_latest_trade_prices",
+            lambda r=request: _with_backoff(lambda: client.get_stock_latest_trade(r)),
+            client="stock",
+            chunk_index=i // BULK_FETCH_CHUNK_SIZE + 1,
+            chunk_count=chunk_count,
+            chunk_size=len(chunk),
+        )
+        for symbol, t in response.items():
+            price = float(t.price)
+            if not math.isfinite(price) or price <= 0:
+                continue
+            out[symbol] = MDPricePoint(
+                symbol=symbol,
+                price=price,
+                ts=t.timestamp.astimezone(timezone.utc),
+                source="alpaca_iex",
+                asset_class="equity",
             )
     return out
 
