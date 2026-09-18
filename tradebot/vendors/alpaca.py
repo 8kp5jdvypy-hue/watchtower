@@ -69,6 +69,26 @@ def _resolve_detector_data_feed() -> DataFeed:
 
 
 DETECTOR_DATA_FEED = _resolve_detector_data_feed()
+
+
+# 2026-09-18: the Algo Trader Plus subscription was cancelled, and
+# Alpaca's free plan rejects the recent-SIP-quote calls fetch_latest_
+# quote(s) used to hardcode ("subscription does not permit querying
+# recent SIP data", live-observed the same day). Same env-var shape as
+# DETECTOR_DATA_FEED, separate variable because the two feeds have
+# different jobs (detectors vs. display) and were deliberately allowed
+# to differ. Default "iex" because that is what the account is now
+# entitled to; set QUOTE_DATA_FEED=sip only if a SIP-entitled plan is
+# active again -- there is no runtime entitlement check, a wrong value
+# just fails every quote call.
+def _resolve_quote_data_feed() -> DataFeed:
+    raw = os.environ.get("QUOTE_DATA_FEED", "iex").strip().lower()
+    if raw not in ("iex", "sip"):
+        raise ValueError(f"QUOTE_DATA_FEED must be 'iex' or 'sip', got {raw!r}")
+    return DataFeed.SIP if raw == "sip" else DataFeed.IEX
+
+
+QUOTE_DATA_FEED = _resolve_quote_data_feed()
 _EASTERN = ZoneInfo("America/New_York")
 
 
@@ -510,78 +530,84 @@ def fetch_marketwide_postmarket_screen(top: int = 50) -> MDMarketWideScreen:
     return fetch_marketwide_screen(top)
 
 
-def fetch_latest_quote(symbol: str) -> MDQuote:
-    """The current NBBO quote. Live mode only — not used by replay.
+def _latest_quotes_chunk(client, symbols: list[str]) -> dict[str, MDQuote]:
+    """One chunk of current quotes on QUOTE_DATA_FEED, as MDQuote.
 
-    SIP, not IEX: this feeds the dashboard's /quotes endpoint (price
-    display only, no detector/baseline dependency), so it carries none
-    of fetch_daily_bars/fetch_intraday_bars' recalibration blocker —
-    pure upside from the tighter, more complete consolidated-tape quote.
-    Live-verified 2026-08-11: same moment, same symbol, IEX bid/ask spread
-    was $46 wide (749.35/795.77) against SIP's $0.11 (772.35/772.46).
-    """
+    `last` is the consolidated-tape mid on SIP (the original 2026-08-11
+    design: same moment, same symbol, IEX bid/ask was $46 wide
+    (749.35/795.77) against SIP's $0.11 (772.35/772.46), so the SIP mid
+    is an excellent "current price"). On IEX that mid is unusable for
+    the same reason, so `last` is instead the IEX LAST TRADE, fetched
+    in a second SDK call inside the same logical operation -- what the
+    web app's Watchlist/SignalCard "live price" always meant anyway.
+    bid/ask are reported as the feed gives them either way; on IEX a
+    consumer should treat the spread as indicative, not tradeable.
+    A symbol with a quote but no trade falls back to the mid rather
+    than being dropped."""
+    quote_request = StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=QUOTE_DATA_FEED)
+    quotes = _with_backoff(lambda: client.get_stock_latest_quote(quote_request))
+    trades = {}
+    if QUOTE_DATA_FEED == DataFeed.IEX:
+        trade_request = StockLatestTradeRequest(symbol_or_symbols=symbols, feed=DataFeed.IEX)
+        trades = _with_backoff(lambda: client.get_stock_latest_trade(trade_request))
+    out: dict[str, MDQuote] = {}
+    for symbol, q in quotes.items():
+        mid = float((q.bid_price + q.ask_price) / 2)
+        trade = trades.get(symbol)
+        last = float(trade.price) if trade is not None and float(trade.price) > 0 else mid
+        out[symbol] = MDQuote(
+            symbol=symbol,
+            ts=q.timestamp.astimezone(timezone.utc),
+            bid=float(q.bid_price),
+            ask=float(q.ask_price),
+            last=last,
+            bid_size=(
+                float(q.bid_size) if getattr(q, "bid_size", None) is not None else None
+            ),
+            ask_size=(
+                float(q.ask_size) if getattr(q, "ask_size", None) is not None else None
+            ),
+        )
+    return out
+
+
+def fetch_latest_quote(symbol: str) -> MDQuote:
+    """The current quote for one symbol on QUOTE_DATA_FEED. Live mode
+    only — not used by replay. See _latest_quotes_chunk for what `last`
+    means on each feed."""
     client = _client()
-    request = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=DataFeed.SIP)
     response = _observed_call(
         "fetch_latest_quote",
-        lambda: _with_backoff(lambda: client.get_stock_latest_quote(request)),
+        lambda: _latest_quotes_chunk(client, [symbol]),
         client="stock",
         symbol=symbol,
     )
-    q = response[symbol]
-    return MDQuote(
-        symbol=symbol,
-        ts=q.timestamp.astimezone(timezone.utc),
-        bid=float(q.bid_price),
-        ask=float(q.ask_price),
-        last=float((q.bid_price + q.ask_price) / 2),
-        bid_size=(
-            float(q.bid_size) if getattr(q, "bid_size", None) is not None else None
-        ),
-        ask_size=(
-            float(q.ask_size) if getattr(q, "ask_size", None) is not None else None
-        ),
-    )
+    return response[symbol]
 
 
 def fetch_latest_quotes(symbols: list[str]) -> dict[str, MDQuote]:
-    """Current NBBO quotes for many symbols in one request instead of N --
-    SIP, same reasoning as fetch_latest_quote above. Chunked the same way
-    fetch_daily_bars_bulk is (see BULK_FETCH_CHUNK_SIZE), though a
-    dashboard watchlist is never remotely close to that size in practice.
-    A symbol Alpaca has no quote for is simply absent from the result,
-    never padded with a fabricated entry -- same discipline as
+    """Current quotes for many symbols in one request per chunk instead
+    of N (two per chunk on IEX -- see _latest_quotes_chunk). Chunked the
+    same way fetch_daily_bars_bulk is (see BULK_FETCH_CHUNK_SIZE), though
+    a dashboard watchlist is never remotely close to that size in
+    practice. A symbol Alpaca has no quote for is simply absent from the
+    result, never padded with a fabricated entry -- same discipline as
     fetch_daily_bars_bulk."""
     client = _client()
     out: dict[str, MDQuote] = {}
     chunk_count = math.ceil(len(symbols) / BULK_FETCH_CHUNK_SIZE)
     for i in range(0, len(symbols), BULK_FETCH_CHUNK_SIZE):
         chunk = symbols[i : i + BULK_FETCH_CHUNK_SIZE]
-        request = StockLatestQuoteRequest(symbol_or_symbols=chunk, feed=DataFeed.SIP)
-        response = _observed_call(
-            "fetch_latest_quotes",
-            lambda r=request: _with_backoff(lambda: client.get_stock_latest_quote(r)),
-            client="stock",
-            chunk_index=i // BULK_FETCH_CHUNK_SIZE + 1,
-            chunk_count=chunk_count,
-            chunk_size=len(chunk),
-        )
-        for symbol, q in response.items():
-            out[symbol] = MDQuote(
-                symbol=symbol,
-                ts=q.timestamp.astimezone(timezone.utc),
-                bid=float(q.bid_price),
-                ask=float(q.ask_price),
-                last=float((q.bid_price + q.ask_price) / 2),
-                bid_size=(
-                    float(q.bid_size)
-                    if getattr(q, "bid_size", None) is not None else None
-                ),
-                ask_size=(
-                    float(q.ask_size)
-                    if getattr(q, "ask_size", None) is not None else None
-                ),
+        out.update(
+            _observed_call(
+                "fetch_latest_quotes",
+                lambda c=chunk: _latest_quotes_chunk(client, c),
+                client="stock",
+                chunk_index=i // BULK_FETCH_CHUNK_SIZE + 1,
+                chunk_count=chunk_count,
+                chunk_size=len(chunk),
             )
+        )
     return out
 
 

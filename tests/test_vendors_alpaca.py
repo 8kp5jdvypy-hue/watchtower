@@ -408,12 +408,57 @@ class _FakeQuote:
         self.ask_size = 400
 
 
-def test_fetch_latest_quotes_logs_correct_chunk_context_and_no_symbol_list(monkeypatch, caplog):
-    class _FakeClient:
-        def get_stock_latest_quote(self, request):
-            return {s: _FakeQuote() for s in request.symbol_or_symbols}
+class _FakeQuoteClient:
+    """Answers both SDK calls _latest_quotes_chunk can make. `trades`
+    maps symbol -> last trade price; a symbol left out has no trade."""
 
-    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeClient())
+    def __init__(self, trades=None):
+        self.trades = trades if trades is not None else {}
+        self.quote_feeds, self.trade_feeds = [], []
+
+    def get_stock_latest_quote(self, request):
+        self.quote_feeds.append(request.feed)
+        return {s: _FakeQuote() for s in request.symbol_or_symbols}
+
+    def get_stock_latest_trade(self, request):
+        self.trade_feeds.append(request.feed)
+        ts = datetime(2026, 9, 18, 16, 0, tzinfo=timezone.utc)
+        return {s: SimpleNamespace(price=self.trades[s], timestamp=ts)
+                for s in request.symbol_or_symbols if s in self.trades}
+
+
+def test_quote_data_feed_defaults_to_iex_and_reads_sip(monkeypatch):
+    monkeypatch.delenv("QUOTE_DATA_FEED", raising=False)
+    assert alpaca_module._resolve_quote_data_feed() == DataFeed.IEX
+    monkeypatch.setenv("QUOTE_DATA_FEED", " SIP ")
+    assert alpaca_module._resolve_quote_data_feed() == DataFeed.SIP
+    monkeypatch.setenv("QUOTE_DATA_FEED", "delayed")
+    with pytest.raises(ValueError):
+        alpaca_module._resolve_quote_data_feed()
+
+
+def test_fetch_latest_quotes_on_iex_uses_last_trade_not_mid(monkeypatch):
+    monkeypatch.setattr(alpaca_module, "QUOTE_DATA_FEED", DataFeed.IEX)
+    client = _FakeQuoteClient(trades={"SPY": 759.46})  # QQQ: quote but no trade
+    monkeypatch.setattr(alpaca_module, "_client", lambda: client)
+    out = alpaca_module.fetch_latest_quotes(["SPY", "QQQ"])
+    assert client.quote_feeds == [DataFeed.IEX] and client.trade_feeds == [DataFeed.IEX]
+    assert out["SPY"].last == 759.46 and out["SPY"].bid == 100.0 and out["SPY"].ask == 100.2
+    assert out["QQQ"].last == pytest.approx(100.1)  # mid fallback, not dropped
+    assert alpaca_module.fetch_latest_quote("SPY").last == 759.46
+
+
+def test_fetch_latest_quotes_on_sip_keeps_the_mid_and_makes_no_trade_call(monkeypatch):
+    monkeypatch.setattr(alpaca_module, "QUOTE_DATA_FEED", DataFeed.SIP)
+    client = _FakeQuoteClient(trades={"SPY": 759.46})
+    monkeypatch.setattr(alpaca_module, "_client", lambda: client)
+    out = alpaca_module.fetch_latest_quotes(["SPY"])
+    assert client.quote_feeds == [DataFeed.SIP] and client.trade_feeds == []
+    assert out["SPY"].last == pytest.approx(100.1)
+
+
+def test_fetch_latest_quotes_logs_correct_chunk_context_and_no_symbol_list(monkeypatch, caplog):
+    monkeypatch.setattr(alpaca_module, "_client", lambda: _FakeQuoteClient())
     monkeypatch.setattr(alpaca_module, "BULK_FETCH_CHUNK_SIZE", 2)
     symbols = ["AAA", "BBB", "CCC"]  # chunk 1: [AAA, BBB] (size 2), chunk 2: [CCC] (size 1)
 

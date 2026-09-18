@@ -37,13 +37,23 @@ Coinbase and Kraken BTC last trades differed by 0.02%.
 
 ## Alpaca plan note
 
-The Alpaca account is currently on Algo Trader Plus ($99/month; see
-`docs/sip-migration-proposal.md`). That subscription exists for the
-detector data path (SIP historical/intraday bars) and is **not a cost
-of this module**: `fetch_latest_trade_prices` uses the IEX feed on
-purpose so the price feed keeps working unchanged if the account is
-ever downgraded to the free tier. The existing dashboard quote path
-(`fetch_latest_quote(s)`, SIP) is untouched.
+**Updated 2026-09-18:** the owner cancelled the Algo Trader Plus
+subscription ($99/month) the same day. Perch's Alpaca cost is now
+**$0** and every Alpaca call it makes is on the free plan:
+
+- `fetch_latest_trade_prices` (this module) — IEX, unaffected.
+- Detector bars — IEX by default (`DETECTOR_DATA_FEED` unset);
+  **`DETECTOR_DATA_FEED=sip` must not be set on the VPS** or the
+  scanner's own fetches will be refused.
+- Dashboard `/quotes` and the two postmarket shadow quote fetches —
+  were hardcoded SIP and were refused live ("subscription does not
+  permit querying recent SIP data"); moved to `QUOTE_DATA_FEED`
+  (default `iex`, `last` = IEX last trade) the same day.
+- Options chain — indicative feed, live-verified working (642 SPY
+  contracts).
+
+`docs/sip-migration-proposal.md` and `docs/sip-decision-a-proposal.md`
+describe a SIP era that no longer exists; they are kept as history.
 
 ## What was avoided
 
