@@ -54,6 +54,26 @@ class Quote:
 
 
 @dataclass(frozen=True)
+class PricePoint:
+    """One last-traded price for display/alert context, from whichever
+    source tradebot.pricefeed served it. Distinct from Quote on purpose:
+    a crypto exchange ticker has no NBBO, and the equity path here uses
+    the last trade (IEX) rather than a SIP mid. `stale` is True only
+    when the feed served a cached value past its TTL because every
+    source failed -- never silently. `ts` is the provider's trade time
+    when it supplies one; for a provider that doesn't (Kraken's ticker),
+    it is the fetch time and `ts_is_fetch_time` says so."""
+
+    symbol: str
+    price: float
+    ts: datetime
+    source: str
+    asset_class: str  # "crypto" | "equity"
+    stale: bool = False
+    ts_is_fetch_time: bool = False
+
+
+@dataclass(frozen=True)
 class OptionContract:
     symbol: str
     expiry: date
