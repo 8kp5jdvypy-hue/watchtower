@@ -124,6 +124,14 @@ Four required today (`tradebot/vendors/alpaca.py`,
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — the bot's own token and the
   ops channel it posts summaries/heartbeats to.
 
+Optional price-feed credential (`tradebot/vendors/finnhub.py`):
+
+- `FINNHUB_API_KEY` — Finnhub free tier (60 req/min), the US-equity
+  fallback behind Alpaca IEX in `tradebot.pricefeed`. Absent = the
+  Finnhub source is simply not registered; nothing fails. Sent as the
+  `X-Finnhub-Token` header, never in a URL. Owner creates the key at
+  finnhub.io; see `docs/price-feed-cost-note-2026-09.md`.
+
 Optional shadow-evidence credentials:
 
 - `POSTMARKET_REFERENCE_PROVIDER` — independent historical provider selected
