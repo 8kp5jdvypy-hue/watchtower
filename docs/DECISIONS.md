@@ -33,9 +33,10 @@ Statuses: **approved**, **proposed**, **superseded**.
 - **Consumers (2026-09-18):** the Telegram bot's `/status` prints one
   line per asset class (existing command, no BotFather change needed)
   and the API exposes `/prices` for the web app. The dashboard's
-  `/quotes` (SIP bid/ask) is unchanged. No `/price` command was added
-  because the command registry must match BotFather exactly and the
-  bot refuses to start on drift -- that is the owner's call.
+  `/quotes` (SIP bid/ask) is unchanged. `/price [SYMBOL ...]` was
+  added to the command registry (owner's call, 2026-09-18); the first
+  start after merge must run with `--sync-commands` so BotFather
+  matches, or the drift check refuses to start.
 - **Why:** run rate for prices stays at $0 with 100×+ rate-limit
   headroom (`docs/price-feed-cost-note-2026-09.md`), and IEX keeps the
   feed independent of the Algo Trader Plus subscription.

@@ -8,6 +8,10 @@ refuse to start.
 Fetched from the live bot via getMyCommands on 2026-08-06 and confirmed
 to match this list at that time. Re-synced 2026-08-08 for the Kestrel ->
 Perch rebrand (/start's description text) via BotClient.set_my_commands.
+Added /price 2026-09-18 (tradebot.pricefeed) -- NOT yet pushed to
+BotFather: the first start after this change must use --sync-commands
+(see main.py), or the drift check refuses to start. Perch is on hold at
+the time of writing, so that sync happens whenever it's next started.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("resume", "Turn alerts back on"),
     ("watchlist", "View or edit your symbols"),
     ("events", "Today's earnings and macro calendar"),
+    ("price", "Current prices: BTC, ETH, SOL and the watchlist"),
     ("tiers", "Plans and what each includes"),
     ("export", "Download your journal as CSV"),
     ("help", "All commands and support"),
@@ -37,8 +42,10 @@ COMMAND_NAMES = [name for name, _ in COMMANDS]
 # replies "DM me for that" rather than touching personal data in a shared
 # chat. Regular users' /halt in a group still only affects their own
 # session (see handlers.halt), so it's safe to allow there too.
-GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt", "feedback"})
+GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt", "feedback", "price"})
 
+# /price reads a shared, non-personal feed (tradebot.pricefeed) and
+# writes nothing, so it is safe in both of the lists below.
 # Channel posts (the bot posting alerts into a channel where it's admin)
 # carry NO user identity at all — Telegram's `channel_post` update has no
 # `from` field, so there's no one to attribute a mutation to. This is
@@ -46,7 +53,7 @@ GROUP_ALLOWED = frozenset({"status", "performance", "help", "halt", "feedback"})
 # it's group-safe, because /halt always mutates state (a personal session
 # halt, or — for an admin — the global halt file) and there's no user to
 # scope that mutation to in a channel post.
-CHANNEL_ALLOWED = frozenset({"status", "performance", "help"})
+CHANNEL_ALLOWED = frozenset({"status", "performance", "help", "price"})
 
 
 class CommandDriftError(RuntimeError):

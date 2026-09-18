@@ -733,6 +733,50 @@ def handle_events(ctx: HandlerContext) -> Reply:
 
 
 # -------------------------------------------------------------------- #
+# /price [SYMBOL ...] — tradebot.pricefeed, read-only
+# -------------------------------------------------------------------- #
+
+
+def handle_price(ctx: HandlerContext) -> Reply:
+    """No args: every configured instrument, one line per asset class
+    (the same block /status shows). With args: only those symbols, one
+    per line with source and age, so "is this number fresh?" has an
+    answer. A symbol the feed doesn't know is named back, not guessed
+    at -- the feed's instrument list is the whole universe here."""
+    feed = ctx.app.price_feed
+    if feed is None:
+        return Reply(text="Prices aren't configured on this bot.")
+    from tradebot import pricefeed
+
+    configured = [i.symbol for i in feed.instruments]
+    requested = [a.strip().upper() for a in ctx.args if a.strip()]
+    unknown = [s for s in requested if s not in configured]
+    wanted = [s for s in requested if s in configured] or (configured if not requested else [])
+
+    try:
+        points = feed.get(wanted) if wanted else {}
+    except Exception:  # the feed already logged it; /price must still answer
+        points = {}
+
+    lines: list[str] = []
+    if not requested:
+        lines.extend(pricefeed.render_status_lines(points, feed.instruments) or ["Prices: unavailable right now"])
+    else:
+        for symbol in wanted:
+            point = points.get(symbol)
+            if point is None:
+                lines.append(f"{symbol} \u2014 unavailable right now")
+                continue
+            age_s = max(0, int((ctx.now - point.ts).total_seconds()))
+            when = f"as of {ts(point.ts)}" if not point.ts_is_fetch_time else f"fetched {ts(point.ts)}"
+            stale = " (stale)" if point.stale else ""
+            lines.append(f"<b>{symbol}</b> {money(point.price)}{stale} \u00b7 {when}, {age_s}s ago \u00b7 {html.escape(point.source)}")
+    if unknown:
+        lines.append(f"Not tracked: {html.escape(', '.join(unknown))}. Tracked: {', '.join(configured)}")
+    return Reply(text="\n".join(lines))
+
+
+# -------------------------------------------------------------------- #
 # /tiers
 # -------------------------------------------------------------------- #
 
@@ -835,6 +879,7 @@ def handle_help(ctx: HandlerContext) -> Reply:
         "",
         "<b>Info</b>",
         "/events — today's calendar",
+        "/price [SYMBOL ...] — current prices (BTC, ETH, SOL and the watchlist)",
         "/tiers — plans &amp; billing",
         "/feedback &lt;message&gt; — tell us what's broken or missing, one tap",
         "",
@@ -897,6 +942,7 @@ HANDLERS = {
     "resume": handle_resume,
     "watchlist": handle_watchlist,
     "events": handle_events,
+    "price": handle_price,
     "tiers": handle_tiers,
     "export": handle_export,
     "help": handle_help,
