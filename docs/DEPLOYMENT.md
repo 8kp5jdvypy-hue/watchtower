@@ -121,6 +121,9 @@ Four required today (`tradebot/vendors/alpaca.py`,
 `tradebot/alerts.py`, `tradebot/telegram_bot/client.py`):
 
 - `ALPACA_KEY_ID`, `ALPACA_SECRET_KEY` — Alpaca market data credentials.
+  Free plan since 2026-09-18: leave `DETECTOR_DATA_FEED` and
+  `QUOTE_DATA_FEED` unset (both default `iex`); `sip` is refused
+  without a paid plan (see `docs/DECISIONS.md`).
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — the bot's own token and the
   ops channel it posts summaries/heartbeats to.
 
