@@ -233,6 +233,27 @@ def test_with_backoff_retries_a_non_429_apierror_with_flat_backoff(monkeypatch):
     assert sleep_calls == [2, 2, 2, 2]
 
 
+def test_with_backoff_does_not_retry_a_403_entitlement_error(monkeypatch):
+    """A 403 is the plan saying no (option bars on the free tier,
+    2026-09-18) -- retrying five times with 8s of sleep between them
+    cannot change that, and was exactly what the runner's day-range
+    backfill was doing per contract."""
+    sleep_calls = []
+    monkeypatch.setattr(alpaca_module.time, "sleep", lambda s: sleep_calls.append(s))
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise _fake_api_error(403)
+
+    with pytest.raises(APIError) as excinfo:
+        alpaca_module._with_backoff(fn)
+    assert calls["n"] == 1 and sleep_calls == []
+    assert alpaca_module.is_entitlement_error(excinfo.value)
+    assert not alpaca_module.is_entitlement_error(_fake_api_error(500))
+    assert not alpaca_module.is_entitlement_error(RuntimeError("403"))
+
+
 # --------------------------------------------------------------------------
 # 2026-08-21 vendor-call observability: _observed_call, and the 10
 # existing _with_backoff(...) call sites it now wraps from the outside.
