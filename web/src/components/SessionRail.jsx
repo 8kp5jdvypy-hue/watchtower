@@ -100,9 +100,11 @@ export default function SessionRail({ alerts = [], sessionLabel }) {
             className={`rail-pin ${minute >= p.m || reduced ? 'is-lit' : ''} pin-${p.outcome.kind}`}
             style={{ top: `${pct(p.m)}%` }}
             data-rail-pin={p.id}
+            tabIndex={0}
+            aria-label={`${p.time} ET, ${p.symbol}: ${p.headline}. ${p.outcome.label}`}
           >
             <span className="rail-pin-dot" />
-            <span className="rail-pin-tip" role="tooltip">
+            <span className="rail-pin-tip" aria-hidden="true">
               <b>{p.symbol}</b> {p.time} · {p.headline}
               <i>{p.outcome.label}</i>
             </span>
