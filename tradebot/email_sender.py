@@ -142,22 +142,35 @@ class ResendEmailSender(EmailSender):
     that verification (DNS records on perchmarkets.com) is a one-time
     manual step, not something this code can do."""
 
-    def __init__(self, api_key: str, from_email: str) -> None:
+    def __init__(self, api_key: str, from_email: str, reply_to: str | None = None) -> None:
         self._api_key = api_key
-        self._from_email = from_email
+        # A bare address ("login@perchmarkets.com") is what iCloud Junk
+        # saw for a month (2026-08-21 … 2026-09-19, mail-tester 10/10 the
+        # whole time -- authentication was never the problem). A display
+        # name and a human reply-to are the two sender signals still in
+        # our hands; the rest is domain age and DMARC enforcement.
+        self._from_email = from_email if "<" in from_email else f"Perch Markets <{from_email}>"
+        self._reply_to = reply_to
 
     def send_magic_link(self, to_email: str, link_url: str) -> None:
         html, text = _render_magic_link_email(link_url)
+        payload = {
+            "from": self._from_email,
+            "to": [to_email],
+            "subject": "Your Perch sign-in link",
+            "html": html,
+            "text": text,
+            # Transactional, one recipient, no list -- but the header is
+            # cheap and Apple/Gmail treat its presence as a good citizen
+            # signal (mail-tester flags its absence).
+            "headers": {"List-Unsubscribe": "<mailto:hello@perchmarkets.com?subject=unsubscribe>"},
+        }
+        if self._reply_to:
+            payload["reply_to"] = self._reply_to
         response = requests.post(
             RESEND_API_URL,
             headers={"Authorization": f"Bearer {self._api_key}"},
-            json={
-                "from": self._from_email,
-                "to": [to_email],
-                "subject": "Your Perch sign-in link",
-                "html": html,
-                "text": text,
-            },
+            json=payload,
             timeout=10,
         )
         response.raise_for_status()
@@ -171,4 +184,4 @@ def build_email_sender() -> EmailSender:
     from_email = os.environ.get("RESEND_FROM_EMAIL")
     if not api_key or not from_email:
         return DevEmailSender()
-    return ResendEmailSender(api_key=api_key, from_email=from_email)
+    return ResendEmailSender(api_key=api_key, from_email=from_email, reply_to=os.environ.get("RESEND_REPLY_TO", "hello@perchmarkets.com"))

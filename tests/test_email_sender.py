@@ -39,12 +39,16 @@ def test_resend_email_sender_posts_expected_payload(monkeypatch):
 
     monkeypatch.setattr("tradebot.email_sender.requests.post", fake_post)
 
-    sender = ResendEmailSender(api_key="re_test_key", from_email="login@perchmarkets.com")
+    sender = ResendEmailSender(api_key="re_test_key", from_email="login@perchmarkets.com", reply_to="hello@perchmarkets.com")
     sender.send_magic_link("alice@example.com", "https://app.perchmarkets.com/verify?token=abc")
 
     assert captured["url"] == "https://api.resend.com/emails"
     assert captured["headers"]["Authorization"] == "Bearer re_test_key"
-    assert captured["json"]["from"] == "login@perchmarkets.com"
+    # Display name added 2026-09-19 (iCloud junked the bare address for a
+    # month while mail-tester scored 10/10); reply-to points at a human.
+    assert captured["json"]["from"] == "Perch Markets <login@perchmarkets.com>"
+    assert captured["json"]["reply_to"] == "hello@perchmarkets.com"
+    assert captured["json"]["headers"]["List-Unsubscribe"].startswith("<mailto:hello@perchmarkets.com")
     assert captured["json"]["to"] == ["alice@example.com"]
     assert captured["json"]["subject"] == "Your Perch sign-in link"
     assert "https://app.perchmarkets.com/verify?token=abc" in captured["json"]["html"]
