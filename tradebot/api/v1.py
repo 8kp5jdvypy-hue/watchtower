@@ -13,9 +13,9 @@ the app keeps tokens in the iOS Keychain and rotates the refresh token
 single-flight. The two schemes coexist on one Flask app; nothing under
 /v1 reads the cookie and nothing outside /v1 reads a bearer token.
 
-Not implemented in M1 (each returns a well-formed 501 error the client
+Not implemented yet (each returns a well-formed 501 error the client
 classifies as `http`, never a crash): Sign in with Apple, StoreKit
-sync, device registration (M2 -- APNs), account export/deletion.
+sync, account export/deletion. Device registration landed in M2.
 """
 from __future__ import annotations
 
@@ -829,14 +829,94 @@ def billing_apple_sync():
     return _not_implemented("Subscription sync")
 
 
+# --------------------------------------------------------------------------
+# Devices (M2): APNs registration for the push outbox -- tradebot.push
+# --------------------------------------------------------------------------
+
+_PREF_SESSIONS = {"premarket", "regular", "after_hours"}
+_HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _validate_preferences(raw) -> dict | str:
+    from tradebot.push.store import DEFAULT_PREFERENCES
+
+    if raw is None:
+        return dict(DEFAULT_PREFERENCES)
+    if not isinstance(raw, dict):
+        return "preferences must be an object"
+    prefs = dict(DEFAULT_PREFERENCES)
+    for key in ("watchlistPriority", "radarDiscoveries", "corrections", "operational", "paused"):
+        if key in raw:
+            if not isinstance(raw[key], bool):
+                return f"{key} must be a boolean"
+            prefs[key] = raw[key]
+    if "sessions" in raw:
+        sessions = raw["sessions"]
+        if not isinstance(sessions, list) or any(s not in _PREF_SESSIONS for s in sessions) or len(set(sessions)) != len(sessions):
+            return "sessions must be a list of unique premarket/regular/after_hours"
+        prefs["sessions"] = list(sessions)
+    for key in ("quietStartLocal", "quietEndLocal"):
+        if key in raw:
+            v = raw[key]
+            if v is not None and (not isinstance(v, str) or not _HHMM.match(v)):
+                return f"{key} must be HH:MM or null"
+            prefs[key] = v
+    return prefs
+
+
+def _device_json(device) -> dict:
+    prefs = {k: device.preferences.get(k) for k in ("watchlistPriority", "radarDiscoveries", "corrections", "operational", "sessions", "paused", "quietStartLocal", "quietEndLocal")}
+    return {
+        "id": device.id,
+        "installationId": device.installation_id,
+        "active": device.active,
+        "preferences": prefs,
+        "updatedAt": _iso(device.updated_at),
+    }
+
+
 @bp.post("/devices")
+@login_required
 def devices_register():
-    return _not_implemented("Push notification registration")
+    from tradebot.push import store as push_store
+
+    body = _body()
+    platform = body.get("platform")
+    environment = body.get("apnsEnvironment")
+    token = str(body.get("token", "")).strip()
+    installation_id = str(body.get("installationId", "")).strip()
+    if platform != "ios":
+        return _error("invalid_request", "platform must be ios.", 400)
+    if environment not in ("sandbox", "production"):
+        return _error("invalid_request", "apnsEnvironment must be sandbox or production.", 400)
+    if not re.fullmatch(r"[0-9a-fA-F]{32,512}", token):
+        return _error("invalid_request", "token must be the hex APNs device token.", 400)
+    try:
+        uuid.UUID(installation_id)
+    except ValueError:
+        return _error("invalid_request", "installationId must be a UUID.", 400)
+    prefs = _validate_preferences(body.get("preferences"))
+    if isinstance(prefs, str):
+        return _error("invalid_request", prefs, 400)
+    push_store.ensure_schema(current_app.users_conn)
+    device = push_store.register_device(
+        current_app.users_conn, account_id=g.v1_account.id, installation_id=installation_id, platform=platform,
+        apns_environment=environment, token=token.lower(), app_version=str(body.get("appVersion", ""))[:40] or None,
+        locale=str(body.get("locale", ""))[:20] or None, time_zone=str(body.get("timeZone", ""))[:64] or None,
+        preferences=prefs, idempotency_key=request.headers.get("Idempotency-Key"), now=_now(),
+    )
+    return jsonify(_device_json(device))
 
 
 @bp.delete("/devices/<device_id>")
+@login_required
 def devices_unregister(device_id: str):
-    return _not_implemented("Push notification registration")
+    from tradebot.push import store as push_store
+
+    push_store.ensure_schema(current_app.users_conn)
+    push_store.unregister_device(current_app.users_conn, device_id, g.v1_account.id, now=_now())
+    # Idempotent: an unknown or already-revoked id is still "gone".
+    return Response(status=204)
 
 
 @bp.post("/account/export")

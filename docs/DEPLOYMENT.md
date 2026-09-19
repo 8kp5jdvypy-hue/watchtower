@@ -135,6 +135,18 @@ Optional price-feed credential (`tradebot/vendors/finnhub.py`):
   `X-Finnhub-Token` header, never in a URL. Owner creates the key at
   finnhub.io; see `docs/price-feed-cost-note-2026-09.md`.
 
+Optional push credentials (`tradebot/push/apns.py`, M2 of the Telegram
+sunset plan). Absent = the `apns-worker` container idles healthy with
+`status: disabled` and nothing else changes:
+
+- `APNS_KEY_P8_B64` — the Apple APNs auth key (`.p8`) contents, base64 on
+  one line: `base64 -i AuthKey_XXXXXXXXXX.p8 | tr -d '\n'`. Paste it into
+  `.env` through the console hidden-input method used for
+  `FINNHUB_API_KEY`; never commit it.
+- `APNS_KEY_ID` — the 10-character key id shown next to the key.
+- `APNS_TEAM_ID` — `684SV6G7DV` (perch-mobile-mvp/app.json).
+- `APNS_TOPIC` — optional; defaults to `com.perchmarkets.ios`.
+
 Optional shadow-evidence credentials:
 
 - `POSTMARKET_REFERENCE_PROVIDER` — independent historical provider selected

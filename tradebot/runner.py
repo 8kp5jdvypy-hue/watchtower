@@ -2507,7 +2507,18 @@ def main() -> None:
 
             users_conn = users_connect()
             session_date_fn = lambda now: now.astimezone(ET).date()
-            subscriber_hook = make_subscriber_hook(users_conn, session_date_fn, WATCHLIST)
+            # M2 (docs/telegram-sunset-plan-2026-09.md): every HIGH alert
+            # also fans out to registered iPhones through the push outbox,
+            # composed so neither channel can break the other. The push
+            # hook only enqueues; tradebot.push.worker talks to Apple.
+            from tradebot.push import store as push_store
+            from tradebot.push.delivery import compose_hooks, make_push_subscriber_hook
+
+            push_store.ensure_schema(users_conn)
+            subscriber_hook = compose_hooks(
+                make_subscriber_hook(users_conn, session_date_fn, WATCHLIST),
+                make_push_subscriber_hook(users_conn),
+            )
             medium_fanout_fn = make_medium_fanout_fn(users_conn, session_date_fn, WATCHLIST)
         run_live(alerter, subscriber_hook, medium_fanout_fn, enable_broad_scan=args.broad_scan, db_path=args.db_path)
 

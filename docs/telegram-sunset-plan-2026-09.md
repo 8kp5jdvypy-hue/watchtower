@@ -77,6 +77,16 @@ for browsers.*
   ID, Team ID) placed in `/opt/perch/.env` via the console, same
   hidden-input method as `FINNHUB_API_KEY`. Nothing here creates it.
 
+*M2 status 2026-09-19: implemented on branch `feature/m2-apns-push` —
+`tradebot/push/{store,apns,delivery,worker}.py`, `/v1/devices` live,
+`apns-worker` compose service (idles healthy until the APNS_* secrets
+exist), runner composes the push hook with Telegram's so both channels
+see every HIGH alert under the same alert_id. Owner-side to activate:
+create an APNs auth key in the Apple developer portal (Keys → +, enable
+APNs), then paste `APNS_KEY_P8_B64` / `APNS_KEY_ID` into the VPS `.env`
+and `docker compose up -d`. `scripts/push_parity_report.py` is M3's
+gate.*
+
 **M3 — parity gate.** Ten live sessions where every Telegram-delivered
 HIGH alert also landed via APNs on the owner's device within 60 s,
 zero APNs-only failures, recorded per alert in the journal. TestFlight
