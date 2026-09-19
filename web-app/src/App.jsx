@@ -3,7 +3,7 @@ import { api } from './api'
 import { track } from './analytics'
 import { authFailureState } from './authSession'
 import { SESSION_LABEL, useMarketClock } from './hooks/useMarketClock'
-import PerchMark from './components/PerchMark'
+import PerchMark, { PerchLockup } from './components/PerchMark'
 import AmbientField from './components/AmbientField'
 import Login from './components/Login'
 import VerifyMagicLink from './components/VerifyMagicLink'
@@ -147,8 +147,7 @@ function App() {
       <AmbientField />
       <div className="topbar">
         <div className="brand">
-          <PerchMark size={20} state={clock.session === 'open' ? 'scanning' : 'idle'} />
-          <span>PERCH</span>
+          <PerchLockup size={20} state={clock.session === 'open' ? 'signal' : 'idle'} />
           <span
             className={`brand-live brand-live-${clock.session}`}
             title={`${SESSION_LABEL[clock.session]}${clock.time ? ` — ${clock.time} ET` : ''}`}

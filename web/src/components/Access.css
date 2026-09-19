@@ -1,0 +1,3 @@
+.access { padding: 7rem 0 8rem; border-top: 1px solid var(--line); }
+.access-actions { display: flex; flex-wrap: wrap; gap: 0.9rem; }
+@media (max-width: 760px) { .access { padding: 5rem 0 6rem; } }

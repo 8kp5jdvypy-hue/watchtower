@@ -143,3 +143,14 @@
 @media (max-width: 640px) {
   .view { padding: 1.5rem 1.1rem 2.5rem; }
 }
+
+/* The observation rail — the product's signature in the app (DESIGN.md)
+   and on perchmarkets.com: one vertical scale connects the session's
+   observations; a lit dot marks each card, cyan for HIGH, hollow for
+   MEDIUM. Amber is reserved for attention states, never for tier. */
+.observation-rail { position: relative; padding-left: 1.6rem; }
+.observation-rail::before { content: ''; position: absolute; left: 0.45rem; top: 0.9rem; bottom: 0.9rem; width: 1px; background: var(--line); }
+.observation-rail > .signal-card { position: relative; }
+.observation-rail > .signal-card::before { content: ''; position: absolute; left: -1.6rem; top: 1.35rem; width: 9px; height: 9px; border-radius: 50%; margin-left: 0.45rem; transform: translateX(-50%); background: var(--bg); border: 1px solid var(--cyan); }
+.observation-rail > .signal-card.is-high::before { background: var(--cyan); box-shadow: 0 0 10px 1px rgba(52,226,255,0.5); }
+@media (max-width: 760px) { .observation-rail { padding-left: 1.3rem; } .observation-rail > .signal-card::before { left: -1.3rem; } }

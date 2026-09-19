@@ -1,65 +1,60 @@
 import './PerchMark.css'
 
-// The Perch falcon mark: a single reusable component, every usage across
-// the site (nav, footer, hero texture source, mid-page dive moment, boot
-// sequence, favicon) draws from this same polygon data so the identity is
-// actually consistent. Deliberately geometric rather than illustrative:
-// straight-edged facets reading as an aerodynamic, diving falcon rather
-// than a literal bird illustration -- sleek and abstract, and inherently
-// wings-spread, which is what makes it work for both a still hero mark
-// and an actual diving motion at the mid-page moment.
-//
-// This is placeholder-grade geometry, not final brand artwork -- see
-// BRAND.md for the plan to replace it with a professionally designed
-// mark without touching every call site.
-//
-// variant: 'ink' (default, near-white -- for dark backgrounds) | 'cyan' |
-// 'dark' (near-black -- for light backgrounds)
-// accent: show the single thin cyan leading-edge line (default true).
-// Silhouette is intentionally ~90% of the mark; the accent is the other 10%.
-export const FALCON_PATHS = {
-  farWing: '-8,-38 -62,-72 -18,-18',
-  nearWing: '10,-22 108,-46 30,26 4,-4',
-  body: '46,-64 14,-16 -32,58 -2,-30',
-  tail: '-32,58 -58,86 -20,72',
-  accent: '10,-22 108,-46',
+/*
+ * The Perch mark — "P on the rail" (web/DESIGN-DIRECTION-2026-09.md).
+ *
+ * A bold geometric P whose stem is the observation rail: faint ruled
+ * ticks up its left edge, and one cyan flag under the bowl — the thing
+ * Perch noticed. At 16px the ticks vanish and the P + flag still holds;
+ * at 512px the ticks read as a field instrument's scale. The flag is the
+ * same gesture as the live-status dot and the "closer look" marker in
+ * the product, so mark and product share one device.
+ *
+ * Geometry lives here once. web-app/src/components/PerchMark.jsx is a
+ * byte-identical copy (keep them in sync), and the iOS app carries the
+ * same paths in perch-mobile-mvp/src/components/PerchMark.tsx.
+ *
+ * States (PERCH_MARK_STATES) are CSS hooks on the flag and ticks — see
+ * PerchMark.css.
+ */
+
+export const PERCH_MARK_VIEWBOX = '0 0 100 100'
+
+// Stem (the rail) and bowl of the P as one even-odd path; the flag; the
+// rail's ruled ticks.
+export const MARK_PATHS = {
+  letter:
+    'M27 10 H52 A22 22 0 0 1 52 54 H38 V89 A3 3 0 0 1 35 92 H27 A3 3 0 0 1 24 89 V13 A3 3 0 0 1 27 10 Z ' +
+    'M38 22 V42 H50 A10 10 0 0 0 50 22 Z',
+  flag: 'M38 62 H62 A4 4 0 0 1 62 70 H38 Z',
+  ticks: [22, 34, 46, 58, 70, 82],
 }
-export const PERCH_MARK_VIEWBOX = '-72 -82 190 178'
 
 const FILL = { ink: 'var(--ink)', cyan: 'var(--cyan)', dark: 'var(--bg)' }
 
-// idle is the current, unchanged look. The other four exist so a future
-// signal-aware placement (the alert experience, a loading state) can ask
-// the mark to reflect what's happening without any caller needing to
-// know how -- see the state-hook comment in PerchMark.css for exactly
-// what each one does. Nothing in the app passes anything but the default
-// today; this is architecture, not a new animation.
 export const PERCH_MARK_STATES = ['idle', 'scanning', 'signal', 'confirmed', 'alert']
 
-// The bare glyph -- just the four polygons + optional accent, no <svg>
-// wrapper. Exists so call sites that need their own outer <svg> (a GSAP
-// animation ref, a rotation transform for the mid-page dive) can still
-// share the exact same polygon markup instead of hand-copying it, which
-// is how the three implementations (this file, BootSequence, MarketField)
-// drifted into independent copies in the first place. Standalone-icon
-// usage should go through the default PerchMark export below, not this.
-//
-// fill defaults to 'currentColor' so most callers can just set CSS
-// `color`. Pass fill={null} to omit the attribute entirely and let fill
-// inherit from an ancestor instead (MarketField's dive kestrel sets
-// fill/stroke on its own outer <svg> in CSS and relies on this).
-export function PerchMarkGlyph({ fill = 'currentColor', accent = true }) {
+/** Bare glyph for callers that own their <svg> (animation refs, transforms). */
+export function PerchMarkGlyph({ fill = 'currentColor', accent = true, ticks = true }) {
   return (
-    <g fill={fill ?? undefined}>
-      <polygon opacity="0.82" points={FALCON_PATHS.farWing} />
-      <polygon points={FALCON_PATHS.nearWing} />
-      <polygon points={FALCON_PATHS.body} />
-      <polygon points={FALCON_PATHS.tail} />
-      {accent && <polyline className="pm-accent" points={FALCON_PATHS.accent} fill="none" />}
+    <g>
+      {ticks && (
+        <g className="pm-ticks" stroke={fill ?? undefined} strokeWidth="2" strokeLinecap="round" opacity="0.38">
+          {MARK_PATHS.ticks.map((y) => (
+            <line key={y} x1="14" y1={y} x2="20" y2={y} />
+          ))}
+        </g>
+      )}
+      <path className="pm-letter" d={MARK_PATHS.letter} fill={fill ?? undefined} fillRule="evenodd" />
+      <path className="pm-flag" d={MARK_PATHS.flag} fill={accent ? 'var(--cyan)' : fill ?? undefined} />
     </g>
   )
 }
 
+/**
+ * Standalone icon. `variant` picks the letter colour; the flag is cyan
+ * unless `accent` is false (the one-colour edition: app icon, print).
+ */
 export default function PerchMark({ size = 26, className = '', variant = 'ink', accent = true, state = 'idle' }) {
   const fill = FILL[variant] || FILL.ink
   const safeState = PERCH_MARK_STATES.includes(state) ? state : 'idle'
@@ -72,7 +67,17 @@ export default function PerchMark({ size = 26, className = '', variant = 'ink', 
       data-state={safeState}
       aria-hidden="true"
     >
-      <PerchMarkGlyph fill={fill} accent={accent && variant !== 'cyan'} />
+      <PerchMarkGlyph fill={fill} accent={accent && variant !== 'cyan'} ticks={size >= 40} />
     </svg>
+  )
+}
+
+/** Mark + wordmark. Wordmark is Space Grotesk 600, +0.18em — the app header. */
+export function PerchLockup({ size = 22, className = '', state = 'idle' }) {
+  return (
+    <span className={`perch-lockup ${className}`}>
+      <PerchMark size={size} state={state} />
+      <span className="perch-wordmark">Perch</span>
+    </span>
   )
 }

@@ -93,6 +93,9 @@ export const api = {
   // Restricted server-side to the account's own watchlist -- an empty
   // or all-outside-watchlist symbols list just returns {quotes: {}}.
   quotes: (symbols) => request(`/quotes?symbols=${symbols.map(encodeURIComponent).join(',')}`),
+  // Last prices from the free-source price feed (Coinbase / Kraken / Alpaca
+  // IEX / Finnhub) for the fixed instrument set; per-symbol stale flag.
+  prices: () => request('/prices'),
 
   // Trade Journal (Phase 3) -- pnl_cents is always integer cents, signed;
   // the dollars<->cents conversion lives in journalFormat.js, never here.
