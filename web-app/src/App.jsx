@@ -4,7 +4,6 @@ import { track } from './analytics'
 import { authFailureState } from './authSession'
 import { SESSION_LABEL, useMarketClock } from './hooks/useMarketClock'
 import PerchMark, { PerchLockup } from './components/PerchMark'
-import AmbientField from './components/AmbientField'
 import Login from './components/Login'
 import VerifyMagicLink from './components/VerifyMagicLink'
 import Today from './components/Today'
@@ -144,7 +143,6 @@ function App() {
 
   return (
     <div className="app-shell">
-      <AmbientField />
       <div className="topbar">
         <div className="brand">
           <PerchLockup size={20} state={clock.session === 'open' ? 'signal' : 'idle'} />

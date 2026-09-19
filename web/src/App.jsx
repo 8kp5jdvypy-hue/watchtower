@@ -35,7 +35,6 @@ export default function App() {
     <ErrorBoundary>
       <a className="skip-link" href="#main">Skip to content</a>
       <Nav status={status} />
-      <SessionRail alerts={session.alerts} sessionLabel={sessionLabel} />
       <main id="main" className="page">
         <Hero status={status} record={record} />
         <Anatomy record={record} />
@@ -46,6 +45,9 @@ export default function App() {
         <Access />
         <Footer status={status} />
       </main>
+      {/* After <main> on purpose: it is position:fixed, so DOM order only
+          decides keyboard order, and content should come before the rail. */}
+      <SessionRail alerts={session.alerts} sessionLabel={sessionLabel} />
     </ErrorBoundary>
   )
 }

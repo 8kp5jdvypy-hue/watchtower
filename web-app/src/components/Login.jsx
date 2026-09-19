@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { track } from '../analytics'
 import PerchMark from './PerchMark'
-import AmbientField from './AmbientField'
 import './Login.css'
 
 // There is exactly one real mechanism here: email in, magic link out.
@@ -77,7 +76,6 @@ export default function Login() {
 
   return (
     <div className="login-shell">
-      <AmbientField />
       <div className="login-card">
         <PerchMark size={30} className="login-mark" state={status === 'sending' ? 'scanning' : status === 'sent' ? 'confirmed' : 'idle'} />
 
@@ -95,7 +93,10 @@ export default function Login() {
             <h1>{copy.eyebrow}</h1>
             <p>{copy.body}</p>
             <form className="login-form" onSubmit={submit} noValidate>
+              <label htmlFor="login-email" className="sr-only">Email address</label>
               <input
+                id="login-email"
+                name="email"
                 ref={inputRef}
                 type="email"
                 inputMode="email"

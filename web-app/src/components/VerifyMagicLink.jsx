@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api'
 import PerchMark from './PerchMark'
-import AmbientField from './AmbientField'
 import './Login.css'
 
 // A bare GET here (the old design) could authenticate a browser as
@@ -30,7 +29,6 @@ export default function VerifyMagicLink({ token, onVerified }) {
 
   return (
     <div className="login-shell">
-      <AmbientField />
       <div className="login-card">
         <PerchMark size={30} className="login-mark" state={status === 'verifying' ? 'scanning' : 'idle'} />
         <h1>CONFIRM SIGN-IN</h1>

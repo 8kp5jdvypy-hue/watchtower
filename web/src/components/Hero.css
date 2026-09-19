@@ -5,8 +5,9 @@
 .hero-title-accent { color: var(--cyan); }
 .hero-lede { max-width: 56ch; font-size: var(--step-1); line-height: 1.5; color: var(--ink-dim); margin: 0 0 2.2rem; }
 .hero-actions { display: flex; flex-wrap: wrap; gap: 0.9rem; }
-.btn { display: inline-flex; align-items: center; gap: 0.6em; font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; text-decoration: none; padding: 0.95rem 1.3rem; border-radius: 4px; border: 1px solid transparent; }
+.btn { display: inline-flex; align-items: center; gap: 0.6em; font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; text-decoration: none; padding: 0.95rem 1.3rem; border-radius: var(--radius-control); border: 1px solid transparent; }
 .btn-primary { background: var(--cyan); color: var(--bg); font-weight: 500; }
-.btn-primary:hover { background: #7deeff; }
-.btn-ghost { border-color: var(--line-strong, #2b3442); color: var(--ink); }
+.btn-primary:hover { background: var(--cyan-hover); }
+.btn-ghost { border-color: var(--line-strong); color: var(--ink); }
 .btn-ghost:hover { border-color: var(--ink-dim); }
+.hero-fine { margin: 1.1rem 0 0; font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.06em; color: var(--ink-faint); }
