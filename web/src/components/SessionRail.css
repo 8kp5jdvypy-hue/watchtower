@@ -16,13 +16,13 @@
 .rail-tick span { position: absolute; right: calc(100% + 0.55rem); top: 50%; transform: translateY(-50%); font-size: 0.6rem; color: var(--ink-faint); letter-spacing: 0.04em; white-space: nowrap; }
 .rail-tick-major { width: 16px; background: var(--ink-dim); }
 .rail-tick-major span { color: var(--ink-dim); }
-.rail-pin { position: absolute; left: 0; transform: translate(-50%, -50%); }
+.rail-pin { position: absolute; left: 0; transform: translate(-50%, -50%); padding: 9px; margin: -9px; cursor: default; }  /* 7px dot, 25px hit area (WCAG 2.5.8) */
 .rail-pin-dot { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--bg); border: 1px solid var(--ink-faint); transition: background .35s ease, border-color .35s ease, box-shadow .35s ease; }
-.rail-pin.is-lit .rail-pin-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 10px 1px rgba(52,226,255,0.55); }
+.rail-pin.is-lit .rail-pin-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: var(--glow-cyan); }
 .rail-pin.is-lit.pin-reversed .rail-pin-dot { background: var(--bg); border-color: var(--cyan); box-shadow: none; }
 .rail-pin.is-lit.pin-pending .rail-pin-dot { background: var(--amber); border-color: var(--amber); box-shadow: 0 0 10px 1px rgba(255,180,84,0.45); }
 .rail-pin-tip {
-  position: absolute; left: 14px; top: 50%; transform: translateY(-50%) translateX(-6px);
+  position: absolute; left: 22px; top: 50%; transform: translateY(-50%) translateX(-6px);
   width: max-content; max-width: 280px; padding: 0.5rem 0.65rem;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
   font-size: 0.66rem; line-height: 1.45; color: var(--ink); opacity: 0; pointer-events: none;

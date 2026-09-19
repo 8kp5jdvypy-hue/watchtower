@@ -34,6 +34,7 @@ export default function Hero({ status, record }) {
         <a className="btn btn-primary" href={withRef(SIGNUP_URL)} onClick={() => track('signup_cta_click', { source: 'hero' })}>Get access</a>
         <a className="btn btn-ghost" href="#session">Walk through today's session</a>
       </div>
+      <p className="hero-fine">Free while Perch is in beta. An email link signs you in; no card, no password.</p>
     </section>
   )
 }

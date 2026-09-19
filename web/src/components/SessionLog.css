@@ -7,7 +7,7 @@
 .log-rail::before { content: ''; position: absolute; left: 50%; top: -0.9rem; bottom: -0.9rem; width: 1px; background: var(--line); }
 .log-row:first-child .log-rail::before { top: 0.5rem; } .log-row:last-child .log-rail::before { bottom: auto; height: 0.5rem; }
 .log-dot { position: absolute; left: 50%; top: 0.45rem; width: 9px; height: 9px; border-radius: 50%; transform: translateX(-50%); background: var(--bg); border: 1px solid var(--ink-faint); transition: background .35s ease, box-shadow .35s ease, border-color .35s ease; }
-.is-lit.row-continued .log-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 12px 1px rgba(52,226,255,0.5); }
+.is-lit.row-continued .log-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: var(--glow-cyan); }
 .is-lit.row-reversed .log-dot { border-color: var(--cyan); }
 .is-lit.row-pending .log-dot { background: var(--amber); border-color: var(--amber); }
 .log-body { display: grid; gap: 0.2rem; }

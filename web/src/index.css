@@ -60,6 +60,11 @@
   --rail-w: 7.25rem;
   --nav-h: 4.25rem;
   --line-strong: #2b3442;
+  --cyan-hover: #7deeff;
+  --glow-cyan: 0 0 10px 1px rgba(52, 226, 255, 0.55);
+  --radius-control: 4px;
+  --radius-card: 8px;
+  --radius-panel: 10px;
 
   /* The page's deliberate second black: manifesto, pricing, final CTA
      and footer drop below --bg for a deeper act break. Tokenized so the
