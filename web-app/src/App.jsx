@@ -13,6 +13,7 @@ import Journal from './components/Journal'
 import Performance from './components/Performance'
 import Activity from './components/Activity'
 import Settings from './components/Settings'
+import OpenInApp, { isAppLinkPath } from './components/OpenInApp'
 import './components/PerchMark.css'
 import './components/AppShell.css'
 
@@ -117,6 +118,12 @@ function App() {
   // flash before it. Skipped once `account` actually resolves truthy
   // (an already-valid session hit this URL with a stale token attached)
   // so a real session is never held hostage behind a dead link.
+  // The iPhone app's universal links land here when iOS doesn't open the
+  // app (no app installed, desktop browser). Rendered before any session
+  // logic: these URLs carry an app token in the fragment, not a web one.
+  if (isAppLinkPath(window.location.pathname)) {
+    return <OpenInApp pathname={window.location.pathname} hash={window.location.hash} />
+  }
   if (magicLinkToken && !account) {
     return <VerifyMagicLink token={magicLinkToken} onVerified={handleVerified} />
   }

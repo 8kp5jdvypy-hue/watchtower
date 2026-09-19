@@ -43,3 +43,11 @@
 
 /fonts/*
   Cache-Control: public, max-age=31536000, immutable
+
+# Apple's CDN fetches this to enable universal links into the iPhone app
+# (perch-mobile-mvp/app.json associatedDomains). It must be JSON, served
+# at exactly this path with no redirect; the file has no extension so the
+# platform would otherwise guess a binary type.
+/.well-known/apple-app-site-association
+  Content-Type: application/json
+  Cache-Control: public, max-age=3600
