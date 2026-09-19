@@ -1,0 +1,23 @@
+.log { padding: 7rem 0; border-top: 1px solid var(--line); }
+.log-list { list-style: none; margin: 0; padding: 0; }
+.log-row { display: grid; grid-template-columns: 4.2rem 1.5rem 1fr; gap: 0 1rem; align-items: start; padding: 0.9rem 0; opacity: 0.32; transform: translateY(6px); transition: opacity .5s ease, transform .5s ease; }
+.log-row.is-lit { opacity: 1; transform: none; }
+.log-time { font-family: var(--mono); font-size: 0.8rem; color: var(--ink-dim); padding-top: 0.2rem; }
+.log-rail { position: relative; align-self: stretch; }
+.log-rail::before { content: ''; position: absolute; left: 50%; top: -0.9rem; bottom: -0.9rem; width: 1px; background: var(--line); }
+.log-row:first-child .log-rail::before { top: 0.5rem; } .log-row:last-child .log-rail::before { bottom: auto; height: 0.5rem; }
+.log-dot { position: absolute; left: 50%; top: 0.45rem; width: 9px; height: 9px; border-radius: 50%; transform: translateX(-50%); background: var(--bg); border: 1px solid var(--ink-faint); transition: background .35s ease, box-shadow .35s ease, border-color .35s ease; }
+.is-lit.row-continued .log-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 12px 1px rgba(52,226,255,0.5); }
+.is-lit.row-reversed .log-dot { border-color: var(--cyan); }
+.is-lit.row-pending .log-dot { background: var(--amber); border-color: var(--amber); }
+.log-body { display: grid; gap: 0.2rem; }
+.log-head { font-family: var(--mono); font-size: 0.8rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim); }
+.log-head b { color: var(--ink); font-weight: 500; font-size: 0.95rem; letter-spacing: 0.02em; }
+.log-origin { margin-left: 0.5em; } .log-trend { margin-left: 0.5em; }
+.trend-up::before { content: '↑ '; } .trend-down::before { content: '↓ '; }
+.log-headline { font-family: var(--mono); color: var(--ink); font-size: 0.95rem; }
+.log-outcome { font-family: var(--mono); font-size: 0.78rem; color: var(--ink-dim); }
+.row-continued .log-outcome { color: var(--cyan); }
+.row-pending .log-outcome { color: var(--amber); }
+@media (prefers-reduced-motion: reduce) { .log-row { transition: none; transform: none; } }
+@media (max-width: 760px) { .log { padding: 5rem 0; } .log-row { grid-template-columns: 3.2rem 1.2rem 1fr; gap: 0 0.6rem; } }

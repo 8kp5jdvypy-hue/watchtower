@@ -1,0 +1,8 @@
+.theapp { padding: 7rem 0; border-top: 1px solid var(--line); }
+.theapp-screens { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+.theapp-screens figure { margin: 0; }
+.theapp-screens img { display: block; width: 100%; height: auto; border-radius: 22px; border: 1px solid var(--line); background: var(--bg-1); }
+.theapp-screens figcaption { margin-top: 0.75rem; font-family: var(--mono); font-size: 0.7rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim); }
+.theapp-note { margin: 2rem 0 0; color: var(--ink-dim); font-size: 0.95rem; }
+.theapp-note a { color: var(--ink); }
+@media (max-width: 760px) { .theapp { padding: 5rem 0; } .theapp-screens { grid-template-columns: 1fr; gap: 2rem; max-width: 380px; } }

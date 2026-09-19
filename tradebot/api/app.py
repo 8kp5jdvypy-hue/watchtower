@@ -129,6 +129,7 @@ PERFORMANCE_CACHE_TTL_SECONDS = 60
 # different symbol sets shouldn't multiply real Alpaca calls, but a
 # quote genuinely goes stale in seconds, not minutes.
 QUOTE_CACHE_TTL_SECONDS = 10
+PUBLIC_V1_PATHS = frozenset({"/v1/status", "/v1/methodology"})
 
 # How many magic-link requests one email address / one IP can make
 # before being rate-limited, and the same for the two public write
@@ -285,7 +286,10 @@ def create_app(users_db_path=None, journal_db_path=None) -> Flask:
         # allowed_origins keeps meaning exactly one thing, and this
         # wildcard can never leak onto a route that does read the
         # session. Scoped to this one prefix, not app-wide.
-        if request.path.startswith("/public/"):
+        # /v1/status and /v1/methodology are the /v1 surface's two
+        # unauthenticated routes (bearer-only API, no cookie ever read);
+        # the marketing site's live status line reads the first.
+        if request.path.startswith("/public/") or request.path in PUBLIC_V1_PATHS:
             response.headers["Access-Control-Allow-Origin"] = "*"
             response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
             return response

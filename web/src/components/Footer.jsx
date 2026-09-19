@@ -1,38 +1,26 @@
-import PerchMark from './PerchMark'
-import SignalGlyph from './SignalGlyph'
-import { SIGNUP_URL, LOGIN_URL } from '../config'
-import { track, withRef } from '../analytics'
+import { PerchLockup } from './PerchMark'
+import { MARKET_STATE_LABEL } from '../data/perchData'
 import './Footer.css'
-import './PerchMark.css'
 
-export default function Footer() {
+export default function Footer({ status }) {
+  const state = status?.market?.state
   return (
-    <footer className="site-footer">
-      <div className="wrap ft-inner">
-        <div className="ft-brand">
-          <a href="#top" className="ft-mark-row" data-cursor="link">
-            <PerchMark size={20} />
-            <span>PERCH</span>
-          </a>
-          <p>Market intelligence for everyone.</p>
-          <SignalGlyph className="ft-glyph" />
-        </div>
-        <nav className="ft-nav">
-          <a href="#field" data-cursor="link">What it watches</a>
-          <a href="#coverage" data-cursor="link">Coverage</a>
-          <a href="#interface" data-cursor="link">The interface</a>
-          <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'footer' })}>Log in</a>
-          <a href={withRef(SIGNUP_URL)} data-cursor="link" onClick={() => track('signup_cta_click', { source: 'footer' })}>Sign up</a>
-        </nav>
+    <footer className="footer" data-session-minutes="1200">
+      <div className="footer-row">
+        <PerchLockup size={20} />
+        <span className="footer-status">
+          <span className={`dot ${status ? '' : 'dot-off'}`} />
+          {status ? `${MARKET_STATE_LABEL[state] || state} · scanner ${status.sources?.[0]?.status || 'unknown'}` : 'status unavailable'}
+        </span>
       </div>
-      <div className="wrap ft-base">
-        <p className="ft-disclaimer">
-          Perch surfaces information. It does not predict market movement, provide financial advice,
-          or guarantee any result. It never places trades and never has access to your brokerage account.
-          Nothing here is investment advice — decisions, and their consequences, are yours.
-        </p>
-        <span>© {new Date().getFullYear()} Perch.</span>
+      <div className="footer-row footer-links">
+        <a href="/record.html">Record</a>
+        <a href="https://app.perchmarkets.com/">Dashboard</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/terms">Terms</a>
+        <a href="mailto:hello@perchmarkets.com">hello@perchmarkets.com</a>
       </div>
+      <p className="footer-fine">Perch Markets. Market data by Alpaca (IEX). Research only — nothing here is a recommendation to buy or sell any security. Perch never places orders and has no brokerage access.</p>
     </footer>
   )
 }

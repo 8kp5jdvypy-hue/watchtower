@@ -57,6 +57,9 @@
   --step-6: clamp(4rem, 2rem + 8vw, 9rem);
 
   --edge: clamp(1.25rem, 5vw, 5rem);
+  --rail-w: 7.25rem;
+  --nav-h: 4.25rem;
+  --line-strong: #2b3442;
 
   /* The page's deliberate second black: manifesto, pricing, final CTA
      and footer drop below --bg for a deeper act break. Tokenized so the
@@ -137,3 +140,8 @@ button { font: inherit; color: inherit; }
     scroll-behavior: auto !important;
   }
 }
+
+/* The Watch Log page: content sits to the right of the fixed session
+   rail on wide screens and takes the full width beneath it. */
+.page { padding-left: calc(var(--rail-w) + var(--edge)); padding-right: var(--edge); max-width: calc(1180px + var(--rail-w) + 2 * var(--edge)); }
+@media (max-width: 960px) { .page { padding-left: var(--edge); } }

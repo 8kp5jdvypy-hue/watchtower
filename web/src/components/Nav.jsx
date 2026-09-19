@@ -1,124 +1,53 @@
-import { useEffect, useRef, useState } from 'react'
-import PerchMark from './PerchMark'
-import { SIGNUP_URL, LOGIN_URL } from '../config'
+import { useEffect, useState } from 'react'
+import { PerchLockup } from './PerchMark'
+import { LOGIN_URL, SIGNUP_URL } from '../config'
 import { track, withRef } from '../analytics'
 import './Nav.css'
-import './PerchMark.css'
 
 const LINKS = [
-  { href: '#field', label: 'What it watches' },
-  { href: '#interface', label: 'Interface' },
-  { href: '#coverage', label: 'Markets' },
-  { href: '#value', label: 'Why Perch' },
+  { href: '#reads', label: 'How it reads' },
+  { href: '#session', label: 'The session' },
+  { href: '#record', label: 'Record' },
+  { href: '#app', label: 'iPhone' },
 ]
 
-export default function Nav() {
-  const [scrolled, setScrolled] = useState(false)
-  const [menuOpen, setMenuOpen] = useState(false)
-  const barRef = useRef(null)
-
+export default function Nav({ status }) {
+  const [open, setOpen] = useState(false)
+  // The mark blooms once on arrival, then shows 'signal' while the
+  // scanner is live in an open session -- the same flag the product uses.
+  const [arrived, setArrived] = useState(false)
+  useEffect(() => { const t = setTimeout(() => setArrived(true), 900); return () => clearTimeout(t) }, [])
+  const live = status?.market?.state === 'open' && status?.sources?.[0]?.status === 'operational'
+  const markState = !arrived ? 'confirmed' : live ? 'signal' : 'idle'
   useEffect(() => {
-    let raf
-    const onScroll = () => {
-      if (raf) return
-      raf = requestAnimationFrame(() => {
-        raf = null
-        setScrolled(window.scrollY > 40)
-        const doc = document.documentElement
-        const max = doc.scrollHeight - doc.clientHeight
-        if (barRef.current) {
-          barRef.current.style.transform = `scaleX(${max > 0 ? window.scrollY / max : 0})`
-        }
-      })
-    }
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => {
-      window.removeEventListener('scroll', onScroll)
-      // Without this, a scroll event that schedules the rAF right before
-      // unmount still fires after, touching a possibly-stale barRef and
-      // calling setState on an unmounted component.
-      if (raf) cancelAnimationFrame(raf)
-    }
-  }, [])
-
-  // Lock background scroll while the mobile menu is open, and let Escape
-  // close it -- small things a "premium" menu is expected to get right.
-  useEffect(() => {
-    if (!menuOpen) return
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    const onKey = (e) => { if (e.key === 'Escape') setMenuOpen(false) }
+    if (!open) return undefined
+    const onKey = (e) => { if (e.key === 'Escape') setOpen(false) }
     window.addEventListener('keydown', onKey)
-    return () => {
-      document.body.style.overflow = prev
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [menuOpen])
-
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
   return (
-    <>
-      <div className="nav-progress" ref={barRef} aria-hidden="true" />
-      <nav className={`site-nav${scrolled ? ' is-scrolled' : ''}${menuOpen ? ' is-menu-open' : ''}`}>
-        <div className="wrap nav-inner">
-          <a href="#top" className="nav-brand" data-cursor="link" aria-label="Perch home" onClick={() => setMenuOpen(false)}>
-            <PerchMark size={20} />
-            <span>PERCH</span>
-            {/* The boot sequence's signal dot flies home into this one --
-                always mounted (no IntersectionObserver gating) so it's a
-                reliable handoff target, and it doubles as a quiet "still
-                watching" indicator for the rest of the session. */}
-            <span className="nav-live-dot" aria-hidden="true" />
-          </a>
-          <div className="nav-links">
-            <a href="#interface" data-cursor="link">Interface</a>
-            <a href={withRef(LOGIN_URL)} data-cursor="link" onClick={() => track('login_cta_click', { source: 'nav' })}>Log in</a>
-            <a href={withRef(SIGNUP_URL)} className="nav-cta" data-cursor="cta" onClick={() => track('signup_cta_click', { source: 'nav' })}>Sign up</a>
-          </div>
-          <button
-            className={`nav-burger${menuOpen ? ' is-open' : ''}`}
-            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
-            aria-expanded={menuOpen}
-            onClick={() => setMenuOpen((o) => !o)}
-          >
-            <span /><span /><span />
-          </button>
-        </div>
-      </nav>
-
-      <div className={`nav-mobile${menuOpen ? ' is-open' : ''}`} aria-hidden={!menuOpen}>
-        <div className="nav-mobile-links">
-          {LINKS.map((l, i) => (
-            <a
-              key={l.href}
-              href={l.href}
-              data-cursor="link"
-              style={{ transitionDelay: `${i * 0.05}s` }}
-              onClick={() => setMenuOpen(false)}
-              tabIndex={menuOpen ? 0 : -1}
-            >
-              {l.label}
-            </a>
-          ))}
-          <a
-            href={withRef(LOGIN_URL)}
-            data-cursor="link"
-            style={{ transitionDelay: `${LINKS.length * 0.05}s` }}
-            tabIndex={menuOpen ? 0 : -1}
-            onClick={() => { track('login_cta_click', { source: 'nav_mobile' }); setMenuOpen(false) }}
-          >
-            Log in
-          </a>
-        </div>
-        <a
-          href={withRef(SIGNUP_URL)}
-          className="nav-mobile-cta"
-          onClick={() => { track('signup_cta_click', { source: 'nav_mobile' }); setMenuOpen(false) }}
-          tabIndex={menuOpen ? 0 : -1}
-        >
-          Sign up
+    <header className="nav">
+      <div className="nav-inner">
+        <a href="#top" className="nav-brand" aria-label="Perch home" onClick={() => setOpen(false)}>
+          <PerchLockup size={22} state={markState} />
         </a>
+        <nav className="nav-links" aria-label="Sections">
+          {LINKS.map((l) => <a key={l.href} href={l.href}>{l.label}</a>)}
+        </nav>
+        <div className="nav-actions">
+          <a href={withRef(LOGIN_URL)} className="nav-login" onClick={() => track('login_cta_click', { source: 'nav' })}>Sign in</a>
+          <a href={withRef(SIGNUP_URL)} className="nav-cta" onClick={() => track('signup_cta_click', { source: 'nav' })}>Get access</a>
+        </div>
+        <button className="nav-burger" aria-expanded={open} aria-controls="nav-sheet" onClick={() => setOpen((v) => !v)}>
+          <span className="sr-only">{open ? 'Close menu' : 'Open menu'}</span>
+          <span aria-hidden="true" className={`nav-burger-lines ${open ? 'is-open' : ''}`} />
+        </button>
       </div>
-    </>
+      <div id="nav-sheet" className={`nav-sheet ${open ? 'is-open' : ''}`} hidden={!open}>
+        {LINKS.map((l) => <a key={l.href} href={l.href} onClick={() => setOpen(false)}>{l.label}</a>)}
+        <a href={withRef(LOGIN_URL)} onClick={() => track('login_cta_click', { source: 'nav_sheet' })}>Sign in</a>
+        <a href={withRef(SIGNUP_URL)} className="nav-cta" onClick={() => track('signup_cta_click', { source: 'nav_sheet' })}>Get access</a>
+      </div>
+    </header>
   )
 }

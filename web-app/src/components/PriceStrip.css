@@ -1,0 +1,9 @@
+.price-strip { display: flex; flex-wrap: wrap; gap: 0.4rem 1.4rem; margin: 0 0 1.4rem; padding: 0.7rem 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.04em; }
+.price-cell { display: inline-flex; align-items: center; gap: 0.5em; color: var(--ink-dim); }
+.price-cell b { font-weight: 500; color: var(--ink); letter-spacing: 0.06em; }
+.price-value { font-variant-numeric: tabular-nums; }
+.price-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px rgba(52,226,255,0.5); }
+.is-stale .price-dot { background: transparent; border: 1px solid var(--ink-faint); box-shadow: none; }
+.is-stale .price-value { color: var(--ink-faint); }
+.is-missing .price-dot { background: transparent; border: 1px solid var(--line-strong, #2b3442); box-shadow: none; }
+@media (max-width: 760px) { .price-strip { gap: 0.35rem 1rem; font-size: 0.7rem; } }

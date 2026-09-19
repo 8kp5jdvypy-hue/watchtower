@@ -7,6 +7,7 @@ import { useQuotes } from '../hooks/useQuotes'
 import { bySeverity } from '../signalOrder'
 import LiveStatus from './LiveStatus'
 import PerchMark from './PerchMark'
+import PriceStrip from './PriceStrip'
 import QuoteDataNotice from './QuoteDataNotice'
 import SignalCard from './SignalCard'
 import SignalDetail from './SignalDetail'
@@ -110,6 +111,7 @@ export default function Today({ account }) {
           {signalCount} thing{signalCount === 1 ? '' : 's'} worth knowing this session
         </p>
       )}
+      <PriceStrip />
 
       {showWelcome && (
         <div className="welcome-banner">
@@ -138,7 +140,7 @@ export default function Today({ account }) {
           <p>Nothing HIGH or MEDIUM tier has crossed the threshold yet today. That's not a bug — it's Perch deciding there's nothing worth interrupting you for.</p>
         </div>
       )}
-      {data && bySeverity(data.signals).map((signal) => (
+      {data && data.signals.length > 0 && <div className="observation-rail">{bySeverity(data.signals).map((signal) => (
         <SignalCard
           key={signal.id}
           signal={signal}
@@ -146,7 +148,7 @@ export default function Today({ account }) {
           onView={setOpenId}
           arrived={arrivedIds.has(signal.id)}
         />
-      ))}
+      ))}</div>}
       {openId && <SignalDetail id={openId} onClose={() => setOpenId(null)} />}
     </div>
   )

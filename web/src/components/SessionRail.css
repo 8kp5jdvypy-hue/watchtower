@@ -1,0 +1,40 @@
+.rail {
+  position: fixed; left: 0; top: 0; bottom: 0; width: var(--rail-w);
+  padding: calc(var(--nav-h) + 1.25rem) 0 1.5rem;
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(90deg, rgba(5,7,10,0.92), rgba(5,7,10,0.6));
+  z-index: 40;
+  font-family: var(--mono);
+}
+.rail-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.4rem; padding: 0 0.7rem 0.9rem; font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-dim); white-space: nowrap; }
+.rail-tz { color: var(--ink-faint); }
+.rail-scale { position: relative; flex: 1; margin: 0 0 0 calc(var(--rail-w) * 0.62); }
+.rail-line { position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--line); }
+.rail-open { position: absolute; left: 0; width: 1px; background: var(--ink-dim); opacity: 0.55; }
+.rail-tick { position: absolute; left: 0; height: 1px; width: 10px; background: var(--line); transform: translateY(-0.5px); }
+.rail-tick span { position: absolute; right: calc(100% + 0.55rem); top: 50%; transform: translateY(-50%); font-size: 0.6rem; color: var(--ink-faint); letter-spacing: 0.04em; white-space: nowrap; }
+.rail-tick-major { width: 16px; background: var(--ink-dim); }
+.rail-tick-major span { color: var(--ink-dim); }
+.rail-pin { position: absolute; left: 0; transform: translate(-50%, -50%); }
+.rail-pin-dot { display: block; width: 7px; height: 7px; border-radius: 50%; background: var(--bg); border: 1px solid var(--ink-faint); transition: background .35s ease, border-color .35s ease, box-shadow .35s ease; }
+.rail-pin.is-lit .rail-pin-dot { background: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 10px 1px rgba(52,226,255,0.55); }
+.rail-pin.is-lit.pin-reversed .rail-pin-dot { background: var(--bg); border-color: var(--cyan); box-shadow: none; }
+.rail-pin.is-lit.pin-pending .rail-pin-dot { background: var(--amber); border-color: var(--amber); box-shadow: 0 0 10px 1px rgba(255,180,84,0.45); }
+.rail-pin-tip {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%) translateX(-6px);
+  width: max-content; max-width: 280px; padding: 0.5rem 0.65rem;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 6px;
+  font-size: 0.66rem; line-height: 1.45; color: var(--ink); opacity: 0; pointer-events: none;
+  transition: opacity .18s ease, transform .18s ease; z-index: 3;
+}
+.rail-pin-tip b { color: var(--cyan); font-weight: 500; }
+.rail-pin-tip i { display: block; font-style: normal; color: var(--ink-dim); margin-top: 0.2rem; }
+.rail-pin:hover .rail-pin-tip, .rail-pin:focus-within .rail-pin-tip { opacity: 1; transform: translateY(-50%) translateX(0); }
+.rail-pin:hover { z-index: 4; }
+.rail-marker { position: absolute; left: -7px; width: 15px; height: 1px; background: var(--ink); transform: translateY(-0.5px); transition: top .18s cubic-bezier(.2,.7,.2,1); }
+.rail-marker::before { content: ''; position: absolute; left: 4px; top: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--ink); }
+.rail-now { position: absolute; left: 22px; top: 50%; transform: translateY(-50%); font-size: 0.66rem; color: var(--ink); background: var(--bg); padding: 0.1rem 0.3rem; letter-spacing: 0.06em; }
+.rail-static .rail-marker { transition: none; }
+@media (prefers-reduced-motion: reduce) { .rail-marker, .rail-pin-dot, .rail-pin-tip { transition: none; } }
+@media (max-width: 960px) { .rail { display: none; } }

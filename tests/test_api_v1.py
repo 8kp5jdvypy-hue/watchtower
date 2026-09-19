@@ -236,8 +236,13 @@ def test_service_status_reflects_heartbeat_and_halt():
 
 
 def test_status_endpoint_is_public(client):
-    r = client.get("/v1/status")
+    r = client.get("/v1/status", headers={"Origin": "https://perchmarkets.com"})
     assert r.status_code == 200
+    # The marketing site reads this cross-origin; it is cookie-free, so
+    # it gets the same wildcard /public/* has. /v1/me must not.
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    assert client.get("/v1/methodology", headers={"Origin": "https://perchmarkets.com"}).headers.get("Access-Control-Allow-Origin") == "*"
+    assert client.get("/v1/me", headers={"Origin": "https://perchmarkets.com"}).headers.get("Access-Control-Allow-Origin") is None
     collect("ServiceStatusSchema", r.get_json())
 
 
