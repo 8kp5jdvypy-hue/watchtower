@@ -1,0 +1,7 @@
+.open-in-app { min-height: 100vh; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1rem; max-width: 34rem; margin: 0 auto; padding: 2rem 1.5rem; }
+.open-in-app h1 { font-family: var(--display); font-weight: 600; font-size: 1.7rem; letter-spacing: -0.02em; margin: 0.5rem 0 0; }
+.open-in-app p { margin: 0; color: var(--ink-dim); line-height: 1.55; }
+.open-in-app-button { display: inline-block; margin-top: 0.5rem; padding: 0.9rem 1.2rem; border-radius: 6px; background: var(--cyan); color: var(--bg); font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; text-decoration: none; font-weight: 500; }
+.open-in-app-warn { color: var(--amber); }
+.open-in-app-fine { font-size: 0.85rem; color: var(--ink-faint); }
+.open-in-app-fine a { color: var(--ink-dim); }

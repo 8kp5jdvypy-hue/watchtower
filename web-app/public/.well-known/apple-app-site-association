@@ -1,0 +1,21 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": [
+          "684SV6G7DV.com.perchmarkets.ios"
+        ],
+        "components": [
+          {
+            "/": "/auth/magic-link",
+            "comment": "email sign-in link; token travels in the URL fragment"
+          },
+          {
+            "/": "/account/reauthenticate",
+            "comment": "re-authentication link for account deletion"
+          }
+        ]
+      }
+    ]
+  }
+}
