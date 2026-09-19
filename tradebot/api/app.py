@@ -129,7 +129,7 @@ PERFORMANCE_CACHE_TTL_SECONDS = 60
 # different symbol sets shouldn't multiply real Alpaca calls, but a
 # quote genuinely goes stale in seconds, not minutes.
 QUOTE_CACHE_TTL_SECONDS = 10
-PUBLIC_V1_PATHS = frozenset({"/v1/status", "/v1/methodology"})
+PUBLIC_V1_PATHS = frozenset({"/v1/status", "/v1/methodology", "/v1/today"})
 
 # How many magic-link requests one email address / one IP can make
 # before being rate-limited, and the same for the two public write

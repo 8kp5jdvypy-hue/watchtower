@@ -1,0 +1,13 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - strong [ref=e3]: Studio Smoke
+    - button "Menu" [ref=e4] [cursor=pointer]
+  - heading "Signature Moment" [level=1] [ref=e6]
+  - paragraph [ref=e10]: 0%
+  - generic [ref=e11]: Hover and focus target
+  - generic [ref=e12]:
+    - generic [ref=e13]: Email
+    - textbox "Email" [ref=e14]:
+      - /placeholder: you@example.com
+    - button "Subscribe" [ref=e15]
+    - status
