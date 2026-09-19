@@ -460,6 +460,53 @@ def test_m1_gaps_are_contract_shaped_501s(client, method, path):
     collect("ErrorResponseSchema", body)
 
 
+def test_bars_return_the_latest_session_and_cache_per_symbol(app, client, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from tradebot.api import v1
+    from tradebot.detectors import Bar
+
+    session = _sign_in(app, client)
+    calls: list[list[str]] = []
+
+    def fake_bulk(symbols, session_date):
+        calls.append(list(symbols))
+        t0 = datetime(session_date.year, session_date.month, session_date.day, 13, 30, tzinfo=timezone.utc)
+        return {s: [Bar(s, t0 + timedelta(minutes=5 * i), 100.0 + i, 101.0 + i, 99.0 + i, 100.5 + i, 1000 + i) for i in range(3)]
+                for s in symbols if s != "NOBARS"}
+
+    monkeypatch.setattr("tradebot.vendors.alpaca.fetch_intraday_bars_bulk", fake_bulk)
+    # A Friday, well after the close: the session is finished -> long cache.
+    monkeypatch.setattr(v1, "_now", lambda: datetime(2026, 9, 18, 23, 0, tzinfo=timezone.utc))
+    v1._bars_cache.clear()
+
+    r = client.get("/v1/bars?symbols=spy,QQQ,NOBARS,spy", headers=_auth(session))
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    collect("BarSeriesSchema", body)
+    assert body["sessionDate"] == "2026-09-18" and body["timeframe"] == "5m"
+    assert [i["symbol"] for i in body["items"]] == ["SPY", "QQQ", "NOBARS"]
+    assert len(body["items"][0]["bars"]) == 3 and body["items"][0]["bars"][0]["c"] == 100.5
+    assert body["items"][2]["bars"] == []
+    assert calls == [["SPY", "QQQ", "NOBARS"]]
+
+    # Second call is served from the cache -- no vendor call.
+    r = client.get("/v1/bars?symbols=SPY", headers=_auth(session))
+    assert r.status_code == 200 and calls == [["SPY", "QQQ", "NOBARS"]]
+
+    # Weekend -> still the latest session (Friday).
+    monkeypatch.setattr(v1, "_now", lambda: datetime(2026, 9, 20, 15, 0, tzinfo=timezone.utc))
+    session = _sign_in(app, client)  # the earlier access token aged out with the clock jump
+    assert client.get("/v1/bars?symbols=SPY", headers=_auth(session)).get_json()["sessionDate"] == "2026-09-18"
+
+    # Bounds and errors.
+    r = client.get("/v1/bars?symbols=" + ",".join(f"S{i}" for i in range(13)), headers=_auth(session))
+    assert r.status_code == 400 and r.get_json()["code"] == "too_many_symbols"
+    collect("ErrorResponseSchema", r.get_json())
+    assert client.get("/v1/bars", headers=_auth(session)).status_code == 400
+    assert client.get("/v1/bars?symbols=SPY&session=2026-09-20", headers=_auth(session)).get_json()["code"] == "not_a_session"
+    assert client.get("/v1/bars?symbols=SPY").status_code == 401
+
+
 # ---- the contract gate -----------------------------------------------------
 
 def test_contract_validates_with_app_schemas():

@@ -815,6 +815,106 @@ METHODOLOGY = {
 }
 
 
+# --------------------------------------------------------------------------
+# Intraday bars (sparklines and the detail chart)
+# --------------------------------------------------------------------------
+#
+# Five-minute bars for the latest XNYS session, straight from the same
+# IEX feed the detectors evaluate. Bounded: at most 12 symbols per call,
+# cached per (symbol, session) -- 60 s while the session is live, for the
+# rest of the day once it has closed -- so a phone refreshing every
+# screen still costs a handful of vendor calls a minute.
+
+BARS_MAX_SYMBOLS = 12
+_BARS_LIVE_TTL = timedelta(seconds=60)
+_bars_cache: dict[tuple[str, str], tuple[datetime, list[dict]]] = {}
+
+
+def _latest_session(now: datetime) -> date:
+    d = now.astimezone(ET).date()
+    for _ in range(10):
+        if _session_bounds_utc(d) is not None:
+            return d
+        d -= timedelta(days=1)
+    return d
+
+
+def _bar_json(bar) -> dict:
+    return {
+        "t": _iso(bar.ts),
+        "o": float(bar.open),
+        "h": float(bar.high),
+        "l": float(bar.low),
+        "c": float(bar.close),
+        "v": int(bar.volume),
+    }
+
+
+def _fetch_bars(symbols: list[str], session_date: date, now: datetime) -> dict[str, list[dict]]:
+    from tradebot.vendors import alpaca
+
+    key_date = session_date.isoformat()
+    bounds = _session_bounds_utc(session_date)
+    live = bounds is not None and now < bounds[1] + timedelta(hours=4)
+    out: dict[str, list[dict]] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        hit = _bars_cache.get((symbol, key_date))
+        if hit and (not live or now - hit[0] < _BARS_LIVE_TTL):
+            out[symbol] = hit[1]
+        else:
+            missing.append(symbol)
+    if missing:
+        try:
+            fetched = alpaca.fetch_intraday_bars_bulk(missing, session_date)
+        except Exception:
+            current_app.logger.exception("v1 bars fetch failed")
+            fetched = {}
+        for symbol in missing:
+            bars = [_bar_json(b) for b in fetched.get(symbol, [])]
+            if bars or not live:
+                _bars_cache[(symbol, key_date)] = (now, bars)
+            out[symbol] = bars
+    return out
+
+
+@bp.get("/bars")
+@login_required
+def bars():
+    raw = request.args.get("symbols", "")
+    symbols: list[str] = []
+    for part in raw.split(","):
+        part = part.strip().upper()
+        if part and SYMBOL_RE.match(part) and part not in symbols:
+            symbols.append(part)
+    if not symbols:
+        return _error("invalid_symbols", "symbols is required (comma-separated, up to 12).", 400)
+    if len(symbols) > BARS_MAX_SYMBOLS:
+        return _error("too_many_symbols", f"At most {BARS_MAX_SYMBOLS} symbols per request.", 400)
+    now = _now()
+    session_arg = request.args.get("session")
+    if session_arg:
+        try:
+            session_date = date.fromisoformat(session_arg)
+        except ValueError:
+            return _error("invalid_session", "session must be YYYY-MM-DD.", 400)
+        if _session_bounds_utc(session_date) is None:
+            return _error("not_a_session", "That date is not an exchange session.", 400)
+    else:
+        session_date = _latest_session(now)
+    bounds = _session_bounds_utc(session_date)
+    series = _fetch_bars(symbols, session_date, now)
+    return jsonify({
+        "sessionDate": session_date.isoformat(),
+        "sessionOpenAt": _iso(bounds[0]) if bounds else None,
+        "sessionCloseAt": _iso(bounds[1]) if bounds else None,
+        "timeframe": "5m",
+        "source": {"vendor": "alpaca", "feed": "iex", "delayed": False},
+        "generatedAt": _iso(now),
+        "items": [{"symbol": s, "bars": series.get(s, [])} for s in symbols],
+    })
+
+
 @bp.get("/methodology")
 def methodology():
     return jsonify(METHODOLOGY)
