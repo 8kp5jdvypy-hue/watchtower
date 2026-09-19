@@ -1,0 +1,19 @@
+# Perch Markets
+
+> Perch is a market scanner that watches a fixed list of US equities on five-minute bars, flags moves that stand out from each name's own history, explains the evidence in plain language, and publishes its own track record including the misses. It never places orders and has no brokerage access. Research only; nothing on the site is a recommendation to buy or sell any security.
+
+## Pages
+
+- [Home](https://perchmarkets.com/): the session walk-through, how a signal reads, the boundary, and the public record
+- [Track record](https://perchmarkets.com/record.html): every tracked HIGH alert with its recorded outcome
+- [Dashboard](https://app.perchmarkets.com/): sign in with an email link (beta)
+
+## Data
+
+- [Public track record API](https://api.perchmarkets.com/public/track-record): JSON, no auth
+- [Service status](https://api.perchmarkets.com/v1/status): JSON, no auth
+- [Methodology](https://api.perchmarkets.com/v1/methodology): JSON, no auth
+
+## Contact
+
+- hello@perchmarkets.com
