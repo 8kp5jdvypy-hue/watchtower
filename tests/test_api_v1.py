@@ -223,7 +223,15 @@ def test_service_status_reflects_heartbeat_and_halt():
     assert halted["status"] == "maintenance"
     weekend = v1_api.service_status(datetime.fromisoformat("2026-09-19T15:00:00+00:00"), heartbeat_at=None, halted=False)
     assert weekend["status"] == "operational"  # idle scanner over a weekend is not a fault
-    for payload in (fresh, stale, none, halted, weekend):
+    # Production regression 2026-09-18: after-hours with the 15:56 ET
+    # heartbeat is the scanner idling correctly, not a stale feed.
+    after_hours = v1_api.service_status(
+        datetime.fromisoformat("2026-09-18T23:20:00+00:00"),
+        heartbeat_at=datetime.fromisoformat("2026-09-18T19:56:40+00:00"), halted=False,
+    )
+    assert after_hours["market"]["state"] == "after_hours"
+    assert after_hours["status"] == "operational" and after_hours["sources"][0]["status"] == "operational"
+    for payload in (fresh, stale, none, halted, weekend, after_hours):
         collect("ServiceStatusSchema", payload)
 
 

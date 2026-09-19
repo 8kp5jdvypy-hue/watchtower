@@ -314,7 +314,12 @@ def _read_heartbeat(path: Path) -> datetime | None:
 
 def service_status(now: datetime, *, heartbeat_at: datetime | None, halted: bool) -> dict:
     ms = market_state(now)
-    trading = ms.state in ("premarket", "open", "after_hours")
+    # Staleness is only meaningful during the regular session: run_live
+    # writes no heartbeat outside it (runner.OFF_SESSION_IDLE_SECONDS),
+    # exactly the rule the Telegram /status uses. Live-observed on the
+    # first production deploy 2026-09-18: judging after-hours by the
+    # 15:56 ET heartbeat reported a healthy stack as "degraded".
+    trading = ms.state == "open"
     if heartbeat_at is None:
         feed_status, feed_msg = ("unknown", "No scanner heartbeat recorded yet.") if trading else ("operational", None)
     else:
