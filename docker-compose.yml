@@ -219,6 +219,30 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  apns-worker:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+    command: python -m tradebot.push.worker
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # Idles healthy until APNS_KEY_P8_B64 / APNS_KEY_ID / APNS_TEAM_ID exist
+    # in .env (see docs/DEPLOYMENT.md); then drains push_outbox to Apple.
+    healthcheck:
+      test: ["CMD", "python", "-m", "tradebot.push.worker", "--health", "--heartbeat", "data/push_worker_heartbeat.json", "--max-age", "120"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   api:
     build:
       context: .

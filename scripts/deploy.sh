@@ -205,6 +205,7 @@ APP_SERVICES=(
   postmarket-external-context
   postmarket-customer-dry-run
   postmarket-operator
+  apns-worker
   api
 )
 for service in "${APP_SERVICES[@]}"; do

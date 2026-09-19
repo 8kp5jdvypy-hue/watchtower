@@ -392,12 +392,59 @@ def test_methodology_is_public(client):
     collect("MethodologySchema", r.get_json())
 
 
+# ---- devices (M2) -----------------------------------------------------------
+
+_DEVICE_INPUT = {
+    "platform": "ios", "apnsEnvironment": "sandbox", "token": "ab" * 32,
+    "installationId": "9d2c1b9a-1b2c-4d3e-8f4a-5b6c7d8e9f00", "appVersion": "1.0.0", "locale": "en-US",
+    "timeZone": "America/New_York",
+    "preferences": {"watchlistPriority": True, "radarDiscoveries": False, "corrections": True, "operational": True,
+                    "sessions": ["regular", "premarket"], "paused": False, "quietStartLocal": "22:00", "quietEndLocal": "07:00"},
+}
+
+
+def test_device_registration_round_trip(app, client):
+    from tradebot.push import store as push_store
+
+    session = _sign_in(app, client)
+    r = client.post("/v1/devices", json=_DEVICE_INPUT, headers={**_auth(session), "Idempotency-Key": "2f1e0d9c-8b7a-4655-9443-322110ffeedd"})
+    assert r.status_code == 200, r.get_json()
+    device = r.get_json()
+    collect("DeviceSchema", device)
+    assert device["installationId"] == _DEVICE_INPUT["installationId"] and device["active"] is True
+    assert device["preferences"]["sessions"] == ["regular", "premarket"] and device["preferences"]["quietStartLocal"] == "22:00"
+    # token rotation on the same installation keeps the id
+    r2 = client.post("/v1/devices", json={**_DEVICE_INPUT, "token": "cd" * 32}, headers=_auth(session))
+    assert r2.get_json()["id"] == device["id"]
+    assert push_store.get_device(app.users_conn, device["id"]).token == "cd" * 32
+    # unregister -> 204, idempotent
+    assert client.delete(f"/v1/devices/{device['id']}", headers=_auth(session)).status_code == 204
+    assert push_store.get_device(app.users_conn, device["id"]).active is False
+    assert client.delete(f"/v1/devices/{device['id']}", headers=_auth(session)).status_code == 204
+
+
+def test_device_registration_validates_input(app, client):
+    session = _sign_in(app, client)
+    bad = [
+        {**_DEVICE_INPUT, "platform": "android"},
+        {**_DEVICE_INPUT, "apnsEnvironment": "dev"},
+        {**_DEVICE_INPUT, "token": "not-hex!"},
+        {**_DEVICE_INPUT, "installationId": "nope"},
+        {**_DEVICE_INPUT, "preferences": {"sessions": ["lunch"]}},
+        {**_DEVICE_INPUT, "preferences": {"quietStartLocal": "25:00"}},
+    ]
+    for body in bad:
+        r = client.post("/v1/devices", json=body, headers=_auth(session))
+        assert r.status_code == 400, body
+        assert r.get_json()["code"] == "invalid_request"
+    collect("ErrorResponseSchema", r.get_json())
+    assert client.post("/v1/devices", json=_DEVICE_INPUT).status_code == 401
+
+
 @pytest.mark.parametrize(
     "method,path",
     [
         ("POST", "/v1/billing/apple/sync"),
-        ("POST", "/v1/devices"),
-        ("DELETE", "/v1/devices/abc"),
         ("POST", "/v1/account/export"),
         ("GET", "/v1/account/exports/abc"),
         ("DELETE", "/v1/account"),
