@@ -3,7 +3,7 @@ import { SIGNUP_URL } from '../config'
 import { track, withRef } from '../analytics'
 import './Hero.css'
 
-export default function Hero({ status, record }) {
+export default function Hero({ status, statusFailed = false, record }) {
   const state = status?.market?.state
   const feed = status?.sources?.[0]
   const tracked = record?.track_record?.sample_size
@@ -19,7 +19,7 @@ export default function Hero({ status, record }) {
             <span className="hero-sep">/</span>
             {new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(status.generatedAt))} ET
           </>
-        ) : 'connecting to the scanner…'}
+        ) : statusFailed ? 'scanner status unreachable' : 'connecting to the scanner…'}
       </p>
       <h1 className="hero-title">
         The market moves.<br />

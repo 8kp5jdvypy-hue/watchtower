@@ -2,7 +2,7 @@ import { PerchLockup } from './PerchMark'
 import { MARKET_STATE_LABEL } from '../lib/perchData'
 import './Footer.css'
 
-export default function Footer({ status }) {
+export default function Footer({ status, statusFailed = false }) {
   const state = status?.market?.state
   return (
     <footer className="footer" data-session-minutes="1200">
@@ -10,11 +10,11 @@ export default function Footer({ status }) {
         <PerchLockup size={20} />
         <span className="footer-status">
           <span className={`dot ${status ? '' : 'dot-off'}`} />
-          {status ? `${MARKET_STATE_LABEL[state] || state} · scanner ${status.sources?.[0]?.status || 'unknown'}` : 'status unavailable'}
+          {status ? `${MARKET_STATE_LABEL[state] || state} · scanner ${status.sources?.[0]?.status || 'unknown'}` : statusFailed ? 'scanner status unreachable' : 'status unavailable'}
         </span>
       </div>
       <div className="footer-row footer-links">
-        <a href="/record.html">Record</a>
+        <a href="/record">Record</a>
         <a href="https://app.perchmarkets.com/">Dashboard</a>
         <a href="/privacy">Privacy</a>
         <a href="/terms">Terms</a>
