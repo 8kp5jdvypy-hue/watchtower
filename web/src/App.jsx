@@ -22,11 +22,13 @@ import { etParts, fetchStatus, fetchTrackRecord, latestSession } from './lib/per
 export default function App() {
   const [record, setRecord] = useState(null)
   const [status, setStatus] = useState(null)
+  const [statusFailed, setStatusFailed] = useState(false)
   useEffect(() => {
     const ac = new AbortController()
     fetchTrackRecord(ac.signal).then(setRecord).catch(() => setRecord(null))
-    fetchStatus(ac.signal).then(setStatus).catch(() => setStatus(null))
-    const tick = setInterval(() => fetchStatus(ac.signal).then(setStatus).catch(() => {}), 60_000)
+    const load = () => fetchStatus(ac.signal).then((st) => { setStatus(st); setStatusFailed(false) }).catch((err) => { if (err?.name !== 'AbortError') setStatusFailed(true) })
+    load()
+    const tick = setInterval(load, 60_000)
     return () => { ac.abort(); clearInterval(tick) }
   }, [])
   const session = latestSession(record?.alerts)
@@ -36,14 +38,14 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <Nav status={status} />
       <main id="main" className="page">
-        <Hero status={status} record={record} />
+        <Hero status={status} statusFailed={statusFailed} record={record} />
         <Anatomy record={record} />
         <SessionLog record={record} />
         <Boundary />
         <Record record={record} />
         <TheApp />
         <Access />
-        <Footer status={status} />
+        <Footer status={status} statusFailed={statusFailed} />
       </main>
       {/* After <main> on purpose: it is position:fixed, so DOM order only
           decides keyboard order, and content should come before the rail. */}

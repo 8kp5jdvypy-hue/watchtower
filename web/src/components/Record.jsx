@@ -34,7 +34,7 @@ export default function Record({ record }) {
       )}
       <p className="record-foot">
         {tr ? <>{tr.total_alerts} HIGH alerts sent to date; {tr.total_no_trade} carried a no-trade flag and are excluded from the sample above. </> : null}
-        Full ledger: <a href="/record.html">perchmarkets.com/record</a>.
+        Full ledger: <a href="/record">perchmarkets.com/record</a>.
       </p>
     </section>
   )

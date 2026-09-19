@@ -1,0 +1,16 @@
+@import './index.css';
+.legal-nav { display: flex; align-items: center; justify-content: space-between; padding: 1.2rem var(--edge); border-bottom: 1px solid var(--line); }
+.legal-nav .perch-lockup { display: inline-flex; align-items: center; gap: 0.55em; color: var(--ink); text-decoration: none; }
+.legal-nav .perch-wordmark { font-family: var(--display); font-weight: 600; font-size: 0.95rem; letter-spacing: 0.18em; text-transform: uppercase; }
+.legal-back { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim); text-decoration: none; }
+.legal-back:hover { color: var(--ink); }
+.legal { max-width: 68ch; margin: 0 auto; padding: 4rem var(--edge) 6rem; }
+.legal h1 { font-family: var(--display); font-weight: 600; font-size: var(--step-4); letter-spacing: -0.025em; line-height: 1.02; margin: 0.8rem 0 1rem; }
+.legal .lede { color: var(--ink-dim); font-size: var(--step-1); line-height: 1.5; margin: 0 0 2.5rem; }
+.legal h2 { font-family: var(--display); font-weight: 600; font-size: var(--step-2); letter-spacing: -0.02em; margin: 2.4rem 0 0.8rem; }
+.legal p, .legal li { color: var(--ink-dim); line-height: 1.6; }
+.legal li b, .legal p b { color: var(--ink); font-weight: 500; }
+.legal ul { padding-left: 1.2rem; }
+.legal li { margin: 0.5rem 0; }
+.legal-fine { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 0.78rem; }
+.legal a { color: var(--ink); }
