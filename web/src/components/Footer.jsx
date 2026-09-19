@@ -1,5 +1,5 @@
 import { PerchLockup } from './PerchMark'
-import { MARKET_STATE_LABEL } from '../data/perchData'
+import { MARKET_STATE_LABEL } from '../lib/perchData'
 import './Footer.css'
 
 export default function Footer({ status }) {

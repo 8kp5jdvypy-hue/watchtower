@@ -1,4 +1,4 @@
-import { MARKET_STATE_LABEL } from '../data/perchData'
+import { MARKET_STATE_LABEL } from '../lib/perchData'
 import { SIGNUP_URL } from '../config'
 import { track, withRef } from '../analytics'
 import './Hero.css'

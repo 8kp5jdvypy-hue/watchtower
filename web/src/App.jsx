@@ -10,7 +10,7 @@ import TheApp from './components/TheApp'
 import Access from './components/Access'
 import Footer from './components/Footer'
 import ErrorBoundary from './components/ErrorBoundary'
-import { etParts, fetchStatus, fetchTrackRecord, latestSession } from './data/perchData'
+import { etParts, fetchStatus, fetchTrackRecord, latestSession } from './lib/perchData'
 
 /*
  * perchmarkets.com — "The Watch Log" (DESIGN-DIRECTION-2026-09.md).

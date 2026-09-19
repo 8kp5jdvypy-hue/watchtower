@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { etParts, outcomeOf } from '../data/perchData'
+import { etParts, outcomeOf } from '../lib/perchData'
 import { useReducedMotion } from '../hooks/usePrefs'
 import './SessionRail.css'
 

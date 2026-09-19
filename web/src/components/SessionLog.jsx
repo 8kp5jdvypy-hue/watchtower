@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { etParts, latestSession, outcomeOf } from '../data/perchData'
+import { etParts, latestSession, outcomeOf } from '../lib/perchData'
 import { useReducedMotion } from '../hooks/usePrefs'
 import './SessionLog.css'
 
