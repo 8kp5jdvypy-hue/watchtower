@@ -141,6 +141,28 @@ def login_required(fn):
     return wrapper
 
 
+def login_optional(fn):
+    """Sets g.v1_account when a valid bearer token is present, otherwise
+    leaves it None and lets the route decide what a visitor may see."""
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        from tradebot.api import v1_store
+
+        g.v1_account = None
+        g.v1_token_family = None
+        token = _bearer_token()
+        if token is not None:
+            rec = v1_store.lookup(current_app.users_conn, token)
+            if rec is not None and rec.kind == "access" and not rec.revoked and _now() < rec.expires_at:
+                account = accounts.get_account(current_app.users_conn, rec.account_id)
+                if account is not None:
+                    g.v1_account = account
+                    g.v1_token_family = rec.family_id
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _entitlement(account: accounts.Account) -> dict:
     plan_map = {"beta": "beta", "free": "free", "core": "core", "pro": "core"}
     plan = "founding_member" if account.founding_member else plan_map.get(account.plan, "beta")
@@ -472,13 +494,21 @@ def _query_signals(
     return conn.execute(sql, params).fetchall()
 
 
-@bp.get("/today")
-@login_required
-def today():
+def _today_rows():
     # Same session-date definition runner.py uses (now in ET), via _now()
     # so the whole module has one clock to test against.
     session_date = _now().astimezone(ET).date().isoformat()
     rows = _query_signals(current_app.journal_conn, limit=3, cursor=None, symbols=None, origin=None, session_date=session_date)
+    return session_date, rows
+
+
+@bp.get("/today")
+def today():
+    # Public: this is the same record perchmarkets.com shows to anyone.
+    # The app shows it to a visitor before asking for an account
+    # (HIG: postpone nonessential setup), and the response carries no
+    # account state at all.
+    session_date, rows = _today_rows()
     return jsonify({"sessionDate": session_date, "status": _status_now(), "items": [_summary(r) for r in rows]})
 
 
@@ -878,8 +908,12 @@ def _fetch_bars(symbols: list[str], session_date: date, now: datetime) -> dict[s
     return out
 
 
+VISITOR_BENCHMARKS = ("SPY", "QQQ")
+VISITOR_BARS_PER_IP = (60, 600)  # a visitor's Today refreshes: 60 per 10 minutes
+
+
 @bp.get("/bars")
-@login_required
+@login_optional
 def bars():
     raw = request.args.get("symbols", "")
     symbols: list[str] = []
@@ -892,6 +926,16 @@ def bars():
     if len(symbols) > BARS_MAX_SYMBOLS:
         return _error("too_many_symbols", f"At most {BARS_MAX_SYMBOLS} symbols per request.", 400)
     now = _now()
+    if g.v1_account is None:
+        # A visitor may draw the benchmark and today's public record --
+        # nothing else, so the vendor budget can't be spent from outside.
+        if not rate_limit.allow(current_app.users_conn, f"v1_bars:ip:{request.remote_addr}", *VISITOR_BARS_PER_IP):
+            return _error("rate_limited", "Too many requests; try again shortly.", 429, **{"Retry-After": "60"})
+        _, rows = _today_rows()
+        allowed = set(VISITOR_BENCHMARKS) | {row[3] for row in rows}
+        symbols = [s for s in symbols if s in allowed]
+        if not symbols:
+            return _error("session_required", "Sign in to see bars for other names.", 401)
     session_arg = request.args.get("session")
     if session_arg:
         try:

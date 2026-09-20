@@ -504,7 +504,28 @@ def test_bars_return_the_latest_session_and_cache_per_symbol(app, client, monkey
     collect("ErrorResponseSchema", r.get_json())
     assert client.get("/v1/bars", headers=_auth(session)).status_code == 400
     assert client.get("/v1/bars?symbols=SPY&session=2026-09-20", headers=_auth(session)).get_json()["code"] == "not_a_session"
-    assert client.get("/v1/bars?symbols=SPY").status_code == 401
+
+    # Visitors (no bearer) get the benchmark and today's public names only.
+    calls.clear()
+    v1._bars_cache.clear()
+    r = client.get("/v1/bars?symbols=SPY,NVDA,QQQ")
+    assert r.status_code == 200, r.get_json()
+    collect("BarSeriesSchema", r.get_json())
+    assert [i["symbol"] for i in r.get_json()["items"]] == ["SPY", "QQQ"]  # NVDA is not in today's record
+    assert calls == [["SPY", "QQQ"]]
+    r = client.get("/v1/bars?symbols=NVDA")
+    assert r.status_code == 401 and r.get_json()["code"] == "session_required"
+    collect("ErrorResponseSchema", r.get_json())
+
+
+def test_today_is_public_and_carries_no_account_state(app, client):
+    _seed_signals(app, session_date=v1_api._now().astimezone(v1_api.ET).date().isoformat(), count=2)
+    r = client.get("/v1/today")
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    collect("TodaySchema", body)
+    assert len(body["items"]) == 2 and "account" not in body
+    assert r.headers.get("Access-Control-Allow-Origin") == "*"
 
 
 # ---- the contract gate -----------------------------------------------------
