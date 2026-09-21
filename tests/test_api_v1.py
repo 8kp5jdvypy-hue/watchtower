@@ -465,6 +465,10 @@ def test_bars_return_the_latest_session_and_cache_per_symbol(app, client, monkey
     from tradebot.api import v1
     from tradebot.detectors import Bar
 
+    # Pin the clock BEFORE signing in: the magic link and its session are
+    # dated by v1._now, and a real clock later than the pinned one would
+    # make them look like they came from the future.
+    monkeypatch.setattr(v1, "_now", lambda: datetime(2026, 9, 18, 23, 0, tzinfo=timezone.utc))
     session = _sign_in(app, client)
     calls: list[list[str]] = []
 
@@ -476,7 +480,6 @@ def test_bars_return_the_latest_session_and_cache_per_symbol(app, client, monkey
 
     monkeypatch.setattr("tradebot.vendors.alpaca.fetch_intraday_bars_bulk", fake_bulk)
     # A Friday, well after the close: the session is finished -> long cache.
-    monkeypatch.setattr(v1, "_now", lambda: datetime(2026, 9, 18, 23, 0, tzinfo=timezone.utc))
     v1._bars_cache.clear()
 
     r = client.get("/v1/bars?symbols=spy,QQQ,NOBARS,spy", headers=_auth(session))
@@ -526,6 +529,7 @@ def test_today_is_public_and_carries_no_account_state(app, client):
     collect("TodaySchema", body)
     assert len(body["items"]) == 2 and "account" not in body
     assert r.headers.get("Access-Control-Allow-Origin") == "*"
+    assert all("company" in item for item in body["items"])  # name or null, never a placeholder
 
 
 # ---- the contract gate -----------------------------------------------------
