@@ -7,7 +7,8 @@ import './Record.css'
  */
 function pctf(v, digits = 1) { return `${(v * 100).toFixed(digits)}%` }
 
-export default function Record({ record }) {
+export default function Record({ record, failed = false }) {
+  const loading = !record && !failed
   const tr = record?.track_record
   const stats = tr ? [
     ['Hit rate', pctf(tr.hit_rate), `of ${tr.sample_size} tracked HIGH alerts continued in their direction at ${tr.offset_min} minutes`],
@@ -29,6 +30,8 @@ export default function Record({ record }) {
             </div>
           ))}
         </dl>
+      ) : loading ? (
+        <p className="record-empty">Loading the public record.</p>
       ) : (
         <p className="record-empty">The public record is unreachable right now. Perch does not show cached or invented numbers in its place.</p>
       )}

@@ -21,7 +21,8 @@ function parseHeadline(h) {
   return { symbol: m[1], range: m[2], multiple: m[3], atr: m[4] }
 }
 
-export default function Anatomy({ record }) {
+export default function Anatomy({ record, failed = false }) {
+  const loading = !record && !failed
   const alerts = record?.alerts || []
   const pick = alerts.filter((a) => a.return_pct != null && parseHeadline(a.headline)).sort((a, b) => b.sent_at.localeCompare(a.sent_at))[0]
   const parsed = pick ? parseHeadline(pick.headline) : null
@@ -60,6 +61,15 @@ export default function Anatomy({ record }) {
             <span>Recorded by the journal, not written by us. {outcome.kind === 'reversed' ? 'This one went the other way. They’re in the record too.' : 'Direction held for the checkpoint window.'}</span>
           </p>
         </figure>
+      ) : loading ? (
+        <dl className="anatomy-parts">
+          {PARTS.map(([k, name, why]) => (
+            <div key={k} className={`anatomy-part part-${k}`}>
+              <dt>{name}</dt>
+              <dd>{why}</dd>
+            </div>
+          ))}
+        </dl>
       ) : (
         <p className="anatomy-empty">The public record is unreachable right now, so there is no example to show. Perch does not fabricate one.</p>
       )}

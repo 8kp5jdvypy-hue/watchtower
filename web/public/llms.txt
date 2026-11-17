@@ -5,7 +5,7 @@
 ## Pages
 
 - [Home](https://perchmarkets.com/): the session walk-through, how a signal reads, the boundary, and the public record
-- [Track record](https://perchmarkets.com/record.html): every tracked HIGH alert with its recorded outcome
+- [Track record](https://perchmarkets.com/record): every tracked HIGH alert with its recorded outcome
 - [Dashboard](https://app.perchmarkets.com/): sign in with an email link (beta)
 
 ## Data
