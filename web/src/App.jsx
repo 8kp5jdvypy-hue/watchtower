@@ -23,9 +23,10 @@ export default function App() {
   const [record, setRecord] = useState(null)
   const [status, setStatus] = useState(null)
   const [statusFailed, setStatusFailed] = useState(false)
+  const [recordFailed, setRecordFailed] = useState(false)
   useEffect(() => {
     const ac = new AbortController()
-    fetchTrackRecord(ac.signal).then(setRecord).catch(() => setRecord(null))
+    fetchTrackRecord(ac.signal).then(setRecord).catch(() => { setRecord(null); setRecordFailed(true) })
     const load = () => fetchStatus(ac.signal).then((st) => { setStatus(st); setStatusFailed(false) }).catch((err) => { if (err?.name !== 'AbortError') setStatusFailed(true) })
     load()
     const tick = setInterval(load, 60_000)
@@ -39,10 +40,10 @@ export default function App() {
       <Nav status={status} />
       <main id="main" className="page">
         <Hero status={status} statusFailed={statusFailed} record={record} />
-        <Anatomy record={record} />
-        <SessionLog record={record} />
+        <Anatomy record={record} failed={recordFailed} />
+        <SessionLog record={record} failed={recordFailed} />
         <Boundary />
-        <Record record={record} />
+        <Record record={record} failed={recordFailed} />
         <TheApp />
         <Access />
         <Footer status={status} statusFailed={statusFailed} />

@@ -27,22 +27,60 @@
     <link rel="manifest" href="/site.webmanifest" />
     <meta name="theme-color" content="#05070a" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="A market scanner that flags unusual moves on five-minute bars, explains the evidence in plain words, and publishes its own record — misses included. It never trades." />
+    <title>Perch Markets: scanner for unusual stock moves</title>
+    <meta name="description" content="Perch flags unusual moves on five-minute bars, explains the evidence in plain words, and publishes its own record, misses included. It never trades." />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
     <link rel="canonical" href="https://perchmarkets.com/" />
-    <title>Perch — the market moves. Perch notices.</title>
-
+    <meta property="og:site_name" content="Perch Markets" />
+    <meta property="og:locale" content="en_US" />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://perchmarkets.com/" />
     <meta property="og:title" content="The market moves. Perch notices." />
-    <meta property="og:description" content="A scanner that flags unusual moves on five-minute bars, explains the evidence, and publishes its own record — misses included. It never trades." />
+    <meta property="og:description" content="Perch flags unusual moves on five-minute bars, explains the evidence in plain words, and publishes its own record, misses included. It never trades." />
     <meta property="og:image" content="https://perchmarkets.com/brand/og-landing.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-
+    <meta property="og:image:alt" content="Perch Markets: the market moves, Perch notices" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="The market moves. Perch notices." />
-    <meta name="twitter:description" content="A scanner that flags unusual moves on five-minute bars, explains the evidence, and publishes its own record — misses included. It never trades." />
+    <meta name="twitter:description" content="Perch flags unusual moves on five-minute bars, explains the evidence in plain words, and publishes its own record, misses included. It never trades." />
     <meta name="twitter:image" content="https://perchmarkets.com/brand/og-landing.png" />
+    <script type="application/ld+json">{
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "Organization",
+          "@id": "https://perchmarkets.com/#organization",
+          "name": "Perch Markets",
+          "url": "https://perchmarkets.com/",
+          "logo": "https://perchmarkets.com/brand/icon-512.png",
+          "email": "hello@perchmarkets.com"
+        },
+        {
+          "@type": "WebSite",
+          "@id": "https://perchmarkets.com/#website",
+          "name": "Perch",
+          "url": "https://perchmarkets.com/",
+          "publisher": {
+            "@id": "https://perchmarkets.com/#organization"
+          },
+          "inLanguage": "en-US"
+        },
+        {
+          "@type": "WebApplication",
+          "@id": "https://perchmarkets.com/#app",
+          "name": "Perch",
+          "url": "https://app.perchmarkets.com/",
+          "applicationCategory": "FinanceApplication",
+          "operatingSystem": "Web",
+          "browserRequirements": "Requires JavaScript",
+          "description": "A market scanner that watches a fixed list of US equities on five-minute bars, flags moves that stand out from their own history, and explains the evidence in plain words. It never places orders and has no brokerage access.",
+          "publisher": {
+            "@id": "https://perchmarkets.com/#organization"
+          }
+        }
+      ]
+    }</script>
   </head>
   <body>
     <div id="root"></div>

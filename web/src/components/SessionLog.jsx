@@ -11,7 +11,8 @@ import './SessionLog.css'
  * them. The mobile edition carries its own compact rail because the
  * fixed one is hidden under 960px.
  */
-export default function SessionLog({ record }) {
+export default function SessionLog({ record, failed = false }) {
+  const loading = !record && !failed
   const reduced = useReducedMotion()
   const { dateKey, alerts, pending } = latestSession(record?.alerts)
   const [lit, setLit] = useState(() => new Set())
@@ -41,7 +42,9 @@ export default function SessionLog({ record }) {
       <p className="lede">
         {alerts.length
           ? <>Every alert Perch sent that day, at the minute it sent it, with the outcome the journal recorded thirty minutes later. {scored ? <>{hits} of {scored} continued.</> : null} Nothing curated{pending ? ' — the most recent session whose outcomes are already marked; today\u2019s are still pending' : ''}.</>
-          : 'The public record is unreachable right now. When it is back, this is the day’s real log — not a demo.'}
+          : loading
+            ? 'Every alert Perch sent that day, at the minute it sent it, with the outcome the journal recorded thirty minutes later. Nothing curated.'
+            : 'The public record is unreachable right now. When it is back, this is the day’s real log — not a demo.'}
       </p>
       <ol className="log-list" ref={listRef}>
         {alerts.map((a, i) => {
