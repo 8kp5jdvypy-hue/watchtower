@@ -451,9 +451,31 @@ def _summary(row: tuple) -> dict:
         "origin": "watchlist" if (origin or "watchlist") == "watchlist" else "radar",
         "label": "worth_a_closer_look" if tier == "high" else "context",
         "headline": (headlines or f"{symbol} observation")[:300],
+        "company": _instrument_name(symbol),
         "source": _source_ref(data_feed, ts),
         "correctionState": "original",
     }
+
+
+_name_cache: dict[str, str | None] = {}
+
+
+def _instrument_name(symbol: str) -> str | None:
+    """The universe's name for a symbol, cached for the process; None when
+    the universe is absent or does not know it (the app then shows the
+    symbol, never a placeholder)."""
+    if symbol in _name_cache:
+        return _name_cache[symbol]
+    conn = getattr(current_app, "universe_conn", None)
+    name = None
+    if conn is not None:
+        try:
+            row = conn.execute("SELECT name FROM assets WHERE symbol = ? LIMIT 1", (symbol,)).fetchone()
+            name = row[0] if row and row[0] else None
+        except Exception:
+            name = None
+    _name_cache[symbol] = name
+    return name
 
 
 def _encode_cursor(ts_utc: str, id_: str) -> str:
